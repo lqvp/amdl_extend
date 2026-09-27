@@ -917,21 +917,24 @@ def test_list_rejects_an_unknown_status(tmp_path):
 
 
 def test_list_has_no_top_level_filter_because_nothing_writes_a_parent_id(tmp_path):
-    """`parent_id` is in the schema and in the brief's `Job`, and nothing sets it yet.
+    """`parent_id` is in the schema and in the `Job` dataclass, and nothing sets it yet.
 
-    `create_batch`'s signature -- the brief's -- has no `parent_id`
-    parameter, so every row it writes is top level and `parent_id=None` has to mean "no
-    filter" rather than "top level only": `GET /api/jobs?parent=` is absent-means-no-
-    filter like every other query parameter. Asserted so the two readings cannot be swapped
-    by a later task, and so the day a row does carry a parent the filter is already the one
-    the API needs.
+    `create_batch`'s signature has no `parent_id` parameter, so every row it writes is top
+    level and `parent_id=None` has to mean "no filter" rather than "top level only":
+    `GET /api/jobs?parent=` is absent-means-no-filter like every other query parameter.
+    Asserted so the two readings cannot be swapped by a later change, and so the day a row
+    does carry a parent the filter is already the one the API needs.
 
-    **And there is no `parent_url` filter**, which is the point of the assertion: filtering a
-    batch by `parent_id` is impossible today, so a caller that needs "the jobs of *this*
-    request" has nothing to filter on and `list()` returning everything is the only answer it
-    has. The API handler needs `list(parent_url=...)`; it is not here, on purpose -- adding a
-    query parameter before the caller exists is how `parent_id` ended up in this signature in
-    the first place.
+    **The filter that answers "the jobs of *this* request" is `parent_url`, not `parent_id`,
+    and it exists.** `parent_id` cannot be filtered on while nothing writes it, so the
+    read-back is by URL instead. This docstring used to say the opposite -- that there was
+    no `parent_url` filter, that the handler needed one "on purpose", and that adding a
+    parameter before the caller existed was what put `parent_id` in this signature. That
+    stopped being true when the filter was added, and a docstring asserting a missing
+    feature is worse than no docstring. The filter, and the half that says `None` means no
+    filter there too, are covered by
+    `test_api_jobs.py::test_list_parent_url_is_a_filter_and_not_a_second_meaning_of_none`.
+    This test is for `parent_id`, which is still unwritten and still unfilterable.
     """
     store = JobStore(tmp_path / "hub.db")
     res = store.create_batch("u", "album", [leaf("1")], force=False)

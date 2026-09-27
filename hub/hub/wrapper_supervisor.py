@@ -32,9 +32,13 @@ host. That mapping is correct for `wrapper-lite-rootless` and for `wrapper-lite`
 7) and passes `--base-dir /data` *into the guest*, where the file would live in a
 namespace the host cannot see. A QEMU deployment therefore has to log in wrapper-side, and
 `submit_2fa` refuses with a message saying so rather than writing a file nobody will read.
-Note that `config.py`'s `DEFAULT_WRAPPER_BINARY` is still the QEMU launcher; the image's
-`AMD_WRAPPER_BINARY` is the rootless one, so that default is what needs to change, not
-this module.
+`config.py`'s `DEFAULT_WRAPPER_BINARY` is still the QEMU launcher, and deliberately so: it
+describes the upstream desktop deployment this hub sits alongside, where the QEMU backend is
+the right one. The image overrides it with `ENV AMD_WRAPPER_BINARY` rather than the default
+changing — changing the default would make it wrong for the case it actually describes — and
+`tests/test_deployment.py::test_the_wrapper_binary_is_a_rootfs_launcher_and_not_the_qemu_one`
+holds that override in place. So this module only ever sees a rootfs launcher in a deployment
+that runs, and does not depend on the default being right.
 
 **Credentials on argv are visible in `/proc/<pid>/cmdline` to any process of the same uid,
 for as long as the child lives.** That is a real exposure and the design does not get

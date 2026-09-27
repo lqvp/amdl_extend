@@ -44,19 +44,6 @@ re-read a snapshot. The broker deliberately does not make that choice, because i
 know whether the stream is a snapshot (where a dropped message costs nothing) or a log line
 (where it is the entire point), and it will not quietly hand over the stale frames on the
 way out.
-
-**Nothing is invented for a quiet channel.** A subscriber to a channel nothing has been
-published on waits, and is not handed an empty snapshot: a fabricated `{"kind": "snapshot",
-"jobs": []}` would be indistinguishable from a real one, and it would be a lie that looks like
-good news. The snapshot is the API layer's to publish, from a real `list()`.
-
-**Frames.** A message is one `data: <json>` line closed by a blank line, per the SSE grammar.
-That is only safe because `json.dumps` escapes every character that could end the line --
-`\n`, `\r` -- inside a string, and because `ensure_ascii=False` leaves a Japanese album name
-as itself rather than as `\\uXXXX`. A payload that broke that assumption would be delivered
-as two fields, one of which the client would drop, and the drop would look like a lost
-update. `test_a_frame_is_one_sse_data_field_whatever_the_payload_contains` holds the payloads
-that would break it.
 """
 
 from __future__ import annotations
