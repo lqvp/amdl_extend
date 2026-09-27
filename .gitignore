@@ -41,3 +41,7 @@ build/
 # --- superpowers SDD scratch (ledger, briefs, review packages) ---
 .superpowers/
 .kilo/
+
+# --- Agent scratch: ExternalScout research and opencode session state ---
+# Written by the agent while it works; not repo content.
+.tmp/
