@@ -5,7 +5,7 @@
 test can, because both are about *the mounts* rather than about the code:
 
 * the numbers the hub reports are the real library's numbers, and
-* a dedup decision over a real library shape comes out the way spec §7.6 says it should.
+* a dedup decision over a real library shape comes out the way the design says it should.
 
 It runs **inside** the container, against `/library` as the hub sees
 it, because "as the hub sees them" is the entire claim. A host-side run of the same code
@@ -50,7 +50,7 @@ def reconstructible(key: str) -> str | None:
     """The `track_title` to ask `find_duplicate` about `key` with, or None if there isn't one.
 
     `find_duplicate` normalises its `track_title` once, because the comparison basis is the
-    rendered *file name* rather than the tag (spec §7.5). The scan only kept the normalised
+    rendered *file name* rather than the tag. The scan only kept the normalised
     form (`AlbumDir.track_keys`), so the harness has to hand back a string that normalises
     **to** the key it wants to ask about.
 
@@ -119,7 +119,7 @@ def main() -> int:
     )
 
     # -- 2. a real title shared by two different albums is NOT skipped -------
-    # This is spec §7.6's accepted outcome and the one a "helpful" index would get wrong:
+    # This is the accepted outcome and the one a "helpful" index would get wrong:
     # a track title is not an identity. Grouping every track key in the library and finding
     # the ones that appear in more than one *album directory* gives the exact shape --
     # same title, different albums -- where skipping would be a lost download.
@@ -151,7 +151,7 @@ def main() -> int:
             in_own_album = hit is not None and album.relpath in hit.matched
             in_other_album = hit is not None and album.relpath not in hit.matched
             # Not a failure: `loose` deliberately treats a same-named album as one album,
-            # which is §7.4's accepted trade, and a collision between two *identically
+            # which is an accepted trade, and a collision between two *identically
             # named* albums is the case that trade is about. What must never happen is a
             # collision between albums with DIFFERENT names, where the answer would be a
             # lost download with no path for the user to adjudicate.
@@ -219,7 +219,7 @@ def main() -> int:
                 continue
             found += 1
             # `resolved` is the form `skip_reason` carries, and it has to resolve. A path
-            # that resolves under no root is not evidence, and §7.4's whole adjudication
+            # that resolves under no root is not evidence, and the whole adjudication
             # story depends on the user being able to open what they are shown.
             for path in hit.resolved:
                 if not Path(path).is_dir():
@@ -270,7 +270,7 @@ def main() -> int:
         f"than one root. `resolved` fixes both and is what skip_reason carries."
     )
 
-    # -- 4. the shapes spec §7.4 says the real library contains -------------
+    # -- 4. the shapes the design says the real library contains -------------
     # Reported rather than asserted, because whether they exist is a fact about this
     # library, not a property of the code. `strict` vs `loose` is only a meaningful choice
     # if the 種別 B shape is actually here, and it is the shape that decides the default.

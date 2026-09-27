@@ -1,4 +1,4 @@
-"""The deployment's invariants, as tests (task 10; spec §3, §11, §14).
+"""The deployment's invariants, as tests.
 
 **Why these are tests and not a review checklist.** Every one of them is a fact about the
 Dockerfile and the compose file that *looks* right and produces a wrong deployment with no
@@ -401,7 +401,7 @@ def test_the_deep_exclusions_are_written_with_a_leading_globstar():
 
 
 # --------------------------------------------------------------------------- #
-# The vendor-root derivation -- the one the plan got wrong
+# The vendor-root derivation -- the one an earlier layout got wrong
 # --------------------------------------------------------------------------- #
 def test_the_client_lands_where_parents_2_of_the_package_points():
     """`<package>/../../AppleMusicDecrypt` is where the client has to be, not /opt.
@@ -409,7 +409,7 @@ def test_the_client_lands_where_parents_2_of_the_package_points():
     `ripper_host._VENDOR_ROOT` and `app.vendor_config_path` both compute
     `Path(__file__).resolve().parents[2] / "AppleMusicDecrypt"`, so the location is
     *derived*, not configured -- there is no environment variable for it and no argument.
-    The plan's Step 1 says `COPY AppleMusicDecrypt /opt/AppleMusicDecrypt`; with the package
+    An earlier layout said `COPY AppleMusicDecrypt /opt/AppleMusicDecrypt`; with the package
     at `/app/hub/hub` that puts the client where the derivation will never look, and the
     failure is a `RipperHostError` naming a path that exists and is not the one it wanted,
     at every boot, after a build that reported success.
@@ -450,7 +450,7 @@ def test_pythonpath_is_the_directory_that_contains_the_package():
 
         PYTHONPATH   CWD         hub.__path__             result
         /app/hub     /app/hub    ['/app/hub/hub']         regular
-        /app         /app/hub    ['/app/hub/hub']         regular   <- the plan's value
+        /app         /app/hub    ['/app/hub/hub']         regular   <- rejected
         (unset)      /app/hub    ['/app/hub/hub']         regular
         /app/hub     /           ['/app/hub/hub']         regular
         /app         /           ['/app/hub']             NAMESPACE
@@ -870,8 +870,8 @@ def test_the_wrapper_binary_is_a_rootfs_launcher_and_not_the_qemu_one():
 def test_no_apple_credentials_are_baked_into_the_image_or_the_compose_file():
     """Apple credentials reach the wrapper on a child process's argv, and nowhere else.
 
-    spec §11 records that as a *deliberate* exposure -- argv is the binary's only input --
-    and bounds it by the topology: one service process, one uid, in one container. That
+    That is a *deliberate* exposure -- argv is the binary's only input -- and it is
+    bounded by the topology: one service process, one uid, in one container. That
     argument only holds if nothing else put a credential where `docker inspect` or
     `docker history` would show it, so the image and the compose file have to be clean.
 
@@ -912,8 +912,8 @@ def test_the_container_runs_as_root_because_the_uid_map_requires_it():
     The launcher `unshare(CLONE_NEWUSER)`s with a single-uid map -- `0 0 1`,
     `wrapper-lite-rootless.c:49` -- *before* it touches the filesystem. A map of one uid
     leaves every file owned by any other uid unmapped, so a rootfs owned by uid 1000 is
-    unwritable to the child even under `CAP_DAC_OVERRIDE` (spike §5.1 F2, reproduced in
-    review: `open ./rootfs/dev/urandom failed: Permission denied`).
+    unwritable to the child even under `CAP_DAC_OVERRIDE`. The observed failure is
+    `open ./rootfs/dev/urandom failed: Permission denied`.
 
     The rootfs is root-owned in the image because it is `COPY`ed rather than bind-mounted, so
     the container has to run as root to match. Setting `user:` to anything else produces
@@ -922,15 +922,14 @@ def test_the_container_runs_as_root_because_the_uid_map_requires_it():
 
     The trade is stated rather than hidden: root inside an unprivileged container is not
     `privileged`, and the capability set is still Docker's default. It is the price of the
-    rootfs launcher, and the alternative is not a `user:` line but §3.1's two-container
+    rootfs launcher, and the alternative is not a `user:` line but a two-container
     topology.
     """
     for compose_path in (COMPOSE,):
         service = _service(_compose(compose_path))
         assert "user" not in service, (
             f"{compose_path.name} sets `user:`, which breaks the launcher's single-uid map: "
-            f"the rootfs is root-owned in the image and would become unmapped and unwritable "
-            f"(spike §5.1 F2)"
+            f"the rootfs is root-owned in the image and would become unmapped and unwritable"
         )
 
 
@@ -972,7 +971,7 @@ def test_every_rewritten_config_value_is_asserted_after_it_is_rewritten():
 
 
 def test_both_security_opts_are_present_and_no_capability_is_added():
-    """The measured answer, not a preference (spike §1's verdict table; spec §14.1).
+    """The measured answer, not a preference.
 
         seccomp only                -> mount proc failed: EPERM   FAILS
         systempaths only            -> unshare: EPERM             FAILS
@@ -988,18 +987,18 @@ def test_both_security_opts_are_present_and_no_capability_is_added():
     assert "seccomp:unconfined" in opts, f"the launcher cannot unshare without it: {opts}"
     assert "systempaths=unconfined" in opts, (
         f"systempaths=unconfined is not optional: Docker over-mounts 12 paths under /proc and "
-        f"the kernel refuses the launcher's own procfs mount (spike §5.2, spec §14.1). {opts}"
+        f"the kernel refuses the launcher's own procfs mount. {opts}"
     )
     assert "cap_add" not in service, (
         "cap_add was proven useless against this failure and increases the attack surface "
-        "for nothing (spike §5.5)"
+        "for nothing"
     )
-    assert service.get("privileged") is not True, "spec §14 needs no privileged container"
+    assert service.get("privileged") is not True, "the launcher needs no privileged container"
     assert "network_mode" not in service, (
         "the launcher does not unshare a network namespace, so `host` would put its bind on "
         "the host's loopback -- where the operator's own wrapper QEMU already listens, and "
         "where a failed bind makes the payload signal itself in a way that reads like an "
-        "external kill (spike §6.5)"
+        "external kill"
     )
 
 

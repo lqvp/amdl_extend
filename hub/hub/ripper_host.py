@@ -107,11 +107,11 @@ _global_wrapper_closed = False
 # both believe they own it: the second would capture the vendor root as its "where
 # I found the process", and the first `close()` would then restore the caller's
 # directory out from under the second, whose own `close()` would put the process
-# into `AppleMusicDecrypt/` and leave it there. That was reachable, and it is the
-# one way this module could strand the process in the vendor tree with no route
-# back, so `start()` refuses a concurrent second host instead. Task 8/9's contract
-# is one host per process anyway; this makes that contract enforced rather than
-# assumed, and keeps the comment above honest.
+# into `AppleMusicDecrypt/` and leave it there. That was reachable, and it is the one
+# way this module could strand the process in the vendor tree with no route back, so
+# `start()` refuses a concurrent second host instead. The hub's own contract is one host
+# per process anyway; this makes that contract enforced rather than assumed, and keeps
+# the comment above honest.
 _active_host = None
 
 # The creart-resolved `WrapperClient`, kept so `close()` can tell "the process-global
@@ -231,7 +231,7 @@ def _ensure_vendor_on_path(root: Path) -> None:
         sys.path.insert(0, entry)
 
 
-# Task 8's `parse_apple_music_url` used to live here. It moved to `hub/vendor.py`,
+# The resolver's `parse_apple_music_url` used to live here. It moved to `hub/vendor.py`,
 # because this module is a process-lifecycle class -- it holds the working directory
 # and runs subprocesses -- and it does not own pure URL parsing. `vendor.py` is the
 # second of the two files allowed to import the upstream tree, and it is the narrower
@@ -372,10 +372,10 @@ class RipperHost:
         self._ripper = None
         self._mv_ripper = None
         self._wrapper = None
-        # The two things Task 9 needs from the *client* rather than from hub config: the
-        # catalogue client its resolver is written against, and the language the client's own
-        # `config.toml` asks for. Both would otherwise have to be invented on the hub side,
-        # and a hub-side constant that disagrees with `region.language` is a hub that
+        # The two things the API layer needs from the *client* rather than from hub config:
+        # the catalogue client its resolver is written against, and the language the client's
+        # own `config.toml` asks for. Both would otherwise have to be invented on the hub
+        # side, and a hub-side constant that disagrees with `region.language` is a hub that
         # silently requests the wrong storefront language.
         self._web_api = None
         # Not tracked per instance: see `_global_wrapper_closed`, which is module
@@ -390,10 +390,11 @@ class RipperHost:
         """The upstream ``WebAPI`` instance, or `None` before `start()`.
 
         `hub.resolver.expand` takes a `web_api` by injection precisely so it never
-        constructs one (and so it stays off the network under test). Task 9 therefore needs
-        the client the seam already built rather than a second copy of it -- constructing a
-        second one here would be a second `httpx` client, a second set of retry decorators
-        and a second source of truth for which storefront credentials are in play.
+        constructs one (and so it stays off the network under test). The API layer
+        therefore needs the client the seam already built rather than a second copy of it
+        -- constructing a second one here would be a second `httpx` client, a second set of
+        retry decorators and a second source of truth for which storefront credentials are
+        in play.
 
         `None` rather than raising, because "the client is not up yet" is a state the hub
         routes around (the API answers 503 and the UI retries) and not an error to report.
@@ -546,9 +547,8 @@ class RipperHost:
         something still in use, and only it knows whether to wait or cancel.
 
         A caller that genuinely wants the teardown to proceed awaits the
-        outstanding `run_song` / `run_music_video` first. That is what Task 8/9's
-        shutdown path has to do, and it is the one piece of ordering this API
-        cannot do on its own.
+        outstanding `run_song` / `run_music_video` first. That is what the hub's shutdown
+        path has to do, and it is the one piece of ordering this API cannot do on its own.
 
         The wrapper client is creart's process-global instance, so closing it is
         correct rather than merely tidy -- it owns an `httpx.AsyncClient` and
@@ -646,7 +646,7 @@ class RipperHost:
         row is the report and a raised exception would take down the caller. For the hub it
         means `await rip_song(...)` returning normally says *nothing* about whether a file was
         written, and a caller that treats a return as success marks every failed download
-        `done`. That is not hypothetical: `spike/task9_contract_check.py` hit it, and the
+        `done`. That is not hypothetical: it was hit against the real client, and the
         queue said `done` for a track whose only error was a `ValidationError` from the
         catalogue.
 
@@ -657,7 +657,7 @@ class RipperHost:
         `ALREADY_EXIST`, which is a *success* by another name and must not become an error.
 
         `force` is upstream's `Flags.force_save`, i.e. "re-download even though a file for
-        this metadata already exists". The hub decides it per leaf (§7.3), at execution time,
+        this metadata already exists". The hub decides it per leaf, at execution time,
         and it is not part of the queue's dedup key.
 
         No `parent_done` is passed, and deliberately: `rip_song` calls it purely to release a
@@ -711,7 +711,7 @@ class RipperHost:
 
         `task is None` means the task was never registered -- which upstream also treats as a
         non-event, since `rip_song` returns early for an `adam_id` already in flight. So the
-        honest answer is "I did not see it fail", and the hub's §7.3 dedup check, which runs
+        honest answer is "I did not see it fail", and the hub's dedup check, which runs
         *before* this, is what catches a track that is already on disk.
 
         `ALREADY_EXIST` is a success, and that is the case where guessing wrong is worst: it is
@@ -750,9 +750,10 @@ class RipperHost:
         `MVRipper.rip` goes straight from the manifest to the HLS fetch, so it
         re-downloads unconditionally and `force_save=False` cannot make it skip.
 
-        The parameter is kept rather than dropped because the brief pins this
-        signature and Task 8/9 are written against it. A caller must therefore
-        **not** rely on `force=False` to avoid a music-video re-download -- there
+        The parameter is kept rather than dropped because upstream's own `MVRipper.rip`
+        signature is not ours to change and the callers are written against it. A caller
+        must therefore **not** rely on `force=False` to avoid a music-video re-download --
+        there
         is no "don't re-download" behaviour to ask for on this path.
         `test_run_music_video_ignores_force` pins that, against upstream's own
         signature, so the two `force` behaviours cannot drift together.
@@ -854,12 +855,12 @@ class RipperHost:
         So the queue's progress column is simply blank for a video, from start to end, and
         `hub/web/templates/job_row.html` renders that as "no progress" rather than as a bar
         at zero. The two sibling gaps on the same path are in `run_music_video` and
-        `_raise_unless_finished`'s sibling: MVs are never deduplicated (§2's non-goal, since
-        they live in one flat `mv.saveDir` with no album scope to compare), and `force` is
-        inert for them because `Flags.force_save` is not read on the Widevine path. Closing
-        the progress gap means reading something out of `MVRipper`, which is an upstream
-        change and not a hub one; it is recorded here rather than in the report alone so it
-        is found by whoever reads this method next.
+        `_raise_unless_finished`'s sibling: MVs are never deduplicated (a deliberate
+        non-goal, since they live in one flat `mv.saveDir` with no album scope to compare),
+        and `force` is inert for them because `Flags.force_save` is not read on the Widevine
+        path. Closing the progress gap means reading something out of `MVRipper`, which is
+        an upstream change and not a hub one; it is recorded here rather than in the report
+        alone so it is found by whoever reads this method next.
         """
         ripper = self._ripper
         manager = getattr(ripper, "download_manager", None)
@@ -882,7 +883,7 @@ class RipperHost:
     def render_song_filename(self, leaf: Leaf, *, track_number: int = 1) -> str:
         """The file name `rip_song` would write for `leaf`, extension included.
 
-        **This is the value §7.3's duplicate check must be given, and `leaf.title` is
+        **This is the value the duplicate check must be given, and `leaf.title` is
         not.** `normalize` is not idempotent: it strips up to two leading numeric groups, so
         ``1-01 1 a.m. (feat. …).m4a`` keys to ``1 a.m. (feat. …)`` and normalizing *that*
         again drops the leading ``1 ``. Six of the 8,721 real library keys are not fixed
@@ -904,7 +905,7 @@ class RipperHost:
         reason the boundary has an answer instead of a workaround.
 
         `track_number` is the one input the hub cannot know. `rip_song` reads it from the
-        catalogue; a `Leaf` has no track number (spec §6's `job` table has no column for one,
+        catalogue; a `Leaf` has no track number (the `job` table has no column for one,
         and `title` is documented "log display only"), so it defaults to 1. That is not a
         guess about the *title*: the default `songNameFormat` is ``{disk}-{tracknum:02d}
         {title}``, and `normalize` folds that numeric prefix away, so the rendered key is the
@@ -925,7 +926,7 @@ class RipperHost:
         # `album_artist` is not on a `Leaf`, and the default `dirPathFormat` interpolates it.
         # `artist_name` is what the resolver read off `attributes.artistName` -- the same
         # field `SongMetadata.parse_from_song_data` puts in `artist` -- so it is the closest
-        # honest value, and the *directory* half is not used here at all: §7.5's comparison
+        # honest value, and the *directory* half is not used here at all: the comparison
         # basis is the file name on one side and the album directory name on the other, and
         # the directory this render produces is never compared.
         metadata = SongMetadata(

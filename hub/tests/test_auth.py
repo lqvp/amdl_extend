@@ -1,11 +1,11 @@
-"""Authentication: one password, one signed cookie, one rate limit (spec §11).
+"""Authentication: one password, one signed cookie, one rate limit.
 
-`auth.py` is the only thing standing between the LAN and every endpoint in §9, so these
-tests are about the *properties* §11 asks for rather than about a code path: a constant-time
-comparison, a bounded number of attempts per address, and a cookie that cannot be forged or
-read from script.
+`auth.py` is the only thing standing between the LAN and every authenticated endpoint, so
+these tests are about the *properties* it is required to have rather than about a code
+path: a constant-time comparison, a bounded number of attempts per address, and a cookie
+that cannot be forged or read from script.
 
-Two of them are the brief's own, verbatim, because they are the two that would be silently
+Two of them came first, verbatim, because they are the two that would be silently
 "satisfied" by a wrong implementation: `==` passes `test_password_compared_in_constant_time`
 if the test only checked the answer, and a limiter that counts per *process* instead of per
 *IP* passes `test_rate_limit_blocks_after_ten_attempts` for a single address.
@@ -78,7 +78,7 @@ def test_rate_limit_blocks_after_ten_attempts():
 def test_the_limit_is_per_address():
     """Ten failures from one machine must not lock out the rest of the LAN.
 
-    The default bind is `0.0.0.0` (spec §11), so the hub is shared: a laptop that fat-fingers
+    The default bind is `0.0.0.0`, so the hub is shared: a laptop that fat-fingers
     its password ten times would otherwise lock out the phone on the same wifi for five
     minutes. A single global counter is the shape this test exists to forbid.
     """
@@ -101,7 +101,7 @@ def test_the_window_slides_rather_than_latching():
 
     A latching counter needs an out-of-band reset, and the only reset a browser has is
     restarting the hub. Five minutes after the last mistake the user should be able to try
-    again -- that is the interval spec §11 names.
+    again -- that is the interval the limit is defined over.
     """
     now = [1_000.0]
     store = auth.SessionStore(secret=SECRET, max_attempts=3, window=300.0, clock=lambda: now[0])
@@ -391,8 +391,9 @@ def test_the_cookie_is_secure_only_under_tls():
     """`Secure` is set from the request, not from config.
 
     A hardcoded `Secure` would make the cookie undeliverable over plain HTTP -- the LAN
-    deployment spec §14 describes -- and a hardcoded *absence* of it would hand the session
-    to anyone on a coffee-shop wifi. So the attribute follows what the request actually was.
+    deployment the image is built for -- and a hardcoded *absence* of it would hand the
+    session to anyone on a coffee-shop wifi. So the attribute follows what the request
+    actually was.
     """
     assert auth.is_tls_request(_Request("https")) is True
     assert auth.is_tls_request(_Request("http")) is False

@@ -1,4 +1,4 @@
-"""Album-scoped title matching for download dedup (spec §7.3 Steps 2–3, §7.4, §7.6).
+"""Album-scoped title matching for download dedup.
 
 The whole point of this module is the *scope*. The real library holds `intro`,
 `escapism`, `mu` and `yoake` in six different albums each, and a normalized title is
@@ -8,9 +8,9 @@ can tell "scoped to the album" from "matched the title somewhere in the library"
 empty-key tests are the other half: a key with no identifying information must never
 produce a skip, because "" equals every other "".
 
-**Three assertions in the Task 4 brief contradicted the fixtures they were given, and are
-corrected here.** Each is noted at its test. In every case the brief's own comment or
-intent was right and only its `assert` line was inverted:
+**Three assertions written for this contradicted the fixtures they were given, and are
+corrected here.** Each is noted at its test. In every case the stated intent was
+right and only its `assert` line was inverted:
 `test_a_hit_is_confined_to_the_album_that_was_asked_for` (asked for `None` from an album
 that does hold the track), `test_format_bucket_prefix_does_not_matter` (asked for the
 *other* copy's relpath under a lookup for the first copy's track), and
@@ -18,7 +18,7 @@ that does hold the track), `test_format_bucket_prefix_does_not_matter` (asked fo
 which is precisely the suffix-stripping bug the test exists to catch).
 
 A fourth, `test_refuses_to_skip_on_an_empty_album_name`, asserted `"" in by_name` for
-`make_library_extra` while the plan's own conftest line adding `extra/・・・` had not been
+`make_library_extra` while the conftest fixture line adding `extra/・・・` had not been
 landed. The fixture entry is added here rather than the assertion moved, so the test now
 covers both real spellings of the shape: `a/!_` as the library has it, `extra/・・・` as a
 download would carry it.
@@ -70,9 +70,9 @@ def test_strict_scope_requires_artist(make_library):
 
 
 def test_strict_scope_answers_only_one_of_the_collab_placements(make_library):
-    # The other half of §7.4, stated as a number because it is the reason `strict` is not
-    # the default: it finds 種別 A and systematically misses 種別 B, so every collab after
-    # the first credited artist gets downloaded again.
+    # The other half of the `strict` case, stated as a number because it is the reason
+    # `strict` is not the default: it finds 種別 A and systematically misses 種別 B, so every
+    # collab after the first credited artist gets downloaded again.
     scan = scan_roots(make_library)
     loose = find_duplicate(scan, album_name="らぶふぉーゆー - Single", track_title="t",
                            artist_name="EmoCosine", artist_scope="loose")
@@ -115,7 +115,7 @@ def test_strict_scope_refuses_an_artist_name_with_no_identifying_information():
     # `normalize` answers "" for a name with no alphanumeric character, and "" == "" -- so
     # a strict lookup carrying such an artist would match *every* candidate whose artist
     # directory is equally unusable, which is a false skip rather than the re-download the
-    # refusal costs. §7.3 Step 2c has no "cannot decide" branch of its own, so the refusal
+    # refusal costs. This function has no "cannot decide" branch of its own, so the refusal
     # lives here.
     #
     # The candidate is built by hand rather than added to the fixture: the real library has
@@ -173,12 +173,12 @@ def test_strict_scope_refuses_when_the_artist_is_unknown(make_library):
 
 
 def test_a_hit_is_confined_to_the_album_that_was_asked_for(make_library):
-    # 'intro' exists in 6 albums in the real library; this is the core requirement
-    # (§7.2.1, §7.6). Each of the three fixture albums really does hold "intro", so the
+    # 'intro' exists in 6 albums in the real library; this is the core requirement.
+    # Each of the three fixture albums really does hold "intro", so the
     # claim is that a hit names *that* album and never a sibling sharing the title -- not
-    # that the answer is None. (The brief asserted None here, which no correct
+    # that the answer is None. (An earlier version asserted None here, which no correct
     # implementation can satisfy: the album looked up is the album holding the track.
-    # Asserting None would have pinned the opposite of §7.6's first row.)
+    # Asserting None would have pinned the opposite of the requirement.)
     scan = scan_roots(make_library)
     for album in ("Album One", "Album Two", "Album Three"):
         hit = find_duplicate(scan, album_name=album, track_title="intro",
@@ -195,7 +195,7 @@ def test_a_hit_is_confined_to_the_album_that_was_asked_for(make_library):
 def test_the_global_answer_is_wider_than_the_scoped_one(make_library):
     # The contrast the scoping exists to draw, asserted rather than left in a comment: a
     # title search over the whole library is what `intro` would wrongly produce, and it is
-    # 3x the scoped answer here and 6x in the real library (§7.2.1).
+    # 3x the scoped answer here and 6x in the real library.
     scan = scan_roots(make_library)
     assert sorted(a.relpath for a in scan.albums if "intro" in a.track_keys) == [
         "a/Album One",
@@ -205,11 +205,12 @@ def test_the_global_answer_is_wider_than_the_scoped_one(make_library):
 
 
 def test_format_bucket_prefix_does_not_matter(make_library):
-    # The same artist/album filed twice, once under the ALAC bucket and once not
-    # (§12.1). Discovery is by album basename, so the bucket cannot change which
+    # The same artist/album filed twice, once under the ALAC bucket and once not.
+    # Discovery is by album basename, so the bucket cannot change which
     # directories are in scope. Each copy holds a *different* track though -- `x` in the
     # bucketed one, `y` in the plain one -- so a lookup for one title sees exactly one
-    # copy. (The brief asked for "a/TEMPLIME/POP-AID" from a lookup for "x", which is the
+    # copy. (An earlier version asked for "a/TEMPLIME/POP-AID" from a lookup for "x", which
+    # is the
     # *other* copy's track; that assertion could only pass if the bucket prefix were
     # ignored when matching titles, which is the opposite of the test's name.)
     scan = scan_roots(make_library)
@@ -229,7 +230,7 @@ def test_format_bucket_prefix_does_not_matter(make_library):
 
 
 def test_album_name_keeps_single_suffix_and_deluxe(make_library_extra):
-    # spec §7.5: " - Single", " [Deluxe]" and a leading number are all part of album
+    # " - Single", " [Deluxe]" and a leading number are all part of album
     # identity. Every exact name is found ...
     scan = scan_roots(make_library_extra)
     for name in ("4pi", "1st EP", "4 - Leaves", "Song - Single", "Album [Deluxe]"):
@@ -269,9 +270,9 @@ def test_refuses_to_skip_on_an_empty_album_name(make_library_extra, make_library
 
 
 def test_refuses_to_skip_on_an_empty_title(make_library):
-    # Review Focus #2 — must not treat "" as matching every untitled track. "Album Four"
+    # Must not treat "" as matching every untitled track. "Album Four"
     # holds "..m4a" and "01 ..m4a", both of which normalize to "", and the real library
-    # holds 6 such tracks spread over different albums (§7.2.1), so a "" title would
+    # holds 6 such tracks spread over different albums, so a "" title would
     # otherwise skip against any of them.
     scan = scan_roots(make_library)
     assert scan.by_name["album four"][0].track_keys == frozenset({""})
@@ -293,7 +294,7 @@ def test_unknown_album_returns_none(make_library):
 def test_hit_paths_are_sorted_for_stable_display(make_library):
     # `os.walk` order is filesystem-dependent and NTFS does not sort, so two scans of one
     # unchanged tree have to produce one answer, and these strings reach the user through
-    # `skip_reason` (§7.4).
+    # `skip_reason`.
     # NOTE this test cannot catch a missing `sorted()`. On this tree `os.walk` with
     # `dirnames.sort()` already yields `a/...` before `b/...`, so the natural candidate
     # order is already sorted and the assertion holds with and without the call. The mutant
@@ -342,7 +343,7 @@ def test_matched_is_sorted_even_when_the_scan_order_is_not():
 
 
 def test_artist_scope_defaults_to_loose(make_library):
-    # §7.4's default, pinned so it cannot be flipped without a failing test. `loose` is the
+    # The default, pinned so it cannot be flipped without a failing test. `loose` is the
     # default because it catches 種別 A *and* 種別 B; `strict` misses every collab after the
     # first credited artist, which is most of the 223 duplicated album names.
     scan = scan_roots(make_library)
@@ -369,9 +370,9 @@ def test_an_unknown_artist_scope_is_rejected(make_library):
 
 def test_find_duplicate_never_touches_the_filesystem():
     # The scan is hand-built over a root that does not exist, so nothing here can have been
-    # satisfied by reading a disk. This is the property Task 9 relies on when it takes one
-    # scan per request and calls this once per track, and it is what lets the match be
-    # exercised with values no fixture on disk could produce.
+    # satisfied by reading a disk. This is the property the scheduler relies on when it
+    # takes one scan per request and calls this once per track, and it is what lets the
+    # match be exercised with values no fixture on disk could produce.
     album = AlbumDir(root_index=0, relpath="artist/album", name="Album",
                      artist="Artist", track_keys=frozenset({"track"}))
     scan = LibraryScan(
@@ -381,7 +382,7 @@ def test_find_duplicate_never_touches_the_filesystem():
         by_name=MappingProxyType({"album": (album,)}),
     )
     # A rendered download filename, not a tag: the extension and the track number are
-    # stripped here, while the album side keeps its own name verbatim (§7.5).
+    # stripped here, while the album side keeps its own name verbatim.
     hit = find_duplicate(scan, album_name="Album", track_title="1-01 Track.m4a",
                          artist_name="Artist")
     # Both forms, because both are part of the answer now. `matched` is the bare relpath and
@@ -398,7 +399,7 @@ def test_find_duplicate_never_touches_the_filesystem():
 def test_resolved_is_sorted_so_two_scans_of_one_tree_give_one_string(tmp_path):
     """Sorting is load-bearing for `skip_reason` and nothing else enforces it.
 
-    `os.walk` order is filesystem-dependent -- NTFS does not sort at all (spec §8) -- and
+    `os.walk` order is filesystem-dependent -- NTFS does not sort at all -- and
     `skip_reason` is a *string* that is stored, compared in tests, and shown to a user. Two
     scans of one unchanged tree have to produce the same string, which means the sort cannot
     be dropped.
@@ -470,8 +471,9 @@ def test_resolved_may_not_be_defaulted_away():
 
 
 def test_find_duplicate_is_cheap_enough_to_call_per_track(make_library):
-    # The cost guard for *this* function, which the brief did not have. §7.1.1 settles
-    # that a scan per request is affordable, and `scan_roots` has its own budget in
+    # The cost guard for *this* function. The measurement that settles
+    # that a scan per request is affordable is in `library_scan`'s module docstring, and
+    # `scan_roots` has its own budget in
     # `test_library_scan.py`; `find_duplicate` is called once per leaf track on top of that
     # scan and had no bound, so nothing would have complained if it started doing real work.
     #
@@ -551,7 +553,7 @@ def test_resolved_paths_name_a_directory_that_exists_under_each_root(tmp_path):
     root, so one album name filed under both roots produces two matched entries -- and the
     bare relpaths of `matched` each resolve under *one* root and not the other. On the real
     two-root library every single sampled hit was like this (493 of 493), which is what makes
-    it worth a field rather than a note: §7.4 promises the user can adjudicate a `loose`
+    it worth a field rather than a note: the user is promised they can adjudicate a `loose`
     skip by opening the paths, and there was nothing to open.
 
     The assertion is about the filesystem, not about the string: every entry in `resolved`

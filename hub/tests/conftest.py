@@ -3,10 +3,10 @@
 `from hub... import ...` resolves because `pyproject.toml` sets
 `[tool.pytest.ini_options] pythonpath = ["."]` and rootdir is the project root.
 
-The library trees below are the **regression fixtures of spec §12.1**: every shape in
+The library trees below are the **regression fixtures**: every shape in
 them was observed in the real 341 GB external library, so the numbers the design rests
 on (`intro` in 6 albums, 160 `.part` files, 223 duplicated album-dir names) only stay
-true if the scanner keeps reproducing these shapes. `tests/test_dedup.py` (Task 4)
+true if the scanner keeps reproducing these shapes. `tests/test_dedup.py`
 depends on the same two trees, so they live here rather than in one test module.
 
 A few entries are **contract probes** rather than claims about the library: they pin
@@ -47,7 +47,7 @@ import pytest
 def _touch(path: Path) -> Path:
     """Create an empty file and its parents.
 
-    Contents are irrelevant: the scan is `stat`-only and never reads a tag (§7.1.1), so
+    Contents are irrelevant: the scan is `stat`-only and never reads a tag, so
     a zero-byte file exercises exactly the same code path as a real 30 MB `.m4a` and
     keeps the suite fast.
     """
@@ -58,7 +58,7 @@ def _touch(path: Path) -> Path:
 
 @pytest.fixture
 def make_library(tmp_path: Path) -> Path:
-    """The §12.1 regression tree, rooted at `tmp_path / "lib"`.
+    """The regression tree, rooted at `tmp_path / "lib"`.
 
     The root is the directory that holds the two library shapes, so relpaths are
     `a/...`, `b/...`, `Nyarons/...` and no assertion has to know where pytest put
@@ -67,7 +67,7 @@ def make_library(tmp_path: Path) -> Path:
     and multi-root tests need.
 
     Note `Nyarons` sits at the top of the tree rather than under `a/`: the real
-    observation is `Music/Nyarons/A.flac` (§12.1, "artist 直下の散在ファイル"), i.e. an
+    observation is `Music/Nyarons/A.flac` ("artist 直下の散在ファイル"), i.e. an
     artist directory *at the root of the library*, and that placement is what makes its
     artist genuinely undeterminable. Under `a/` the parent would be a grouping
     directory and `artist` would be a guess.
@@ -91,7 +91,7 @@ def make_library(tmp_path: Path) -> Path:
     # -- a subdirectory sharing a parent with a loose audio file ----------------------
     _touch(root / "a/TEMPLIME/Escapism/t.m4a")
     _touch(root / "a/TEMPLIME/HIKO.flac")
-    # -- unusable titles: empty, and a bare track number (Review Focus #2) -----------
+    # -- unusable titles: empty, and a bare track number ---------------------------
     _touch(root / "a/Album Four/..m4a")
     _touch(root / "a/Album Four/01 ..m4a")
     # -- an interrupted download must not count as an existing track ------------------
@@ -126,7 +126,7 @@ def make_library(tmp_path: Path) -> Path:
     #
     # The nested album is named "CD 1", not "a", on purpose. Naming it after its own
     # parent would make `by_name` group a directory with its own child -- a shape no real
-    # library produces, and Task 4 groups by album name, so it would inherit a duplicate
+    # library produces, and `dedup.py` groups by album name, so it would inherit a duplicate
     # group that cannot occur in the user's data. Sharing the track key "x" between the
     # two is the *real* shape instead: the same title in two different albums, which is
     # what `intro` does six times over.
@@ -148,15 +148,15 @@ def make_library_extra(tmp_path: Path) -> Path:
     """The album-name-identity tree, rooted at the same `tmp_path / "lib"`.
 
     Split out from `make_library` because album *identity* cannot be expressed there:
-    every album name in the §12.1 tree is free of leading digits, but the real library
-    has albums called `4pi` and `1st EP`, and §7.5 step 4 requires that a directory
+    every album name in the `make_library` tree is free of leading digits, but the real
+    library has albums called `4pi` and `1st EP`, and it requires that a directory
     name keeps its number while a track filename loses it. That is exactly what
     `normalize(..., strip_track_prefix=False)` exists for, and it is the one flag in the
-    project where a mismatch is silent and total: Task 4 looks albums up with the flag
+    project where a mismatch is silent and total: `dedup.py` looks albums up with the flag
     off, so an index built with the flag on makes *every* lookup miss and nothing is
     ever skipped.
 
-    ` - Single` and ` [Deluxe]` are here because §7.5 lists them as must-keep parts of
+    ` - Single` and ` [Deluxe]` are here because both are must-keep parts of
     an album name; both are two words wide, so a stray `.rstrip(" -[]")` in a later task
     would show up here immediately.
     """
@@ -164,7 +164,7 @@ def make_library_extra(tmp_path: Path) -> Path:
     # A 1-to-3 digit number that a separator follows. This is the *only* shape on which
     # strip_track_prefix makes a difference, so it is the only one that can tell the flag
     # apart. The two shapes that look like they would work do not: "4pi" and "1st EP" have
-    # no separator, and a 4-digit year is out of `\d{1,3}`'s reach by design (§7.5), so
+    # no separator, and a 4-digit year is out of `\d{1,3}`'s reach by design, so
     # all three produce the same key under either flag and would pass with it wrong.
     # "4 - Leaves" is the shape of a real numbered series (Gesu no Kiwami Otome's
     # "1 - LIAR", "2 - Polaris", ...).
@@ -178,7 +178,7 @@ def make_library_extra(tmp_path: Path) -> Path:
     # has `ALAC/薄塩指数/!_` -- the library side of the comparison, and the one that made
     # `by_name[""]` reachable at all. This one is the *download* side: the name an album
     # would have to be given for the lookup to land on that key. Both halves are the
-    # observed shape, the real library contains both, and Task 4's job is to refuse the
+    # observed shape, the real library contains both, and `dedup.py`'s job is to refuse the
     # lookup for either. It belongs in this tree rather than only under `a/` so that the
     # album-identity fixture can answer `"" in by_name` on its own.
     _touch(root / "extra/・・・/t.m4a")

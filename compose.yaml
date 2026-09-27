@@ -1,4 +1,4 @@
-# amd-hub -- the whole thing is one service (spec §3.1, §14; task 10 of the phase-1 plan).
+# amd-hub -- the whole thing is one service.
 #
 #   cp .env.example .env      # then put AMD_PASSWORD in it
 #   docker compose up -d --build
@@ -37,7 +37,7 @@ services:
 
     # 8080 only. The wrapper's 12340 is deliberately NOT published: it is an unauthenticated
     # HTTP API that serves decrypted audio, so reaching it from the LAN would be a data leak
-    # rather than a feature (spec §11). It is bound to 127.0.0.1 inside the container, which
+    # rather than a feature. It is bound to 127.0.0.1 inside the container, which
     # is a different loopback from the host's.
     ports:
       - "${AMD_HTTP_PORT:-8080}:8080"
@@ -47,7 +47,7 @@ services:
     # CLONE_NEWNET), so it binds in whatever netns it inherited. On the host that is the whole
     # loopback -- which is already occupied by the operator's own wrapper QEMU instance on
     # 127.0.0.1:12340, and a failed bind makes the payload signal *itself*, producing a log
-    # line identical to an external kill (spike §6.5). The default bridge network gives the
+    # line identical to an external kill. The default bridge network gives the
     # container its own netns, which closes that whole class of collision.
     #
     # The corollary is that `ports:` above is a one-way door for the wrapper: anything that
@@ -56,7 +56,7 @@ services:
     # No `user:`, and that is load-bearing too. The launcher unshare(CLONE_NEWUSER)s with a
     # single-uid map ("0 0 1") before it touches the filesystem, which leaves any file owned
     # by another uid unmapped; a rootfs owned by uid 1000 is unwritable to the child even
-    # under CAP_DAC_OVERRIDE (spike §5.1 F2). The image COPYs the rootfs so it is root-owned,
+    # under CAP_DAC_OVERRIDE. The image COPYs the rootfs so it is root-owned,
     # and the container therefore has to run as root to match. Running as root inside an
     # unprivileged container is not the same thing as `privileged`, and the capabilities
     # below are still the docker defaults.
@@ -69,7 +69,7 @@ services:
       #   seccomp + systempaths        -> works
       #   seccomp + cap_add SYS_ADMIN  -> mount proc failed: EPERM   FAILS
       #
-      # (spike §1 verdict table; spec §14.1.) Docker over-mounts 12 paths under /proc, and the
+      # Docker over-mounts 12 paths under /proc, and the
       # launcher mounts its own procfs inside its user namespace; the kernel's
       # mount_too_revealing() check refuses because of the hidden existing mounts. It is a
       # visibility judgement, not a privilege one, which is why cap_add cannot fix it -- and
@@ -86,7 +86,7 @@ services:
       # /proc/kcore is NOT a live leak here: CapEff has no CAP_SYS_RAWIO, so reads return
       # EPERM. The risk is conditional on that capability being added later.
       #
-      # What it is traded against, per spec §14.1: not `privileged`, no added capabilities,
+      # What it is traded against: not `privileged`, no added capabilities,
       # and exactly one published port. If you need stronger isolation than that, the fallback
       # is §3.1's two-container topology, not a bigger security_opt list.
       - systempaths=unconfined
@@ -123,7 +123,7 @@ services:
         bind:
           create_host_path: false
 
-      # The hub's own state: hub.db, the only thing the hub persists (spec §6). A named
+      # The hub's own state: hub.db, the only thing the hub persists. A named
       # volume, not a bind mount: it is ours and nothing outside should touch it.
       - ./data/hub-data:/data
 
@@ -162,7 +162,7 @@ services:
       # AppleMusicDecrypt/ instead of the mount -- so the client always writes to /library.
       # Name a different root here and downloads land in a tree nothing ever scans: every
       # track re-downloads, forever, with no error. No build can catch it, because this
-      # variable is read at runtime. TODO(spec §8.1, Phase 2): assert the containment at boot,
+      # variable is read at runtime. TODO(Phase 2): assert the containment at boot,
       # in `create_app`'s lifespan, and refuse to start naming both values. See `.env.example`
       # for where the check is meant to live and why it is not here.
       #
@@ -232,7 +232,7 @@ services:
       # start_period is not decoration, and the number is not a guess. uvicorn does not bind
       # its socket until the ASGI lifespan's startup has finished, and the lifespan's first
       # step is `await supervisor.start()`, which polls the wrapper for up to
-      # startup_timeout = 60 s. The launcher itself took 12-19 s to serve in the spike, so on
+      # startup_timeout = 60 s. The launcher itself takes 12-19 s to serve, so on
       # a host with no Apple account the port is not open for roughly the full 60 s: the
       # wrapper comes up, answers /status with regions: [], and the gate correctly refuses to
       # call that ready. start_period has to cover that, or a correct boot is reported

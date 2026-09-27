@@ -1,4 +1,4 @@
-"""The wrapper's lifecycle, its Apple login, and the hub's own status (spec §9, §10).
+"""The wrapper's lifecycle, its Apple login, and the hub's own status.
 
 Three rules in this file are load-bearing, and each of them exists because the alternative
 produces a state the user cannot tell from a broken one.
@@ -38,7 +38,7 @@ from hub.wrapper_supervisor import SupervisorError
 
 router = guarded()
 
-#: spec §10 and the payload's own poll loop: `20 x 3s`. Not the supervisor's configurable
+#: The payload's own poll loop, `20 x 3s`. Not the supervisor's configurable
 #: `twofa_ttl` -- this is what the hub tells the user it will wait, and it must not promise
 #: more than the child honours.
 TWOFA_DEADLINE = 60.0
@@ -231,7 +231,7 @@ async def submit_2fa(request: Request, body: _TwoFaBody | None = None) -> Respon
     than from the request. The supervisor holds at most one login child -- a second login
     supersedes the first and discards its challenges -- so there is exactly one challenge
     that can be live, and accepting a caller-supplied id would be accepting a second way of
-    naming it for no gain. §9's `{code}` is therefore enough on the wire.
+    naming it for no gain. The wire shape's `{code}` is therefore enough.
     """
     state = request.app.state
     challenge = state.pending_2fa
@@ -275,10 +275,11 @@ async def _finish_login(state, *, challenge, login_error) -> Response:
     """Restart the wrapper, resume what was waiting, and report what is true.
 
     The order is the whole point of this function. `stop()` then `start()`, because the
-    payload reads its token cache at start-up; then `resume_waiting()`, because §10 parks
-    jobs in `waiting` on an expired token rather than failing them and they should run as
-    soon as there is an account; and only then an answer, so that "logged in" always means a
-    wrapper that can serve a download.
+    payload reads its token cache at start-up; then `resume_waiting()`, because a token
+    expiry parks
+    jobs in `waiting` rather than failing them and they should run as soon as there is an
+    account; and only then an answer, so that "logged in" always means a wrapper that can
+    serve a download.
 
     A failed restart is a failure of the *login*, not a footnote to it: the account is on
     disk and the wrapper that would use it is not up, and the user has to know that.
@@ -316,9 +317,9 @@ async def _finish_login(state, *, challenge, login_error) -> Response:
 async def status(request: Request) -> dict:
     """The wrapper, the library's reachability, and the queue's shape.
 
-    Three sources, none of them cached, and the reason is spec §7.1: the library on disk is
-    the only source of truth, so a drive that was unplugged a second ago has to show up
-    here rather than in a cache's opinion of a minute ago.
+    Three sources, none of them cached, and the reason is a deliberate rule: the library
+    on disk is the only source of truth, so a drive that was unplugged a second ago has
+    to show up here rather than in a cache's opinion of a minute ago.
     """
     from hub.api import _library_summary
 

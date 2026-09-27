@@ -1,11 +1,10 @@
-"""Tests for `hub.wrapper_supervisor` (Task 5, spec §3.1, §10).
+"""Tests for `hub.wrapper_supervisor`.
 
 **The real launcher is never used here.** `wrapper/wrapper-lite-rootless` takes 6-19 s to
-reach a serving state (Task 1's spike §7) and needs a rootfs, so every test would pay that
-and the suite would stop being hermetic. Task 1's spike is the evidence for the real
-binary; Task 10's acceptance run exercises it end to end. What is pinned here is the
-supervisor's own logic, and the stub launchers below reproduce every launcher behaviour
-that logic has to survive:
+reach a serving state and needs a rootfs, so every test would pay that and the suite would
+stop being hermetic. The measured figures are the evidence for the real binary; the
+acceptance run exercises it end to end. What is pinned here is the supervisor's own logic,
+and the stub launchers below reproduce every launcher behaviour that logic has to survive:
 
 | stub | reproduces |
 |---|---|
@@ -16,7 +15,7 @@ that logic has to survive:
 | `fake_launcher_hang` | prints its banner and never serves at all |
 | `fake_launcher_external` | a healthy wrapper somebody else started, for the adoption tests |
 
-Four of these are copies of failures Task 1 documented rather than invented, and each one
+Four of these are copies of measured launcher failures rather than invented, and each one
 is here because the naive implementation gets it wrong:
 
 - `fake_launcher_slow` is the R6 pin. The banner is a lie about readiness; the real
@@ -25,7 +24,7 @@ is here because the naive implementation gets it wrong:
   exists because the real prompt has no newline, so a line-oriented pump never fires.
 - `fake_launcher_2fa` echoing the credentials is what makes the redaction tests mean
   something. A stub that swallowed them would pass a broken scrubber.
-- `fake_launcher_banner_then_exit` is the vacuous-PASS shape the spike §6.8A found in the
+- `fake_launcher_banner_then_exit` is the vacuous-PASS shape found in the
   probe: print the banner, exit 0, never serve. A log-text gate calls that a good start.
 """
 
@@ -642,7 +641,7 @@ async def test_start_times_out_when_never_ready(fake_launcher_hang, tmp_path):
 async def test_a_banner_and_a_clean_exit_is_not_readiness(
     fake_launcher_banner_then_exit, tmp_path
 ):
-    """The vacuous-PASS shape from spike §6.8A, applied to `start()`.
+    """The vacuous-PASS shape a launcher probe found, applied to `start()`.
 
     A launcher that prints the banner and exits 0 without ever serving is what a log-text
     gate reports as a successful start. `start()` must fail, and must do it on the exit
@@ -710,13 +709,13 @@ async def test_a_wrapper_that_never_comes_up_says_so(
     assert "no account is logged in" not in message
 
 
-# --- runtime auto-restart (spec §10) ----------------------------------------
+# --- runtime auto-restart --------------------------------------------------
 
 
 async def test_a_crashed_wrapper_is_restarted(fake_launcher_crash_once, tmp_path):
     """A wrapper that dies *after* serving comes back on its own.
 
-    spec §10: an unexpected exit is a restart with exponential backoff. This is the case
+    An unexpected exit is a restart with exponential backoff. This is the case
     round one did not implement -- the watcher reaped and reported but never respawned.
 
     **The observable is the supervisor's own "serving again" line, not a new pid.** Those are
@@ -811,8 +810,8 @@ async def test_the_restart_budget_is_bounded(fake_launcher_crash, tmp_path):
 
     Counted through the log sink, because the respawn is internal and has no other
     observable. A supervisor that retried forever would pass every other test in this
-    file while never surfacing an error to the UI -- which is exactly what spec §10
-    forbids ("自動の無限再起動は行わない").
+    file while never surfacing an error to the UI -- which is exactly what is forbidden
+    ("自動の無限再起動は行わない").
 
     The shape is a bounded poll and *then* an assertion, the same shape the watcher-side
     budget test uses. An unbounded-budget mutant does not fail here, it hangs: the retry
@@ -992,7 +991,7 @@ async def test_stop_does_not_kill_an_adopted_wrapper(fake_launcher_external, tmp
 
 
 async def test_a_port_held_by_a_non_wrapper_fails_fast(fake_launcher, tmp_path):
-    """A silent TCP listener on the port is the trap the spike documented as §6.5.
+    """A silent TCP listener on the port is the trap the port pre-flight exists for.
 
     The payload would get EADDRINUSE, `svr.listen()` would return at once and
     `lite_main.cpp:705` would make it signal *itself*, producing a log line that reads
@@ -1218,7 +1217,7 @@ async def test_a_leftover_twofa_file_is_removed_before_a_new_login(
 
         # And the login is still waiting, so a real code still works. The assertion is on
         # *ordering*, not on the code or the account name: both are redacted by the scrubber
-        # (the username is a credential too, spec §11), so an assertion naming either would
+        # (the username is a credential too), so an assertion naming either would
         # be vacuous. What matters is that the file was consumed exactly once and only
         # after this login was prompted.
         await sup.submit_2fa(challenge.id, "123456")
@@ -1322,7 +1321,8 @@ async def test_submit_2fa_after_the_login_child_gone_is_reported(
 ):
     """A dead login child is a fact to report, not a `FileNotFoundError` to leak.
 
-    Same shape as the §6.5 trap: a login that fails because the process went away has to
+    Same shape as the EADDRINUSE trap: a login that fails because the process went away has
+    to
     say so in the wrapper's own terms. A code written into the void is the alternative --
     the next `login()` would find the stale file and log in with the wrong code.
     """
@@ -1395,10 +1395,10 @@ async def test_a_second_login_supersedes_the_first(fake_launcher_2fa, tmp_path):
 async def test_a_raising_log_sink_does_not_kill_the_pump(fake_launcher, tmp_path):
     """The pump outlives its own sink.
 
-    Task 9's sink appends to an HTMX log pane; a client that disconnects mid-write raises
-    in there. If that reached the pump task the supervisor would lose its line reader --
-    and, because the child is still producing output, the child would block on a full
-    pipe and the whole wrapper would wedge.
+    The API layer's sink appends to an HTMX log pane; a client that disconnects mid-write
+    raises in there. If that reached the pump task the supervisor would lose its line
+    reader -- and, because the child is still producing output, the child would block on a
+    full pipe and the whole wrapper would wedge.
     """
     calls = {"n": 0}
 

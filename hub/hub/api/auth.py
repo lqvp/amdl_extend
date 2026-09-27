@@ -1,4 +1,4 @@
-"""Login, logout, and the session cookie (spec §9, §11).
+"""Login, logout, and the session cookie.
 
 One shared password, one signed cookie, one message for every failure. The JSON routes and
 the form routes are the same function with a different answer, because a login that works
@@ -9,9 +9,9 @@ security boundary.
 returned for a wrong password, an empty field, a field that is not a string and a body that
 is not a form at all. There is one secret, so there is nothing to distinguish; and echoing
 the submitted value would turn the form into a reflection point. The rate limit's answer is
-the one *different* response, and it is different on purpose -- §11 requires the limit, and a
-client that is not told when to come back will come back immediately and make the limit
-useless.
+the one *different* response, and it is different on purpose -- the rate limit is required,
+and a client that is not told when to come back will come back immediately and make the
+limit useless.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ __all__ = ["LOGIN_FAILED", "LOGIN_PATH", "login_router", "require_session", "rou
 async def _submitted_password(request: Request) -> object:
     """Whatever the caller sent as the password, or `None` if they sent nothing usable.
 
-    Both shapes, because §9 describes the API as JSON and the login *page* is a form, and
+    Both shapes, because the rest of the API is JSON and the login *page* is a form, and
     `python-multipart` is a declared dependency for exactly that reason. Dispatching on the
     content type rather than trying both means a JSON body is never run through the form
     parser, which would otherwise raise on a body that is not one.
@@ -87,7 +87,7 @@ def _ip(request: Request) -> str:
 
 
 def set_session_cookie(response: Response, request: Request) -> None:
-    """Put the session on `response`, with the attributes spec §11 lists.
+    """Put the session on `response`, with the attributes a session cookie needs.
 
     `Secure` follows the request rather than a setting, because a hardcoded one breaks the
     plain-HTTP LAN deployment and its absence hands the session to the local network. Behind a
@@ -181,7 +181,7 @@ async def logout(request: Request) -> Response:
 async def session(request: Request) -> dict:
     """Whether there is a session. Reached only *with* one, so the answer is `True`.
 
-    It is behind the guard because §9 lists it among the session-authenticated routes, and
+    It is behind the guard because it is a session-authenticated route, and
     "is anybody logged in" from an unauthenticated caller is a question worth not answering
     on a shared LAN. The login page and the redirect logic use `is_authenticated` directly.
     """

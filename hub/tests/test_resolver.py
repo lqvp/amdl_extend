@@ -487,7 +487,7 @@ async def test_a_song_leaf_is_described_by_its_own_catalogue_record():
     never compared", and that was the wrong reading. `dedup.find_duplicate` returns
     `None` when either the title key or the scope key is falsy, and `normalize("")` is
     falsy -- so an empty `title` *or* an empty `album_name` independently defeats the
-    whole §7.3 lookup. A leaf that cannot be identified cannot be recognised as already
+    whole dedup lookup. A leaf that cannot be identified cannot be recognised as already
     on disk.
 
     Every field is read, none is synthesised: `name`, `albumName` and `artistName` off
@@ -510,7 +510,7 @@ async def test_a_song_the_catalogue_does_not_have_is_refused_not_enqueued_blank(
 
     The id came out of a URL and the catalogue in that storefront says there is no such
     song. Returning a leaf with empty metadata would both report success for a track
-    nothing can download and hand §7.3 a row it can never match.
+    nothing can download and hand the dedup check a row it can never match.
     """
     fake = FakeWebAPI()  # knows about no songs
 

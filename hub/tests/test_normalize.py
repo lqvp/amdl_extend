@@ -1,5 +1,5 @@
 """`normalize()` is the only thing keeping a downloaded track from matching itself, so its
-boundaries are pinned here rather than left to the dedup call site (spec §7.5)."""
+boundaries are pinned here rather than left to the dedup call site."""
 
 from hub.normalize import (
     AUDIO_EXTS,
@@ -38,7 +38,7 @@ def test_normalize_strips_leading_track_numbers():
 
 
 def test_normalize_can_keep_track_numbers_for_album_names():
-    # album dirs are matched with strip_track_prefix=False (spec §7.5). "4pi" and "1st EP"
+    # album dirs are matched with strip_track_prefix=False. "4pi" and "1st EP"
     # have no separator after the leading digit, so they are unchanged either way and
     # document intent without discriminating -- the literals below are what prove the
     # flag is wired up at all.
@@ -51,8 +51,8 @@ def test_normalize_can_keep_track_numbers_for_album_names():
 
 
 def test_normalize_keeps_a_four_digit_year():
-    # `\d{1,3}` cannot span four digits, so the year survives. That is deliberate
-    # (§7.5 step 4): it makes the rendered "01-1979 - Song" match "1979 - Song" instead of
+    # `\d{1,3}` cannot span four digits, so the year survives. That is deliberate:
+    # it makes the rendered "01-1979 - Song" match "1979 - Song" instead of
     # collapsing both onto an unrelated "Song" and falsely skipping.
     assert normalize("1979 - Song.m4a") == "1979 - song"
     assert normalize("01-1979 - Song") == "1979 - song"
@@ -64,8 +64,8 @@ def test_normalize_keeps_a_four_digit_year():
 def test_normalize_folds_decomposed_and_composed_equally():
     # Written as escapes on purpose. Typed as literal text the two forms render
     # identically, so an editor normalising the file would silently leave
-    # composed-vs-composed -- a tautology that asserts nothing, which is the defect class
-    # the plan flags as F3. The guard fails loudly if that ever happens again.
+    # composed-vs-composed -- a tautology that asserts nothing. The guard fails loudly
+    # if that ever happens again.
     composed = "Caf\u00e9"      # e-acute as one codepoint
     decomposed = "Cafe\u0301"   # "e" + combining acute
     assert composed != decomposed
@@ -84,8 +84,9 @@ def test_normalize_keeps_a_fullwidth_solidus_as_part_of_the_title():
     # NFKC folds the fullwidth solidus "／" to "/". If "/" were structural, "01. A／B.m4a"
     # would collapse to "b" and collide with "01. B.m4a" and "01. C／B.m4a" -- three
     # distinct tracks, one key. "／" is ordinary Japanese typography for a two-part title.
-    # Latent in the current library (0 occurrences) but the same false-skip class §7.3
-    # exists to prevent, so it is pinned rather than left to chance.
+    # Latent in the current library (0 occurrences) but the same false-skip class
+    # the album scoping in `dedup.find_duplicate` exists to prevent, so it is pinned
+    # rather than left to chance.
     #
     # The key is "a/b", not "a／b": NFKC runs first (round 2) and folds U+FF0F to "/".
     # That is correct -- the point is that the solidus *survives into the key* instead of
@@ -108,7 +109,7 @@ def test_normalize_does_not_swallow_a_title_leading_dot_run():
 
 
 def test_audio_exts_membership_table():
-    # The table in the AUDIO_EXTS comment, executable. Task 3's scan walks untrusted
+    # The table in the AUDIO_EXTS comment, executable. `library_scan.py` walks untrusted
     # names with this predicate, so every row is a decision rather than an example.
     for name in (
         "Song.m4a",                    # known extension
@@ -134,7 +135,7 @@ def test_audio_exts_membership_table():
 
 
 def test_normalize_keeps_a_separator_with_padding_and_stops_at_two_groups():
-    # The cases the separator rewrite had to keep handling, per §7.5 step 4.
+    # The cases the separator rewrite had to keep handling.
     assert normalize("1-01 Title") == "title"
     assert normalize("01 Title") == "title"
     assert normalize("1. Title") == "title"
@@ -157,7 +158,7 @@ def test_normalize_folds_fullwidth_structure_before_stripping():
 
 
 def test_is_audio_file_is_case_insensitive():
-    # Task 3's scan walks untrusted names with this predicate. A bare `ext in AUDIO_EXTS`
+    # `library_scan.py` walks untrusted names with this predicate. A bare `ext in AUDIO_EXTS`
     # is False for ".M4A"; every extension in the real library is lowercase, so this is
     # latent rather than live, but the helper is what keeps it from becoming live.
     # The full case table lives in test_audio_exts_membership_table.
@@ -176,7 +177,7 @@ def test_normalize_squeezes_whitespace():
 
 
 def test_normalize_returns_empty_for_unusable_titles():
-    # Review Focus #2: these must be detectable, not silently match everything.
+    # These must be detectable, not silently match everything.
     # An empty return means "unusable title" -- it is a value that equals every other
     # empty title, so the *caller* must refuse to skip on it. See `normalize`'s docstring.
     assert normalize("") == ""
@@ -192,7 +193,8 @@ def test_audio_exts_cover_the_real_library():
 
 
 def test_format_buckets_are_casefolded():
-    # §8 decides artist/album by matching a grandparent directory against these, against
-    # `normalize()`d path components, so they are stored casefolded to be comparable.
+    # `library_scan._artist` decides artist/album by matching a grandparent directory
+    # against these, against `normalize()`d path components, so they are stored casefolded
+    # to be comparable.
     # Note this is not the same test as AUDIO_EXTS: these name directories, not files.
     assert FORMAT_BUCKETS == frozenset({"alac", "atmos"})

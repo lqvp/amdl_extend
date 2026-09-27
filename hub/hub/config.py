@@ -1,4 +1,4 @@
-"""Environment -> `Settings` (spec §5, §11, §14).
+"""Environment -> `Settings`.
 
 Parsing is kept explicit rather than declarative: each value has a documented default and
 a documented failure mode, and a misconfigured deployment must fail at startup with a
@@ -16,14 +16,14 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-DEFAULT_BIND = "0.0.0.0"  # §11: reachable from the LAN.
+DEFAULT_BIND = "0.0.0.0"  # Reachable from the LAN.
 DEFAULT_PORT = 8080
-# §11: the wrapper is loopback-only and its port must never be published.
+# The wrapper is loopback-only and its port must never be published.
 DEFAULT_WRAPPER_HOST = "127.0.0.1"
 DEFAULT_WRAPPER_PORT = 12340
 DEFAULT_WRAPPER_BINARY = Path("/usr/local/bin/wrapper-lite-qemu")
 DEFAULT_WRAPPER_BASE_DIR = Path("/data/wrapper")
-# §6: only job state is persisted, so the hub needs exactly one database file, and it
+# Only job state is persisted, so the hub needs exactly one database file, and it
 # lives on the hub-data volume.
 DEFAULT_DB_PATH = Path("/data/hub.db")
 
@@ -129,7 +129,7 @@ def _required_paths(env: Mapping[str, str], key: str, example: str) -> list[Path
 def _scope(env: Mapping[str, str]) -> ArtistScope:
     value = _text(env, "AMD_DEDUP_ARTIST_SCOPE", "loose")
     # Not a plain default lookup: an unrecognised value is a typo, and silently degrading
-    # to "loose" would re-enable the false-skip mode §7.4 is written to warn about.
+    # to "loose" would re-enable the false-skip mode `ARTIST_SCOPES` exists to warn about.
     if value == "loose":
         return "loose"
     if value == "strict":
@@ -187,7 +187,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     """
     source: Mapping[str, str] = os.environ if env is None else env
 
-    # §11: single shared password, no default, never hardcoded.
+    # Single shared password, no default, never hardcoded.
     password = source.get("AMD_PASSWORD", "").strip()
     if not password:
         raise RuntimeError(

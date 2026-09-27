@@ -1,12 +1,12 @@
-"""Album discovery across every configured library root (spec §7.3 Step 1, §8).
+"""Album discovery across every configured library root.
 
-The filesystem is the only source of truth and nothing here is cached (§7.1, §7.1.1):
-§7.1.1's 0.06 s is the cost of `os.walk` alone, and a full `scan_roots` of the same
-341 GB external library measures 0.091 s (median of 5: walk 0.044, extension filter
-0.005, `normalize` 0.015, building 3,670 album scopes 0.038, `by_name` 0.009). So every
-request re-walks, a directory the user moved outside the app is followed immediately, and
-there is no scan cache to invalidate and no staleness window to reason about -- the only
-cache the design allows is tag reads, and those belong to `library.py`, not here.
+The filesystem is the only source of truth and nothing here is cached: the 0.06 s is the
+cost of `os.walk` alone, and a full `scan_roots` of the same 341 GB external library
+measures 0.091 s (median of 5: walk 0.044, extension filter 0.005, `normalize` 0.015,
+building 3,670 album scopes 0.038, `by_name` 0.009). So every request re-walks, a
+directory the user moved outside the app is followed immediately, and there is no scan
+cache to invalidate and no staleness window to reason about -- the only cache the design
+allows is tag reads, and those belong to `library.py`, not here.
 
 What a walk yields is deliberately *not* a model of the library. `dirPathFormat`
 describes one of the two libraries on this machine and not the other, and neither
@@ -71,7 +71,7 @@ class LibraryScan:
     def degraded(self) -> tuple[Path, ...]:
         """The roots that could not be read, in the order the caller passed them.
 
-        §8.1: an unmounted external drive must be *loud*. `loose` dedup against the
+        An unmounted external drive must be *loud*. `loose` dedup against the
         surviving roots still works, so the failure mode without this is a quiet
         re-download of everything that lived on the missing drive.
         """
@@ -83,12 +83,13 @@ class LibraryScan:
         """Album directories found under each root, positional like `roots` and `reachable`.
 
         **This exists because `degraded` cannot catch the failure it looks like it catches.**
-        A root that is *unreadable* is reported, loudly, and that is the case §8.1 describes.
-        A root that is **mounted and empty** is not: Docker's bind-mount autocreate makes a
-        directory when the source is missing, so an absent drive becomes a present, readable,
-        zero-album root that `reachable` reports as `True`. `library_scan` genuinely cannot
-        tell an empty library from an absent drive -- nothing on disk distinguishes them -- so
-        the count has to be surfaced rather than inferred, and a *per-root* count is the only
+        A root that is *unreadable* is reported, loudly, and that is the case `degraded`
+        describes. A root that is **mounted and empty** is not: Docker's bind-mount
+        autocreate makes a directory when the source is missing, so an absent drive
+        becomes a present, readable, zero-album root that `reachable` reports as `True`.
+        `library_scan` genuinely cannot tell an empty library from an absent drive --
+        nothing on disk distinguishes them -- so the count has to be surfaced rather than
+        inferred, and a *per-root* count is the only
         shape that can be: a total is equally consistent with both roots working and with one
         of them empty.
 
@@ -104,8 +105,8 @@ class LibraryScan:
 def album_key(name: str) -> str:
     """The `by_name` key for an album, and the key a lookup must use.
 
-    `strip_track_prefix=False` is the whole point (§7.5 step 4): album names keep their
-    leading digits, because `4pi` and `1st EP` are real albums. Callers get this
+    `strip_track_prefix=False` is the whole point: album names keep their leading
+    digits, because `4pi` and `1st EP` are real albums. Callers get this
     function rather than `normalize` so that building the index and looking it up
     cannot drift apart -- if they did, every lookup would miss and nothing would ever
     be skipped, with no error anywhere.
@@ -146,7 +147,7 @@ def scan_roots(roots: Sequence[Path] | Path | str) -> LibraryScan:
                 # where it would silently join the group of a real album with that name and
                 # be matched against as one. It is worse than a latent collision: the same
                 # drive reached by two different spellings would produce two different
-                # keys, and §8.1 probes reachability from more than one call site, so
+                # keys, and reachability is checked from more than one call site, so
                 # nothing guarantees they spell the path the same way.
                 #
                 # Nothing is lost by leaving the scope out of the index. It keeps its
@@ -164,7 +165,7 @@ def scan_roots(roots: Sequence[Path] | Path | str) -> LibraryScan:
         reachable=tuple(reachable),
         albums=tuple(albums),
         # A frozen dataclass holding a plain dict is not frozen in any way that matters,
-        # and this one is handed to the API layer and to Task 4, both of which have no
+        # and this one is handed to the API layer and to `dedup.py`, both of which have no
         # business inserting into a scan result.
         by_name=MappingProxyType(
             {key: tuple(members) for key, members in grouped.items()}
@@ -189,7 +190,7 @@ def _as_roots(roots: Sequence[Path] | Path | str) -> tuple[Path, ...]:
 def _walk_root(root_index: int, root: Path) -> Iterator[AlbumDir]:
     """Yield the album scopes under one root, in a stable order.
 
-    **`root` is used as given and is never resolved** (Review Focus #1). The user's own
+    **`root` is used as given and is never resolved.** The user's own
     path is typically a user-managed symlink into `/run/media/<volume-UUID>/`, so `relpath`
     has to be cut against the string that was passed in. Resolving the root but not the
     paths `os.walk` yields (or the reverse) makes every entry look like it lives outside
@@ -227,9 +228,9 @@ def _walk_root(root_index: int, root: Path) -> Iterator[AlbumDir]:
         relpath = _relpath(dirpath, root_str, prefix)
         # Basenames only, and `.part` is already gone because `is_audio_file` rejects it:
         # 160 of those are the real library's leftovers from interrupted downloads, and
-        # counting one as an existing track wrongly skips a re-request (Review Focus #5).
+        # counting one as an existing track wrongly skips a re-request.
         # A key of "" is *kept* -- `normalize` reports an unusable title rather than
-        # hiding it, so Task 4 can find it and refuse to skip on it (Review Focus #2).
+        # hiding it, so `dedup.find_duplicate` can find it and refuse to skip on it.
         # Only an empty *set* means "not an album dir", and an audio file always
         # contributes a key, so the test is exact.
         track_keys = frozenset(normalize(name) for name in audio)
@@ -277,7 +278,7 @@ def _relpath(dirpath: str, root_str: str, prefix: str) -> str:
 
 
 def _artist(parts: Sequence[str]) -> str | None:
-    """The artist for an album scope: the parent directory's name, or None (§8).
+    """The artist for an album scope: the parent directory's name, or None.
 
     `parts` is the relative path split into components, album directory included, so
     `parts[-1]` is the album and `parts[-2]` is its parent. That is the whole rule, and it

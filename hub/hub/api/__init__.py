@@ -3,7 +3,7 @@
 Three things live here, and none of them belongs to a particular resource:
 
 1. **The session guard.** Every `/api` router is created with `require_session` attached, so
-   adding a route cannot forget it. The one exception in spec §9 is `GET /api/health`, which
+   adding a route cannot forget it. The one exception is `GET /api/health`, which
    is installed separately precisely because it is the exception -- and it is installed here,
    next to the guard, so the pair reads together.
 
@@ -536,7 +536,7 @@ async def library_page(request: Request) -> object:
 async def _library_summary(state) -> dict:
     """Roots, which of them could be read, and how many album directories each one has.
 
-    From a real `scan_roots` and nothing cached, because spec §7.1 measures the walk at
+    From a real `scan_roots` and nothing cached, because the walk is measured at
     0.06 s and a stale "1 album found" on an unmounted drive is worse than a slow page.
 
     `per_root` is positional with `roots`, and it is here rather than only on the library page

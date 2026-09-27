@@ -1,6 +1,6 @@
-"""Filename normalization for dedup matching (spec §7.3, §7.5).
+"""Filename normalization for dedup matching.
 
-The filesystem is the only source of truth (§7.1): a download is skipped when the track's
+The filesystem is the only source of truth: a download is skipped when the track's
 *rendered filename* matches a file that already exists. `normalize()` is the single
 transform applied to both sides of that comparison, which is why it has to be identical on
 both sides and why it stays a pure function -- no config, no environment, no filesystem.
@@ -11,16 +11,17 @@ from __future__ import annotations
 import re
 import unicodedata
 
-# Measured on this operator's external library (§7.2.1), plus the siblings the Apple
+# Measured on this operator's external library, plus the siblings the Apple
 # Music catalog can deliver. Deliberately excludes ".jpg" (a cover-art-only directory must
-# not count as an album, §7.3 step 1b), ".lrc", and ".part" -- the library has 160 of the
+# not count as an album), ".lrc", and ".part" -- the library has 160 of the
 # latter from interrupted downloads, and counting them as existing tracks would wrongly
-# skip a re-request (Review Focus #5).
+# skip a re-request.
 #
 # Stored all-lowercase, so a bare `ext in AUDIO_EXTS` is a case-sensitive test and is
 # False for ".M4A". Test membership with `is_audio_file()` rather than reaching for the
 # set directly. Every extension in the real library is lowercase, so this is latent, not
-# live -- but Task 3's scan walks untrusted names and should not inherit the trap.
+# live -- but `library_scan.py`'s scan walks untrusted names and should not inherit the
+# trap.
 #
 # The cases that decide membership, all pinned in test_audio_exts_membership_table:
 #
@@ -50,8 +51,8 @@ AUDIO_EXTS: frozenset[str] = frozenset(
 )
 
 # Top-level directories that group by codec rather than by artist, so the grandparent
-# check in §8 step 1 must see past them. Stored casefolded because that check compares
-# them against `normalize()`d path components.
+# check in `library_scan._artist` must see past them. Stored casefolded because that check
+# compares them against `normalize()`d path components.
 FORMAT_BUCKETS: frozenset[str] = frozenset({"alac", "atmos"})
 
 # `songNameFormat` defaults to `{disk}-{tracknum:02d} {title}` (2 numeric groups) and
@@ -64,7 +65,7 @@ FORMAT_BUCKETS: frozenset[str] = frozenset({"alac", "atmos"})
 # character with optional padding around it cannot eat two adjacent dots.
 # `\d{1,3}` deliberately does not match a 4-digit year, so "1979 - Song" keeps its number
 # and matches the rendered "01-1979 - Song" rather than collapsing onto an unrelated
-# "Song". See §7.5 step 4.
+# "Song".
 _TRACK_PREFIX_RE = re.compile(r"^(?:\d{1,3}(?:\s*[.\-_]\s*|\s+)){1,2}")
 _WHITESPACE_RE = re.compile(r"\s+")
 
@@ -118,8 +119,8 @@ def stem_of(filename: str) -> str:
     `playlistSongNameFormat`'s default "{playlistSongIndex:02d}. {artist} - {title}"
     renders "01. Artist - Title", which collapses to "01". A library downloaded from
     playlists would then key every track to a bare index, and two tracks sharing an index
-    inside one album scope would falsely match -- exactly what the album scoping in §7.3
-    exists to prevent.
+    inside one album scope would falsely match -- exactly what the album scoping in
+    `dedup.find_duplicate` exists to prevent.
 
     Anything that is not a known audio extension is part of the name and is returned
     unchanged, so "01. Artist - Title", "1. Title" and "no-extension" all pass through.
@@ -132,7 +133,7 @@ def stem_of(filename: str) -> str:
 def normalize(name: str, *, strip_track_prefix: bool = True) -> str:
     """Return the comparison key for a track filename or an album directory name.
 
-    Order is load-bearing (§7.5): **all string folding first, then structural removal.**
+    Order is load-bearing: **all string folding first, then structural removal.**
     Stripping first misses structure written in fullwidth -- "Song．Ｍ４Ａ" would keep
     ".m4a" inside the key, and the fullwidth track number in "０１．Artist - Title" would
     never be recognised. So: NFKC, `casefold()`, extension strip, track-prefix strip,
@@ -147,12 +148,12 @@ def normalize(name: str, *, strip_track_prefix: bool = True) -> str:
     lookup miss and nothing is ever skipped.
 
     Returns "" for an unusable title -- empty, whitespace, or punctuation only, which the
-    real library contains 6 of (Review Focus #2). "" is a value that equals every other
+    real library contains 6 of. "" is a value that equals every other
     "", so **a caller must treat an empty key as "cannot decide" and refuse to skip**;
     never let it match. That guard lives at the dedup call site, not here: this function
     only reports the fact.
     """
-    # NFKC, not NFC (§7.5 step 1). Both reconcile composed and decomposed forms of the same
+    # NFKC, not NFC. Both reconcile composed and decomposed forms of the same
     # character, which is what stops an NTFS-written track from failing to match itself.
     # NFKC additionally folds ideographic width, which matters here: a Japanese library
     # routinely holds both "ＡＢＣ Title" and "ABC Title" for what is one track, and the
@@ -166,7 +167,7 @@ def normalize(name: str, *, strip_track_prefix: bool = True) -> str:
     if strip_track_prefix:
         # `\d{1,3}` deliberately does not match a 4-digit year, so "1979 - Song" keeps
         # its number and matches the rendered "01-1979 - Song" instead of collapsing onto
-        # an unrelated "Song". See §7.5 step 4.
+        # an unrelated "Song".
         key = _TRACK_PREFIX_RE.sub("", key)
     key = _WHITESPACE_RE.sub(" ", key).strip()
     # A title with no alphanumeric character carries no identifying information, so it is

@@ -1,10 +1,10 @@
-"""One password, one signed cookie, one rate limit (spec §11).
+"""One password, one signed cookie, one rate limit.
 
 Everything in this module is small and every line of it is a security decision, so the
-docstrings say *why* rather than what. The four properties spec §11 asks for, and where each
+docstrings say *why* rather than what. The four properties at issue, and where each
 one is pinned:
 
-| §11 | here | pinned by |
+| property | here | pinned by |
 |-----|------|-----------|
 | a single password, never hardcoded | `verify_password` | `test_password_compared_in_constant_time` |
 | `secrets.compare_digest` | `verify_password` | the same test, by asserting the call |
@@ -51,11 +51,11 @@ COOKIE_NAME = "amd_hub_session"
 COOKIE_HTTPONLY = True
 COOKIE_SAMESITE = "lax"
 # Long enough for a laptop that sleeps through a night, short enough that a stolen cookie
-# stops working the next day. Not a rotation scheme: a rotation needs a server-side table,
-# and §11 does not ask for one.
+# stops working the next day. Not a rotation scheme, because a rotation needs a
+# server-side table, and none is wanted here.
 DEFAULT_MAX_AGE = 12 * 60 * 60
 
-# spec §11: "ログイン試行 レートリミット（既定 10 回 / 5 分）".
+# "ログイン試行 レートリミット（既定 10 回 / 5 分）" -- 10 attempts per 5 min.
 DEFAULT_MAX_ATTEMPTS = 10
 DEFAULT_WINDOW = 300.0
 
@@ -80,7 +80,7 @@ TOKEN_PAYLOAD = {"v": 1}
 
 # One message for every authentication failure, and the only one the login handler is allowed
 # to produce. A route that said "no such user" and "wrong password" separately is telling an
-# attacker which half to work on; §11's single shared password means there is only one half,
+# attacker which half to work on; a single shared password means there is only one half,
 # so there is only one answer. It must not echo the submitted value either: that turns the
 # login form into a reflection point.
 LOGIN_FAILED = "Wrong password."
@@ -268,7 +268,7 @@ class SessionStore:
     def check_rate_limit(self, ip: str) -> None:
         """Take an attempt slot for `ip`, or raise `RateLimited` if the window is full.
 
-        Checks *and* records, in that order, and that is why the brief's test calls it ten
+        Checks *and* records, in that order, and that is why its test calls it ten
         times before expecting a refusal: the tenth call is the one that fills the window, so
         the eleventh is the first that is turned away. Recording before the password is
         compared is deliberate -- the comparison is constant-time, so the count is the only

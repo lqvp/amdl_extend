@@ -1,7 +1,7 @@
-"""The download queue: one table, one partial unique index, and one atomic claim (spec §6).
+"""The download queue: one table, one partial unique index, and one atomic claim.
 
 **What is persisted here is `job` and nothing else.** The library on disk is the single
-source of truth for "already downloaded" (§7.1), deliberately, because folders get moved,
+source of truth for "already downloaded", deliberately, because folders get moved,
 renamed and deleted outside the app and a persistent index would go stale against them. So
 this module never touches the filesystem, and there is no `recording` / `release` /
 `library_file` table to add later: any such table would be that stale index, and
@@ -13,12 +13,13 @@ the whole of the queue's concurrency story:
 
 - `language` and `force` are not in the key. Two requests for the same track in two
   languages are one download, and `force` means "re-download this even if it is on disk" --
-  which §7.3 decides per file at execution time, not per queue entry. It is stored and
-  honoured there, and it deliberately cannot buy a second concurrent job for one track.
-- `waiting` is in the predicate on purpose (§6): a job parked on an expired Apple token must
-  not be re-run alongside a new one, and a *failed* or *cancelled* job must be re-runnable.
-- `is_music_video` is not in the key either. §6 has no column for it; it selects the
-  Widevine path in Task 6/9 and nothing else.
+  which the scheduler's per-file dedup check in `app.py` decides at execution time, not per
+  queue entry. It is stored and honoured there, and it deliberately cannot buy a second
+  concurrent job for one track.
+- `waiting` is in the predicate on purpose: a job parked on an expired Apple token must not
+  be re-run alongside a new one, and a *failed* or *cancelled* job must be re-runnable.
+- `is_music_video` is not in the key either. The `job` table has no column for it; it
+  selects the Widevine path and nothing else.
 
 **The index is the only authority on whether a key is held.** `create_batch` therefore
 attempts the insert and reads the resulting `IntegrityError`; it never SELECTs first. A
@@ -45,12 +46,12 @@ write to it. The single-statement form is correct because the whole statement is
 transaction, so a second `claim_next` blocks on the write lock (`busy_timeout`, 5 s) and then
 re-evaluates the subquery against the state the first one committed.
 `tests/test_jobs.py::test_claim_next_is_exclusive_under_real_concurrency` is the test that
-tells the two apart; a sequential loop over one connection cannot, which is why the brief's
-own version of that test is not enough on its own.
+tells the two apart; a sequential loop over one connection cannot, which is why a
+sequential-loop version of that test is not enough on its own.
 
 **Timestamps are the store's, not the caller's.** `started_at` belongs to `claim_next` alone
 and `finished_at` is a function of the status: non-NULL exactly when the job is terminal.
-That is what makes `POST /api/jobs/{id}/retry` (§9) land in a consistent row -- a re-queued
+That is what makes `POST /api/jobs/{id}/retry` land in a consistent row -- a re-queued
 job has no `finished_at` -- without every caller having to remember to clear it. The four
 payload columns (`progress`, `bytes_done`, `bytes_total`, `skip_reason`, `error`) are written
 only when the caller passes them, because only the caller knows whether it is pausing a
@@ -60,11 +61,11 @@ transfer or restarting one.
 microseconds because that is exactly what the ECMAScript *Date Time String Format* specifies,
 so `new Date(created_at)` in the browser parses it instead of relying on leniency.
 
-**One name, two spellings.** §6's column is `url` / `url_type` and the brief's `Job` and
-`create_batch` are `parent_url` / `parent_type`. Both are honoured where each is the
-authority -- the columns are the spec's, quoted into `JOB_TABLE_SQL` verbatim, and the
-attribute and parameter names are the brief's, which Task 6 and Task 8 import. The mapping is
-the one function, `_job_from_row`.
+**One name, two spellings.** The `job` table's columns are `url` / `url_type`; the
+Python-facing `Job` and `create_batch` are `parent_url` / `parent_type`. Both are honoured
+where each is the authority -- the columns are the ones `JOB_TABLE_SQL` creates, quoted
+verbatim, and the attribute and parameter names are the ones the scheduler (`app.py`) and
+the API layer (`api/jobs.py`) pass in. The mapping is the one function, `_job_from_row`.
 
 **No migrations yet, and that is a decision rather than an omission.** There is one table, it
 is created if absent, and a future column is an `ALTER TABLE` behind a `PRAGMA user_version`
@@ -80,7 +81,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-# spec §6's three vocabularies, as closed sets rather than a bare `Literal` a caller can walk
+# The three vocabularies, as closed sets rather than a bare `Literal` a caller can walk
 # past. `ACTIVE_STATUSES` is load-bearing -- it is the index's predicate, and the two are
 # pinned to each other by a test in `tests/test_jobs.py` rather than by string interpolation,
 # so a status added here without being added to the index cannot pass unnoticed.
@@ -90,9 +91,9 @@ JOB_STATUSES: frozenset[str] = ACTIVE_STATUSES | TERMINAL_STATUSES
 
 JobStatus = Literal["queued", "waiting", "running", "done", "failed", "skipped", "cancelled"]
 
-# §6's comment on `url_type`. A closed set because Task 9 switches on it to decide between
-# resolving one track and resolving an album, so a typo would store cleanly and be rendered as
-# an unrecognised kind forever.
+# The five values `url_type`'s own comment in `JOB_TABLE_SQL` lists. A closed set because
+# the API layer switches on it to decide between resolving one track and resolving an album,
+# so a typo would store cleanly and be rendered as an unrecognised kind forever.
 PARENT_TYPES: frozenset[str] = frozenset(
     {"song", "album", "artist", "playlist", "music-video"}
 )
@@ -109,16 +110,17 @@ MARKABLE_FIELDS: tuple[str, ...] = (
     "error",
 )
 
-# spec §6, quoted rather than generated so the artifact a human reads in `sqlite_master` is
-# the spec's own DDL. The one deviation is `IF NOT EXISTS`: opening a database that already
-# holds a queue has to be a no-op, and this is the constructor for every connection.
+# Quoted rather than generated, so the artifact a human reads in `sqlite_master` is the DDL
+# as it was written down rather than something a loop reassembles. The one deviation is
+# `IF NOT EXISTS`: opening a database that already holds a queue has to be a no-op, and
+# this is the constructor for every connection.
 JOB_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS job (
   id           INTEGER PRIMARY KEY,
   url          TEXT    NOT NULL,
   url_type     TEXT    NOT NULL,   -- song|album|artist|playlist|music-video
   adam_id      TEXT,
-  title        TEXT,               -- log display only; never compared (spec 7.3)
+  title        TEXT,               -- log display only; never compared
   codec        TEXT    NOT NULL,
   language     TEXT,
   force        INTEGER NOT NULL DEFAULT 0,
@@ -140,7 +142,7 @@ CREATE TABLE IF NOT EXISTS job (
 # `test_every_active_status_holds_the_dedupe_slot` and
 # `test_every_terminal_status_frees_the_dedupe_slot` in `tests/test_jobs.py` put each status
 # on both sides of the boundary, so a status added to one place and not the other fails there.
-# `spike/task7_schema_check.py` additionally parses the predicate back out of the file and
+# A schema check additionally parses the predicate back out of the file and
 # compares it as a set, which is what catches a hand-edited `sqlite_master` after the fact.
 DEDUPE_INDEX_SQL = """
 CREATE UNIQUE INDEX IF NOT EXISTS job_active_dedupe
@@ -150,9 +152,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS job_active_dedupe
 
 DEDUPE_INDEX_NAME = "job_active_dedupe"
 
-# How long a contended write waits before SQLite gives up, in milliseconds. spec §6 names it;
-# the shape of the failure is that the caller sees `OperationalError: database is locked`
-# rather than a silently lost write.
+# How long a contended write waits before SQLite gives up, in milliseconds. The shape of
+# the failure is that the caller sees `OperationalError: database is locked` rather than a
+# silently lost write.
 BUSY_TIMEOUT_MS = 5000
 
 
@@ -218,16 +220,16 @@ class Progress:
 
 @dataclass(frozen=True)
 class Leaf:
-    """One track, as the resolver hands it over (Task 8) and the seam consumes it (Task 6).
+    """One track, as `resolver.py` hands it over and `ripper_host.py` consumes it.
 
-    Not `slots=True`, and that is load-bearing rather than an omission: the brief's own test
-    copies a leaf with `vars()`, and `slots` removes `__dict__` and makes that a TypeError in
+    Not `slots=True`, and that is load-bearing rather than an omission: several tests copy a
+    leaf with `vars()`, and `slots` removes `__dict__` and makes that a TypeError in
     a test that reads like a typo. Frozen, because a leaf's `adam_id` and `codec` are half of
     the dedup key -- a leaf that could be edited after it was enqueued could be edited into a
     different key than the one the index was asked about.
 
     `is_music_video` selects the Widevine decryption path (`src/legacy/`) over FairPlay
-    (`temari`) and is not persisted: §6's `job` has no column for it.
+    (`temari`) and is not persisted: the `job` table has no column for it.
     """
 
     adam_id: str
@@ -245,14 +247,15 @@ class Leaf:
 class Job:
     """One row of `job`, as the store reads it back.
 
-    `parent_url` / `parent_type` are the brief's names for §6's `url` / `url_type`; see the
-    module docstring. `parent_id` is §6's self-reference and is `None` for everything
-    `create_batch` writes, because the brief's signature for it has no `parent_id` parameter.
-    It is here because the column is in the schema and `list(parent_id=...)` filters on it.
+    `parent_url` / `parent_type` are the Python-facing names for the `url` / `url_type`
+    columns; see the module docstring. `parent_id` is the table's self-reference and is
+    `None` for everything `create_batch` writes, because its signature has no `parent_id`
+    parameter. It is here because the column is in the schema and `list(parent_id=...)`
+    filters on it.
 
-    `language` is a plain `str` although §6's column is nullable: `create_batch` is the only
+    `language` is a plain `str` although the column is nullable: `create_batch` is the only
     writer and it takes the language from a `Leaf`, which has no `None`. The column stays
-    nullable because the spec says so.
+    nullable because `JOB_TABLE_SQL` declares it without `NOT NULL`.
     """
 
     id: int
@@ -279,13 +282,14 @@ class Job:
 class BatchResult:
     """What one `create_batch` did, per leaf.
 
-    `skipped` is always empty here and that is the design, not an omission: §9's
-    `POST /api/jobs` answers `{created[], skipped[], deduplicated[]}`, and a track already on
-    disk is discovered at **execution** time by the dedup check in Task 9, not at enqueue
-    time. A queued job can sit long enough for the file to be deleted underneath it, and a
-    second filesystem check here would put a duplicate check with different timing into the
-    codebase for the two to disagree about. The list is kept because the response shape is
-    the spec's, and it is the field Task 9 fills from the execution-time result.
+    `skipped` is always empty here and that is the design, not an omission: the
+    `POST /api/jobs` answer is `{created[], skipped[], deduplicated[]}`, and a track already
+    on disk is discovered at **execution** time by the dedup check in the scheduler
+    (`app.py`), not at enqueue time. A queued job can sit long enough for the file to be
+    deleted underneath it, and a second filesystem check here would put a duplicate check
+    with different timing into the codebase for the two to disagree about. The list is
+    kept because the response shape is the route's, and it is the field the API layer
+    fills from the execution-time result.
     """
 
     created: list[int] = field(default_factory=list)
@@ -370,8 +374,8 @@ def _job_from_row(row: sqlite3.Row) -> Job:
 class JobStore:
     """The queue: enqueue, claim, mark, read. One SQLite connection, one table.
 
-    `db_path` is the same `Settings.db_path` Task 6 resolves (spec §3 puts it on the
-    hub-data volume). The connection is created eagerly and the schema is created on open, so
+    `db_path` is the same `Settings.db_path` `load_settings` resolves, on the
+    hub-data volume. The connection is created eagerly and the schema is created on open, so
     a fresh deployment needs no migration step before its first request -- the failure it can
     have is not being able to open the file, and that is reported with the path in it.
 
@@ -383,13 +387,13 @@ class JobStore:
     they cannot interleave with each other.
 
     **Not a singleton and not a cache.** Every read is a read of the file, and every answer
-    is derived from the row that is there now, because §7.1's rule is that the filesystem is
+    is derived from the row that is there now, because the rule is that the filesystem is
     the truth and nothing in this process may hold a second opinion about it longer than one
     statement.
     """
 
     def __init__(self, db_path: Path) -> None:
-        # `Path` is the brief's annotation, but `str()` it rather than requiring a `Path`: a
+        # `Path` is the annotation, but `str()` it rather than requiring a `Path`: a
         # caller wiring this to `settings.db_path` should not have to care, and sqlite3
         # accepts both.
         path = str(db_path)
@@ -409,7 +413,7 @@ class JobStore:
         except sqlite3.Error as exc:
             raise JobStoreError(
                 f"could not open the job database at {path}: {exc}. The parent directory has "
-                f"to exist and be writable -- spec §3 puts it on the hub-data volume at "
+                f"to exist and be writable -- it belongs on the hub-data volume at "
                 f"/data/hub.db, and a missing mount shows up here rather than as an empty "
                 f"queue."
             ) from exc
@@ -418,7 +422,7 @@ class JobStore:
         """Close the connection. Idempotent, and safe to leave to the garbage collector.
 
         A store is held for the life of the process in normal use, so this exists for the
-        places that do not: a test that reopens a file, and Task 6 shutting the hub down.
+        places that do not: a test that reopens a file, and `app.py` shutting the hub down.
         """
         self._conn.close()
 
@@ -454,8 +458,9 @@ class JobStore:
         that happens in the constructor.
 
         A refused leaf does not roll the batch back -- the leaves before it are already rows --
-        and the leaves after it are not attempted. Task 9 is the one caller, so catching the
-        `ValueError`, reading `list()` and telling the user what is queued is its job; a retry
+        and the leaves after it are not attempted. The API layer is the one caller, so
+        catching the `ValueError`, reading `list()` and telling the user what is queued is
+        its job; a retry
         is safe because the index turns the leaves that did land into `deduplicated` entries
         rather than duplicates.
         """
@@ -466,8 +471,9 @@ class JobStore:
         if not isinstance(parent_url, str) or not parent_url.strip():
             raise ValueError(
                 f"parent_url is {parent_url!r}, which cannot identify the batch. Every job "
-                f"carries it as §6's `url NOT NULL`, and Task 9 lists and cancels by it, so a "
-                f"blank one would make the queue unroutable and unlistable."
+                f"carries it as the `url NOT NULL` column, and the API layer lists and "
+                f"cancels by it, so a blank one would make the queue unroutable and "
+                f"unlistable."
             )
 
         created: list[int] = []
@@ -520,7 +526,7 @@ class JobStore:
         unrelated tracks would fold into each other. `None` is the quieter failure: SQLite
         treats every NULL as distinct in a unique index, so a NULL `adam_id` neither
         deduplicates against anything nor prevents a second NULL row, and the index looks
-        present while silently not applying. §6's column is nullable, so this is the only
+        present while silently not applying. The column is nullable, so this is the only
         place the hole is closed.
         """
         for field_name in ("adam_id", "codec"):
@@ -609,8 +615,8 @@ class JobStore:
         # A `running` row written here always carries a `started_at`, and nothing else in the
         # store can put a row into that state: the column is only ever written here, and
         # `mark` rejects it as a field. A `running` row with a null start time therefore means
-        # a hand-written INSERT, which is what lets Task 9 render `started_at` without a
-        # null branch. `spike/task7_schema_check.py` counts them after its 16-thread run.
+        # a hand-written INSERT, which is what lets the API layer render `started_at` without
+        # a null branch; a 16-thread concurrent claim run is what established that.
         return _job_from_row(rows[0]) if rows else None
 
     def mark(self, job_id: int, status: JobStatus, **fields) -> None:
@@ -704,8 +710,8 @@ class JobStore:
     def resume_waiting(self) -> int:
         """Move every `waiting` job back to `queued` and return how many moved.
 
-        Called after a successful login (§10: a token expiry parks running jobs in
-        `waiting` rather than failing them). The jobs keep their place in the queue, because
+        Called after a successful login: a token expiry parks running jobs in
+        `waiting` rather than failing them. The jobs keep their place in the queue, because
         the queue is ordered by `id` and nothing else -- ordering by `created_at` or by
         `started_at`, which a claim has just overwritten, would silently reorder what the user
         asked for. `error` is left alone; see `claim_next` for why, and
@@ -725,8 +731,8 @@ class JobStore:
 
         **The first statement in this project that deletes a row**, and irreversible.
         What it costs is the *record* that a track was attempted -- the title, the error
-        and the `skip_reason` evidence paths. It does not cost the file: spec §7.1 makes
-        the filesystem the single source of truth for what is downloaded, and the
+        and the `skip_reason` evidence paths. It does not cost the file: the filesystem is
+        the single source of truth for what is downloaded, and the
         execution-time dedup check reads the library, not this table. So deleting a
         `done` row cannot cause a re-download; it removes a line from a queue log.
 
@@ -825,20 +831,21 @@ class JobStore:
     ) -> list[Job]:
         """Every job, oldest id first, optionally filtered.
 
-        `None` on an argument means "no filter", which is what §9's `?status=&parent=`
-        means for an absent query parameter -- so `parent_id=None` is *not* "top level
-        only". Nothing distinguishes those two cases today, because `create_batch`'s brief-
-        pinned signature has no `parent_id` parameter and so writes `None` to every row; a
-        sentinel would be a second way of saying "none" for a case that cannot arise yet.
+        `None` on an argument means "no filter", which is what `GET /api/jobs`
+        `?status=&parent=` means for an absent query parameter -- so `parent_id=None` is *not*
+        "top level only". Nothing distinguishes those two cases today, because
+        `create_batch`'s signature has no `parent_id` parameter and so writes `None` to every
+        row; a sentinel would be a second way of saying "none" for a case that cannot arise
+        yet.
 
-        `parent_url` exists for the caller that has to report a *partial* batch. §6's
+        `parent_url` exists for the caller that has to report a *partial* batch.
         `create_batch` applies the leaves it could and then raises `ValueError` on one it
         could not, and the handler is required to tell the user what actually landed. There
         is exactly one way to ask that question today, and it is not `parent_id`: the column
         nothing writes, whose `None` means "no filter" rather than "top level", so filtering
         a batch by it returns the user's **entire** queue and the response names every job
-        ever queued as part of this request. §6's `url` is what `create_batch` wrote for
-        every row of a batch, so it is the batch's real identity.
+        ever queued as part of this request. The `url` column is what `create_batch` wrote
+        for every row of a batch, so it is the batch's real identity.
 
         Ordered by `id` and not by `created_at`, so that two jobs enqueued inside one
         millisecond keep the order they were created in, and so that a resumed job goes back
@@ -859,9 +866,10 @@ class JobStore:
         if parent_url is not None:
             if not isinstance(parent_url, str) or not parent_url.strip():
                 raise ValueError(
-                    f"parent_url is {parent_url!r}, which cannot be a filter. The column is "
-                    f"§6's `url`, and `create_batch` refuses a blank one for the same reason: "
-                    f"matching nothing is not the same as matching every job."
+                    f"parent_url is {parent_url!r}, which cannot be a filter. It is the "
+                    f"`job` table's `url` column, and `create_batch` refuses a blank one "
+                    f"for the same reason: matching nothing is not the same as matching "
+                    f"every job."
                 )
             clauses.append("url = ?")
             params.append(parent_url)

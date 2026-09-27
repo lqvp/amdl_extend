@@ -1,18 +1,19 @@
-"""What is on disk, right now (spec §8, §8.1).
+"""What is on disk, right now.
 
 Phase 1 builds the *list*: the album directories across every root, and the artists derived
 from the structure. That is the whole of what this needs and the whole of what it does, and
 the restraint is deliberate rather than a stub:
 
-- **No tag reads.** §8's one cacheable thing is the tag read (a `mutagen` parse per file,
-  with a 300 s TTL), and nothing here needs one. An album list is a directory listing.
-- **No file serving, no deletion, no duplicate report.** §9 lists
+- **No tag reads.** The one cacheable thing here would be the tag read (a `mutagen`
+  parse per file, with a 300 s TTL), and nothing here needs one. An album list is a
+  directory listing.
+- **No file serving, no deletion, no duplicate report.** The route names are
   `/api/library/files/{id}`, `/stream`, `DELETE`, and `/duplicates`, and every one of them
-  is Phase 2 (§13's phase table: "FS ベースのライブラリ閲覧・検索・削除 ... 重複レポート").
+  is Phase 2 ("FS ベースのライブラリ閲覧・検索・削除 ... 重複レポート").
   Registering them as 501s would put a route table in the codebase that answers the wrong
   thing; leaving them absent means `GET /api/library/files/1` is a 404, which is an honest
   "this build has no such route".
-- **No cache.** §7.1.1 measured the walk at 0.06 s and §8 says so explicitly: a stale
+- **No cache.** The walk was measured at 0.06 s, and that is why: a stale
   listing on a drive that was unplugged a minute ago is worse than a slow page, and there is
   no staleness window to reason about because nothing is held.
 
@@ -94,7 +95,8 @@ async def artists(request: Request) -> dict:
 async def scan(request: Request) -> dict:
     """A scan, and its result.
 
-    spec §9 lists this as "walk キャッシュ破棄" -- invalidate the walk cache -- and there is
+    The scan endpoint is the API's "invalidate the walk cache" (「walk キャッシュ破棄」) --
+    and there is
     nothing to invalidate, because no walk is ever held. So it is a scan on demand, which is
     the useful half of the same idea: an operator who has just plugged a drive in can check
     that the hub sees it without waiting for the next page load.
@@ -108,15 +110,15 @@ async def scan(request: Request) -> dict:
 async def duplicates(request: Request) -> dict:
     """Not in this build.
 
-    spec §8.2's read-only duplicate report is Phase 2. It is *not* the same thing as
+    The read-only duplicate report is Phase 2. It is *not* the same thing as
     `skip_reason`: that carries the paths a `loose` skip matched, for one track, so a human
-    can overrule it -- and §2 refuses the cross-album group view outright, because a title
-    shared by 1,207 of 8,721 library keys is not evidence of a duplicate. A caller reaching
-    this gets an explanation rather than a 404.
+    can overrule it -- and the design refuses the cross-album group view outright, because a
+    title shared by 1,207 of 8,721 library keys is not evidence of a duplicate. A caller
+    reaching this gets an explanation rather than a 404.
     """
     return fail(
         501,
-        "the read-only duplicate report is Phase 2 (spec §13). What this build does show is "
+        "the read-only duplicate report is Phase 2. What this build does show is "
         "the other half: a skipped job's `skip_reason` names every path its `loose` match "
         "hit, in GET /api/jobs and in the queue page, which is what makes one skip "
         "adjudicable by hand.",

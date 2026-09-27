@@ -1,4 +1,4 @@
-"""Supervise `wrapper-lite-rootless`: run it, log in to it, and shut it down (spec §3.1).
+"""Supervise `wrapper-lite-rootless`: run it, log in to it, and shut it down.
 
 The hub runs the wrapper itself rather than talking to a wrapper somebody else started, for
 one reason: **2FA**. Upstream's container entrypoint reads the 2FA code out of a file on
@@ -32,23 +32,22 @@ host. That mapping is correct for `wrapper-lite-rootless` and for `wrapper-lite`
 7) and passes `--base-dir /data` *into the guest*, where the file would live in a
 namespace the host cannot see. A QEMU deployment therefore has to log in wrapper-side, and
 `submit_2fa` refuses with a message saying so rather than writing a file nobody will read.
-Note that `config.py`'s `DEFAULT_WRAPPER_BINARY` is still the QEMU launcher; the plan and
-the Task 2 Dockerfile use the rootless one, so that default is what needs to change, not
+Note that `config.py`'s `DEFAULT_WRAPPER_BINARY` is still the QEMU launcher; the image's
+`AMD_WRAPPER_BINARY` is the rootless one, so that default is what needs to change, not
 this module.
 
 **Credentials on argv are visible in `/proc/<pid>/cmdline` to any process of the same uid,
 for as long as the child lives.** That is a real exposure and the design does not get
 around it; the payload takes no other input. What bounds it here is the topology: the
-container runs a single service process as one uid (spec §3, §14), so the readers of that
+container runs a single service process as one uid, so the readers of that
 `cmdline` are the hub itself and whatever else is in that one container, and the login
 child's lifetime is seconds. It is *not* protection on a multi-tenant host. The
 mitigations that are in place are that the credentials never reach `log_sink` (every line
 the pump forwards is scrubbed, see `_scrub`), never reach the hub's own argv or its
-environment, and never reach the database (spec §11).
+environment, and never reach the database.
 
-Four behaviours are load-bearing, and all four came out of Task 1's spike
-(`docs/superpowers/findings/2026-09-26-wrapper-child-process-spike.md`) rather than out of
-a design:
+Four behaviours are load-bearing, and all four were measured against the real launcher
+rather than designed:
 
 - **R6 -- readiness is `GET /status`, never log text.** The launcher prints its banner
   before it serves, and the measured gap was 5.9-18.7 s, so a log-based gate reports ready
@@ -64,7 +63,7 @@ a design:
   `unshare`s `CLONE_NEWPID`, so the payload `lite` is PID 1 of a nested PID namespace, and
   a `killpg` from outside does not mean what it looks like it means. The launcher forwards
   SIGTERM to its chrooted child (`wrapper-lite-rootless.c:24`) and `lite` consumes it via
-  `sigwait` (`lite_main.cpp:447`); the spike recorded a graceful `returncode=0`.
+  `sigwait` (`lite_main.cpp:447`); the launcher was observed to return `returncode=0`.
 - **R8 -- adopt a healthy wrapper that is already on the port.** This host already runs
   one on 127.0.0.1:12340, and the user's own `AppleMusicDecrypt/config.toml` points there,
   so local development collides constantly. Adoption is also the only safe answer, because
@@ -74,7 +73,7 @@ a design:
 - **A port pre-flight, because a bind failure is not reportable from the child's side.**
   `svr.listen()` returning at once makes `lite_main.cpp:705` signal *itself*, so the log
   says `received signal 15, stopping service` -- a line that reads exactly like an external
-  kill (spike §6.5). `start()` therefore refuses before spawning when the port is held by
+  kill. `start()` therefore refuses before spawning when the port is held by
   something that does not answer `/status`.
 """
 
@@ -115,14 +114,14 @@ LOGIN_PROMPT_TIMEOUT = 30.0
 # immediate; 15 s is generous for a machine under load and still bounded.
 STOP_TIMEOUT = 15.0
 
-# Exponential backoff between automatic restarts, and its ceiling. spec §10 caps restarts
-# and forbids an unbounded loop, so this only has to be short enough that a genuinely dead
+# Exponential backoff between automatic restarts, and its ceiling. Restarts are capped and an
+# unbounded loop is forbidden, so this only has to be short enough that a genuinely dead
 # launcher is reported promptly.
 RESTART_BACKOFF_BASE = 0.5
 RESTART_BACKOFF_CAP = 8.0
 
 # Lines of the child's own output quoted back in an error. Enough to include the
-# namespace-setup `perror` that is usually the whole story (spike §6.7) and the listen
+# namespace-setup `perror` that is usually the whole story and the listen
 # banner, without pasting a screenful into an exception.
 LOG_TAIL_LINES = 12
 
@@ -167,15 +166,14 @@ NAMESPACE_FAILURES: tuple[tuple[str, str], ...] = (
         "unshare:",
         (
             "the kernel refused to create the namespaces; the container needs "
-            "security_opt: [seccomp:unconfined, systempaths=unconfined] "
-            "(spike §5.2/§5.6)"
+            "security_opt: [seccomp:unconfined, systempaths=unconfined]"
         ),
     ),
     (
         "mount proc failed",
         (
             "mounting a fresh procfs inside the user namespace was refused; that is "
-            "the /proc over-mount that systempaths=unconfined removes (spike §5.3)"
+            "the /proc over-mount that systempaths=unconfined removes"
         ),
     ),
     ("mount /dev/urandom failed", "the random device could not be bound into the chroot"),
@@ -183,23 +181,23 @@ NAMESPACE_FAILURES: tuple[tuple[str, str], ...] = (
         "mkdir ./rootfs",
         (
             "the launcher could not create its own rootfs entries, which is what a "
-            "uid-mismatched bind mount looks like (spike §5.1 F2)"
+            "uid-mismatched bind mount looks like"
         ),
     ),
-    ("open ./rootfs", "the rootfs is not readable by the mapped uid (spike §5.1 F2)"),
+    ("open ./rootfs", "the rootfs is not readable by the mapped uid"),
     ("chroot", "the chroot into ./rootfs was refused"),
     (
         "execve",
         (
             "the payload could not be exec'd; usually a library mismatch, e.g. a host "
-            "libcurl.so picked up at build time (spike §6.1)"
+            "libcurl.so picked up at build time"
         ),
     ),
     ("uid_map", "the user-namespace id map could not be written"),
 )
 
 # The EADDRINUSE self-signal, which is the one child log line that looks like something
-# else entirely (spike §6.5).
+# else entirely.
 SELF_SIGNAL = "received signal 15"
 
 
@@ -285,7 +283,7 @@ class WrapperSupervisor:
     """Start, watch, log in to, and stop one `wrapper-lite-rootless`.
 
     Not a singleton and not thread-safe: one instance per wrapper, driven from one event
-    loop. `creart` (Task 6) is what decides who owns it.
+    loop. `creart` in `ripper_host.py` is what decides who owns it.
     """
 
     def __init__(
@@ -451,7 +449,7 @@ class WrapperSupervisor:
         """The `data` object of `GET /status`, e.g. `{"regions": ["jp"]}`.
 
         Uncached, unlike the downloader's client: the hub re-reads it to drive the
-        "regions went empty" path in spec §10, which is a state change a cache would hide.
+        "regions went empty" path, which is a state change a cache would hide.
         """
         if self._bound_port == 0:
             raise SupervisorError(
@@ -625,8 +623,8 @@ class WrapperSupervisor:
         if it gets that far, so `login()` and `_shutdown_login()` also remove it. See
         `_discard_twofa_file` for why that is not optional.
 
-        Single use and TTL-checked (spec §10: an expired challenge is re-requested, not
-        resent). The code joins the redaction set before the file is written, because the
+        Single use and TTL-checked: an expired challenge is re-requested, not resent.
+        The code joins the redaction set before the file is written, because the
         child echoes what it read back onto its stdout.
         """
         if self._adopted:
@@ -806,7 +804,7 @@ class WrapperSupervisor:
                 *argv,
                 # `cwd` is the binary's directory, never the inherited one:
                 # `wrapper-lite-rootless.c` chroots into `./rootfs` and resolves
-                # `--base-dir` *after* `chroot(".")`, both relative to the CWD (spike §7).
+                # `--base-dir` *after* `chroot(".")`, both relative to the CWD.
                 cwd=str(self._binary.parent),
                 # stderr folded into stdout: every `LOG_*` line goes to stderr
                 # (`wrapper/lite/logger.h:59`), unbuffered, and the two must be read as one
@@ -870,8 +868,8 @@ class WrapperSupervisor:
 
         A refused connection means nothing is there, *including* a TIME_WAIT remnant: those
         have no listener, and the payload binds with `SO_REUSEPORT` so a remnant does not
-        block it (spike §6.8, the TIME_WAIT row). A connect that times out is counted as
-        occupied, because on loopback a connect either succeeds or is refused at once.
+        block it. A connect that times out is counted as occupied, because on loopback a
+        connect either succeeds or is refused at once.
         """
         try:
             _, writer = await asyncio.wait_for(
@@ -977,7 +975,7 @@ class WrapperSupervisor:
     async def _watch_service(self) -> None:
         """Respawn a crashed wrapper with backoff, up to the budget, then give up.
 
-        spec §10: an unexpected exit is a restart with exponential backoff, three times,
+        An unexpected exit is a restart with exponential backoff, three times,
         and after that it is the user's problem rather than a loop. The budget is shared
         with `start()`'s own retry loop (`_restarts_used`), so the supervisor will not
         spawn more than `max_restarts` extra children per epoch however the deaths arrive.
@@ -1136,8 +1134,9 @@ class WrapperSupervisor:
     def _emit(self, line: str) -> None:
         """One line to `log_sink`, and never an exception out of it.
 
-        Task 9's sink appends to an HTMX log pane, so it can raise for reasons that have
-        nothing to do with the wrapper. Letting that reach the pump would kill the reader.
+        The API layer's log sink appends to an HTMX log pane, so it can raise for reasons
+        that have nothing to do with the wrapper. Letting that reach the pump would kill the
+        reader.
         """
         try:
             self._log_sink(line)
@@ -1153,8 +1152,8 @@ class WrapperSupervisor:
         """Name the launcher's failure from its own `perror` strings, where possible.
 
         The strings are the launcher's, and they are the difference between "did not become
-        ready" and "the kernel refused to create the namespaces, which is what spike §5.2
-        measured in a container without `systempaths=unconfined`".
+        ready" and "the kernel refused to create the namespaces, which is what a container
+        without `systempaths=unconfined` produces".
         """
         if child is None:
             return ""
@@ -1179,7 +1178,7 @@ class WrapperSupervisor:
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(PROBE_TIMEOUT),
-                # The wrapper is loopback-only (§11) and must never be reached through a
+                # The wrapper is loopback-only and must never be reached through a
                 # proxy. httpx honours `HTTP_PROXY`/`ALL_PROXY` by default, and a proxy
                 # that answers 200 for anything would fake readiness.
                 trust_env=False,

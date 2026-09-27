@@ -155,8 +155,8 @@ def main() -> int:
     if upstream_config["localInstance"]["enable"]:
         fail(
             "[localInstance].enable is true, so the client would launch its own QEMU "
-            "backend and overwrite [instance].url. The hub supervises the wrapper (spec "
-            "§3.1); the client must not."
+            "backend and overwrite [instance].url. The hub supervises the wrapper; "
+            "the client must not."
         )
     for key in ("dirPathFormat", "playlistDirPathFormat"):
         value = upstream_config["download"][key]

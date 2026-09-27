@@ -21,7 +21,7 @@ ARG VENDOR_COMMIT=8b609df
 ARG WRAPPER_URL=https://github.com/itouakirai/wrapper
 ARG WRAPPER_COMMIT=c61dea9
 #
-# amd-hub runtime image (spec §3, §3.2, §4, §11; task 10 of the phase-1 plan).
+# amd-hub runtime image.
 #
 # Build from the WORKSPACE ROOT -- the context has to contain both upstream clones:
 #
@@ -118,8 +118,8 @@ RUN set -eux; \
     unzip -q "android-ndk-r${NDK_VERSION}b-linux.zip"; \
     rm "android-ndk-r${NDK_VERSION}b-linux.zip"
 
-# Both flags are from docs/superpowers/findings/2026-09-26-wrapper-child-process-spike.md §2.1,
-# and either one alone is a build that fails later and more confusingly:
+# Two flags, and either one alone is a build that fails later and more confusingly -- the first
+# at configure time, the second in the payload:
 #
 #   -DCMAKE_POLICY_VERSION_MINIMUM=3.5   CMake >= 4 refuses cJSON's cmake_minimum_required(2.8.12).
 #   -DDCURL_SHARED_LIB=<path>             find_library() also searches host paths and would pick up
@@ -162,7 +162,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Ordered by how rarely each input changes, so an edit to the hub does not invalidate the
-# 121 MB wrapper layer below it (spec §3.2). --frozen refuses to re-resolve, so the image is
+# 121 MB wrapper layer below it. --frozen refuses to re-resolve, so the image is
 # built from uv.lock rather than from whatever PyPI serves on the day; --no-install-project
 # defers `amd-hub` itself, whose source is not here yet, and because PYTHONPATH below is the
 # single import mechanism rather than an editable install plus a path; --no-dev keeps pytest
@@ -183,7 +183,7 @@ RUN uv sync --frozen --no-install-project --no-dev
 #   * The rootfs is COPYed rather than bind-mounted, so it is root-owned in the image. The
 #     launcher unshare(CLONE_NEWUSER)s with a single-uid map ("0 0 1") before touching the
 #     filesystem, which leaves any file owned by another uid unmapped -- a host tree owned by
-#     uid 1000 is unwritable to the child even under CAP_DAC_OVERRIDE (spike §5.1 F2). The
+#     uid 1000 is unwritable to the child even under CAP_DAC_OVERRIDE. The
 #     container must therefore run as root, and compose must not set `user:`.
 #
 # *** These two COPYs are from the builder stage, not from the build context. *** They used to be
@@ -272,7 +272,7 @@ RUN set -eu; \
         assert c['localInstance']['enable'] is False"
 
 # The hub, last: it is the input that changes most often, so it belongs in the layer that is
-# cheapest to rebuild. hub/tests/ and hub/spike/ are excluded by .dockerignore -- a runtime
+# cheapest to rebuild. hub/tests/ is excluded by .dockerignore -- a runtime
 # image has no pytest and no host-relative wrapper path to probe. hub/deploy/ IS copied, but
 # only the one file below, because the gate has to run inside the image it is checking.
 COPY hub/hub /app/hub/hub

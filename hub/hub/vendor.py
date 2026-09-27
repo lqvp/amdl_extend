@@ -1,11 +1,11 @@
 """The place that knows where `AppleMusicDecrypt/` is, and the only route into it.
 
 **Why this module exists and why it is one function long.** `AppleMusicDecrypt/` is a
-separate upstream clone, meant to become a git submodule and to be upgraded from
-upstream, so the hub is not allowed to be coupled to its layout: an upstream rename
-should break one file here rather than the codebase. `tests/test_ripper_host.py` walks
-the AST of every module under `hub/hub/` and `hub/spike/` and fails on any `import
-src.*`, on `importlib`/`runpy`, on `__import__`, and on any reference to `sys.path`.
+separate upstream tree that the image clones at a pinned commit, so the hub is not allowed
+to be coupled to its layout: an upstream rename should break one file here rather than the
+codebase. `tests/test_ripper_host.py` walks the AST of every module under `hub/hub/` and
+`hub/deploy/` and fails on any `import src.*`, on `importlib`/`runpy`, on `__import__`, and
+on any reference to `sys.path`.
 
 That leaves two files allowed to reach upstream, and this is the one that is not a
 lifecycle class. It was previously `ripper_host.parse_apple_music_url`, which was the

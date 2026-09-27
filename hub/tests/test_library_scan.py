@@ -1,11 +1,11 @@
-"""Album discovery over multiple messy library roots (spec §7.3 Step 1, §8).
+"""Album discovery over multiple messy library roots.
 
 The scanner is the only part of dedup that touches the filesystem, and it is the part
 that has to survive a library nobody curated: 212 artist directories on one drive, a
 second drive laid out `[ALAC|Atmos/]artist/album/` with loose files and stray
 subdirectories, and an external drive that may simply not be mounted when a download is
 requested. Every test here is pinned to one of those observations, and the fixtures are
-the §12.1 regression shapes.
+the `make_library` regression shapes.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def test_groups_same_named_album_dirs_across_roots(make_library):
 def test_album_name_index_keeps_leading_digits(make_library_extra):
     # A number glued to a word is not a track number, so "4pi" and "1st EP" are reachable
     # whichever way strip_track_prefix is set. That makes this a statement about
-    # `normalize` -- §7.5 step 4 must not eat a name that merely starts with digits -- and
+    # `normalize` must not eat a name that merely starts with digits -- and
     # NOT a statement about the index's flag, which it cannot be. The flag is pinned by
     # test_album_name_index_keeps_a_number_a_separator_follows.
     scan = scan_roots(make_library_extra)
@@ -75,10 +75,11 @@ def test_album_name_index_keeps_a_number_a_separator_follows(make_library_extra)
     # nothing would ever be skipped.
     #
     # No other name in the tree can. "4pi" and "1st EP" have no separator after the
-    # digits, and a 4-digit year is out of `\d{1,3}`'s reach on purpose (§7.5), so all
+    # digits, and a 4-digit year is out of `\d{1,3}`'s reach on purpose, so all
     # three produce the same key under either flag and pass with it wrong. "4 - Leaves"
     # has the separator the pattern requires: with the flag on the index would answer to
-    # "leaves", and Task 4 -- which must look up with the flag off -- would never find it.
+    # "leaves", and `dedup.py` -- which must look up with the flag off -- would never find
+    # it.
     scan = scan_roots(make_library_extra)
     assert "4 - leaves" in scan.by_name
     assert "leaves" not in scan.by_name
@@ -93,7 +94,7 @@ def test_a_track_number_is_still_stripped_from_track_keys(make_library_extra):
 
 
 def test_album_name_index_keeps_single_and_deluxe_suffixes(make_library_extra):
-    # spec §7.5: " - Single" and " [Deluxe]" are album identity, not decoration.
+    # " - Single" and " [Deluxe]" are album identity, not decoration.
     scan = scan_roots(make_library_extra)
     assert "song - single" in scan.by_name
     assert "album [deluxe]" in scan.by_name
@@ -104,16 +105,16 @@ def test_an_album_name_that_normalizes_to_nothing_is_still_indexed(make_library)
     # character in it, so `normalize` answers "".
     #
     # It stays in the index because the *album* side has no empty-key guard anywhere: the
-    # plan's one guard is on the track title (Task 4 refuses to skip when the title key is
-    # empty), so `by_name[""]` is reachable for a download whose album name is
-    # punctuation-only, and dropping the key would make that download re-fetch an album
-    # already on disk. Whether such a match *should* be trusted is Task 4's call -- two
-    # punctuation-only album names being the same release is plausible, and a guard there
-    # is a decision for the dedup layer, not for the scanner.
+    # one guard there is on the track title (`dedup.find_duplicate` refuses to skip when
+    # the title key is empty), so `by_name[""]` is reachable for a download whose album
+    # name is punctuation-only, and dropping the key would make that download re-fetch an
+    # album already on disk. Whether such a match *should* be trusted is `dedup.py`'s
+    # call -- two punctuation-only album names being the same release is plausible, and a
+    # guard there is a decision for the dedup layer, not for the scanner.
     #
     # An empty *title* is the other case and behaves differently by accident, not by
-    # design: `""` in `track_keys` is findable for the same reason, and Task 4's title
-    # guard is what stops it from matching everything. (Review Focus #2.)
+    # design: `""` in `track_keys` is findable for the same reason, and the title guard
+    # is what stops it from matching everything.
     scan = scan_roots(make_library)
     assert "" in scan.by_name
     (album,) = scan.by_name[""]
@@ -161,7 +162,7 @@ def test_artist_of_a_codec_directory_that_is_not_below_a_codec_directory(make_li
 
 
 def test_artist_is_the_parent_directory_name(make_library):
-    # §8: the parent is the artist, full stop. There is no codec-bucket exception -- a
+    # The parent is the artist, full stop. There is no codec-bucket exception -- a
     # bucket sits between the artist and the root, never between the artist and the album
     # -- so `ALAC/TEMPLIME/POP-AID` and `TEMPLIME/POP-AID` answer the same without one.
     scan = scan_roots(make_library)
@@ -256,7 +257,7 @@ def test_the_root_scope_is_not_indexed_as_an_album_name(tmp_path):
 
 def test_by_name_is_the_same_however_the_root_is_spelled(tmp_path):
     # An operator's own configuration is a symlink into /run/media/<volume-UUID>/, and
-    # §8.1 probes reachability from more than one call site, so two spellings of one
+    # reachability is checked from more than one call site, so two spellings of one
     # library must produce one index. With the root's basename in
     # `by_name` this failed: the drive's own scope was keyed "music" one way and
     # "hdd_music" the other, and the two scans compared unequal.
@@ -296,7 +297,7 @@ def test_is_audio_file_decides_what_is_a_track(make_library):
 
 
 def test_part_files_are_not_tracks(make_library):
-    # Review Focus #5: 160 .part files exist in the real library
+    # 160 .part files exist in the real library
     scan = scan_roots(make_library)
     six = scan.by_name["album six"][0]
     assert "real" in six.track_keys
@@ -315,7 +316,7 @@ def test_a_directory_of_only_part_files_is_not_an_album_dir(tmp_path):
 
 
 def test_empty_titles_are_representable_but_distinguishable(make_library):
-    # Review Focus #2: normalize("") == "" must be findable so dedup can reject it
+    # normalize("") == "" must be findable so dedup can reject it
     scan = scan_roots(make_library)
     four = scan.by_name["album four"][0]
     assert "" in four.track_keys
@@ -326,7 +327,7 @@ def test_unreachable_root_is_marked_degraded(tmp_path, make_library):
     scan = scan_roots(roots)
     assert scan.reachable == (True, False)
     assert scan.degraded == (tmp_path / "not-mounted",)
-    assert len(scan.albums) > 0  # the good root still works (Review Focus #4)
+    assert len(scan.albums) > 0  # the good root still works
 
 
 def test_every_root_appears_in_order_with_its_own_index(make_library, tmp_path):
@@ -344,7 +345,7 @@ def test_every_root_appears_in_order_with_its_own_index(make_library, tmp_path):
 
 
 def test_root_that_is_a_symlink_is_accepted(tmp_path, make_library):
-    # Review Focus #1: operators point this at a symlink of their own into a volume's
+    # Operators point this at a symlink of their own into a volume's
     # automount point, so the root the caller passes is the symlink, not the target.
     link = tmp_path / "library-link"
     link.symlink_to(make_library / "a")
@@ -357,7 +358,8 @@ def test_root_that_is_a_symlink_is_accepted(tmp_path, make_library):
 
 
 def test_a_walked_path_outside_the_root_raises_instead_of_finding_nothing():
-    # The loud half of Review Focus #1. Resolving one side of the walk and not the other
+    # The loud half of the unresolved-root case. Resolving one side of the walk and not the
+    # other
     # is what makes every entry look like it lives outside the root; the symptom is a
     # scan that reports no albums and no error, so every download runs again. A root
     # configured with a redundant component, or a root normalized in one place and walked
@@ -367,12 +369,12 @@ def test_a_walked_path_outside_the_root_raises_instead_of_finding_nothing():
 
 
 def test_a_symlinked_directory_inside_a_root_is_not_followed(tmp_path, make_library):
-    # A symlinked *root* is followed (Review Focus #1 -- operators point the root at a
+    # A symlinked *root* is followed (operators point the root at a
     # symlink of their own). A symlinked directory *inside* a root is not: os.walk is called
     # without followlinks, so `Linked` is listed but never visited. That keeps a
     # per-request scan bounded -- a link back up to an ancestor would otherwise recurse
     # forever on every download request -- and it keeps every reported path inside the
-    # root the user configured, which §11's file-serving check depends on. The real
+    # root the user configured, which the file-serving check depends on. The real
     # library contains no symlinks at all, so nothing is lost here.
     real = tmp_path / "elsewhere" / "Real Album"
     real.mkdir(parents=True)
@@ -387,7 +389,7 @@ def test_a_symlinked_directory_inside_a_root_is_not_followed(tmp_path, make_libr
 
 
 def test_repeated_scans_of_one_tree_agree(tmp_path, make_library):
-    # The filesystem is the only source of truth and there is no cache (§7.1.1), so
+    # The filesystem is the only source of truth and there is no cache, so
     # every request re-walks. Two scans must not differ, otherwise a skip depends on
     # which request happened to ask.
     first = scan_roots([make_library / "a"])
@@ -398,7 +400,7 @@ def test_repeated_scans_of_one_tree_agree(tmp_path, make_library):
 
 def test_a_later_change_is_visible_without_a_rescan_hook(tmp_path, make_library):
     # The direct consequence of "no cache": a directory created after the last scan is
-    # found by the next one. If this ever needs a call to drop a cache, §7.1's
+    # found by the next one. If this ever needs a call to drop a cache, the
     # statelessness has been broken.
     root = make_library / "a"
     before = scan_roots([root])
@@ -431,7 +433,7 @@ def test_a_root_that_is_a_file_is_degraded_not_fatal(tmp_path):
 
 
 def test_scan_is_fast_enough_to_run_per_request(make_library):
-    # spec §7.1.1 measured 0.06 s for `os.walk` over 4,367 dirs / 10,184 files, and
+    # Measured 0.06 s for `os.walk` over 4,367 dirs / 10,184 files, and
     # 0.091 s for a full `scan_roots` of the same library, so the design re-scans per
     # request and keeps no cache. This is a per-file cost guard rather than a wall-clock
     # guard: the fixture is tiny, so the only thing it can catch is a scan that does

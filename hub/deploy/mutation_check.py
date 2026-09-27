@@ -40,7 +40,7 @@ MUTATIONS = {
     "the **/data/ pattern reverted": (
         DI, lambda t: t.replace("**/data/\n", "data/\n")),
     # -- important 3: PYTHONPATH ---------------------------------------------
-    "PYTHONPATH back to the plan's /app": (
+    "PYTHONPATH back to /app instead of /app/hub": (
         D, lambda t: t.replace("ENV PYTHONPATH=/app/hub", "ENV PYTHONPATH=/app")),
     "the package moved but PYTHONPATH did not": (
         D, lambda t: t.replace("COPY hub/hub /app/hub/hub", "COPY hub/hub /app/hub/hub/vendored")),

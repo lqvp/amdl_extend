@@ -1,4 +1,4 @@
-"""The application: the singletons, their order, and the download scheduler (spec §3, §9).
+"""The application: the singletons, their order, and the download scheduler.
 
 **The startup order is not a list, it is a dependency chain.** The wrapper comes up first
 because everything downstream of it is a client of it; the ripper host comes second because
@@ -23,7 +23,7 @@ budget, and `MVRipper`/`Ripper` both resolve their singletons through it. Sequen
 throughput is not the constraint here -- a download takes minutes and the queue is the
 user's, not the hub's.
 
-**The filesystem duplicate check happens here and nowhere else.** §7.3 is a per-*file*
+**The filesystem duplicate check happens here and nowhere else.** It is a per-*file*
 decision, and a queued job can sit long enough for the file to be deleted underneath it, so
 checking at enqueue time would put two dedup checks with different timings into the codebase
 for them to disagree. The one input that is easy to get wrong is `track_title`: it is the
@@ -66,7 +66,7 @@ IDLE_POLL_SECONDS = 0.5
 #: How long to wait before re-probing the wrapper while something is queued but the wrapper
 #: cannot serve it.
 #:
-#: §10's requirement is that a token expiring while the hub runs is a state change a cache
+#: The requirement is that a token expiring while the hub runs is a state change a cache
 #: would hide, and that is real -- but 0.5 s was the wrong instrument for it. The loop called
 #: `supervisor.status()` (uncached, on purpose) on *every* iteration, including the ones where
 #: there was nothing to claim, so an idle hub made 2.0 probes/s: ~172,800 HTTP requests a day
@@ -246,7 +246,7 @@ async def _execute(state, job: Job) -> None:
             "failed",
             error=(
                 f"adam_id={job.adam_id} could not be expanded from {job.parent_url} any more, "
-                f"so there is no album name, artist or storefront to rip it with. §6's `job` "
+                f"so there is no album name, artist or storefront to rip it with. The `job` "
                 f"table does not store them, so the only way to know them is to ask the "
                 f"catalogue -- and it no longer lists this track under that URL. Re-submit "
                 f"the URL to queue it again."
@@ -255,7 +255,7 @@ async def _execute(state, job: Job) -> None:
         return
 
     if not job.force and not leaf.is_music_video:
-        # spec §2's non-goal: a music video lives in one flat `mv.saveDir`, so there is no
+        # A deliberate non-goal: a music video lives in one flat `mv.saveDir`, so there is no
         # album scope to compare against and it is always re-downloaded. Checking it would
         # either never match or match the wrong thing, and the user must not be told a video
         # was "already downloaded".
@@ -274,7 +274,7 @@ async def _execute(state, job: Job) -> None:
     try:
         await runner(leaf, force=job.force)
     except Exception as exc:  # noqa: BLE001 - one job's failure is not the loop's
-        # §10: a wrapper that stops serving *during* a rip parks the job in `waiting` rather
+        # A wrapper that stops serving *during* a rip parks the job in `waiting` rather
         # than failing it. The discriminator is the wrapper's own observable state, never the
         # message -- see `_park_reason`.
         #
@@ -305,7 +305,7 @@ async def _execute(state, job: Job) -> None:
 def _park_for(state, job: Job, exc: Exception, reason: str, detail: str = "") -> None:
     """Put the job in `waiting`, with a message that is true of *this* reason.
 
-    §10's "走行中ジョブは fail せず `waiting` へ入れ" -- a job interrupted by the wrapper going
+    The rule "走行中ジョブは fail せず `waiting` へ入れ" -- a job interrupted by the wrapper going
     away goes back in the queue rather than becoming a failure, because nothing is wrong with
     the track and the user is at most one action away from a working download. `resume_waiting`
     puts it back at its original place (the queue is ordered by `id` and nothing else), so a
@@ -347,7 +347,7 @@ async def _park_reason(state) -> tuple[str | None, str]:
     rewords a log line and the queue starts failing jobs that should have waited, with no
     failing test. So the question asked is `regions`, which the supervisor already reports and
     which means the same thing in every version -- an empty list cannot serve a download, and
-    §10's whole `waiting` mechanism is built on that observation.
+    the whole `waiting` mechanism is built on that observation.
 
     **The return is a reason and not a bool, because the reasons need different messages and
     different ways out (B1b).** A wrapper that has crashed is recovered by the supervisor or by
@@ -483,7 +483,7 @@ async def _leaf_for(state, job: Job) -> Leaf | None:
 
     Two sources, in order. The registry holds the expansion this process made, which is the
     common case and free. The second is a re-expansion of the parent URL, which is what makes
-    a restart survivable: a queued row outlives the process that wrote it, and §6's table
+    a restart survivable: a queued row outlives the process that wrote it, and the `job` table
     does not carry the fields the rip needs, so the only way to get them back is to ask the
     catalogue again.
 
@@ -520,7 +520,7 @@ async def _leaf_for(state, job: Job) -> Leaf | None:
 
 
 async def _filesystem_duplicate(state, leaf: Leaf) -> DuplicateHit | None:
-    """§7.3 on a real walk, in a worker thread.
+    """The filesystem duplicate check on a real walk, in a worker thread.
 
     The rendered file name is produced on the loop and the walk happens off it: `os.walk`
     over a 341 GB drive blocks for long enough to stall every other request and the SSE
@@ -531,7 +531,7 @@ async def _filesystem_duplicate(state, leaf: Leaf) -> DuplicateHit | None:
 
 
 def _find_duplicate(state, leaf: Leaf, rendered: str) -> DuplicateHit | None:
-    """The pure part of §7.3, given its three inputs and a scan.
+    """The pure part of the duplicate check, given its three inputs and a scan.
 
     `rendered` is the *file name* `rip_song` would write, and it is passed through
     `normalize` exactly once -- on the library side too, since `scan_roots` normalises each
@@ -580,9 +580,10 @@ def _skip_reason(hit: DuplicateHit) -> str:
 def _warn_degraded(state, scan) -> None:
     """Say so, once per change, when a configured root cannot be read.
 
-    spec §8.1. `loose` dedup against the surviving roots still works, so the failure mode
-    without this is a quiet re-download of everything that lived on the missing drive -- and
-    the operator has no way to tell that from the hub being broken.
+    An unmounted external drive must be **loud**. `loose` dedup against the surviving
+    roots still works, so the failure mode without this is a quiet re-download of
+    everything that lived on the missing drive -- and the operator has no way to tell that
+    from the hub being broken.
     """
     current = tuple(str(root) for root in scan.degraded)
     if current == state.degraded_roots:
@@ -638,7 +639,7 @@ async def scheduler_loop(state) -> None:
     per second. `test_an_idle_hub_probes_the_wrapper_rarely_and_one_more_when_waking` counts
     both halves: the idle rate, and that a claim is never made on a stale answer.
 
-    §10's two states are then both quiet in the right way: a wrapper that is not running
+    The two states are then both quiet in the right way: a wrapper that is not running
     leaves the queue `queued` (so the user's order is intact and `POST /api/wrapper/start`
     makes it run), and a wrapper serving with no account says so once instead of failing
     every job with an error about `/key`.
@@ -653,7 +654,7 @@ async def scheduler_loop(state) -> None:
             continue
 
         # Something is queued, so readiness is about to be acted on and is probed now. A
-        # cached answer here would be the §10 bug: a token that expired an hour ago would
+        # A cached answer here is the bug: a token that expired an hour ago would
         # still read as ready.
         problem = await _wrapper_problem(state)
         state.cached_problem = problem
@@ -730,7 +731,7 @@ def _has_actionable(state) -> bool:
 async def _wrapper_problem(state) -> str | None:
     """`None` when a download could run, else `"no-account"` or `"unavailable"`.
 
-    The supervisor's own `status()`, not the cached `state` this module keeps, because §10's
+    The supervisor's own `status()`, not the cached `state` this module keeps, because the
     whole point is that a *change* -- the token expiring while the hub runs -- is a state
     change a cache would hide. `WrapperSupervisor.status` is uncached for exactly this reason.
     """

@@ -123,8 +123,8 @@ def test_rejects_a_rip_concurrency_below_one():
 
 
 def test_rejects_an_unknown_artist_scope():
-    # A typo must not silently fall back to "loose", which is the false-skip mode §7.4
-    # is written to warn about.
+    # A typo must not silently fall back to "loose", which is the false-skip mode
+    # `ARTIST_SCOPES` exists to warn about.
     with pytest.raises(RuntimeError, match="AMD_DEDUP_ARTIST_SCOPE"):
         load_settings(
             {

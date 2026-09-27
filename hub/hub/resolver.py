@@ -2,12 +2,13 @@
 
 **Why the hub expands a container instead of handing it to the downloader.** The
 queue is one table with one partial unique index on `(adam_id, codec)`
-(`hub.jobs.JOB_TABLE_SQL`), and §6's progress is per track. Both of those need a flat
+(`hub.jobs.JOB_TABLE_SQL`), and the progress bar is per track. Both of those need a flat
 list up front: an album URL is not a key, and a parent job's progress is not the sum of
 its children unless the children are already rows. So `expand()` is the boundary, and
-everything downstream -- deduplication, the per-file decision in §7.3, the progress
-bar -- works on leaves rather than on URLs. It also matches the shape the existing TUI
-already shows (`src/tui/task_tree.py` registers an album group and its tracks).
+everything downstream -- deduplication, the per-file decision in `hub.app`'s scheduler,
+the progress bar -- works on leaves rather than on URLs. It also matches the shape the
+existing TUI already shows (`src/tui/task_tree.py` registers an album group and its
+tracks).
 
 **The `web_api` parameter is the design, not a convenience.** It is keyword-only and has
 no default, so a `WebAPI` can only come from the caller. That is what keeps this module
@@ -72,7 +73,7 @@ that has to be right about Apple's URL shapes.
 - *Song.* One `get_song_info` call fills all three (`SongData.Datum.attributes`: `name`,
   `albumName`, `artistName` -- the same model `SongMetadata.parse_from_song_data` reads).
   Nothing is synthesised. Round 0 had this as `""` and was wrong: an empty `title` or an
-  empty `album_name` independently defeats the whole §7.3 lookup, because `normalize("")`
+  empty `album_name` independently defeats the whole dedup lookup, because `normalize("")`
   is falsy and `dedup.find_duplicate` returns `None` for either being falsy. Round 0
   argued that `Leaf.title` is "log display only", which is true of the *store* and not
   of everything downstream of it.
@@ -97,11 +98,11 @@ that exists for exactly that.
 
 **The one logger.** `loguru`, for the single case where a possibly-truncated container
 has to be distinguishable from a complete one (`_collect_pages`'s non-progress exit).
-`loguru` is already a hard hub dependency for Task 6 and is what upstream's own logging
-is built on (`src/logger.py`, bridged into the TUI by `src/tui/log_sink.py`), so a line
-written here and a line written upstream land in the same place. `warnings.warn` was the
-alternative and is the wrong tool twice over: it is deduplicated by default, so a repeat
-would be silent, and it is routinely filtered in production.
+`loguru` is already a hard hub dependency for `ripper_host.py` and is what upstream's own
+logging is built on (`src/logger.py`, bridged into the TUI by `src/tui/log_sink.py`), so a
+line written here and a line written upstream land in the same place. `warnings.warn` was
+the alternative and is the wrong tool twice over: it is deduplicated by default, so a
+repeat would be silent, and it is routinely filtered in production.
 """
 
 from __future__ import annotations
@@ -431,12 +432,13 @@ async def _song_leaves(
     link reaches the queue as the string the user pasted, `?i=` and all.
 
     **Why this is not optional, which it was in round 0.** An empty `title` and an empty
-    `album_name` each independently defeat the whole §7.3 lookup: `normalize("")` is
+    `album_name` each independently defeat the whole dedup lookup: `normalize("")` is
     falsy, and `dedup.find_duplicate` returns `None` for either being falsy. So a leaf
     with empty metadata is a leaf that can never be recognised as already-downloaded.
     `Leaf.title` is documented as "log display only; never compared", which is true of
     the *store* and not of everything downstream of it -- and the review is right that
-    the dedup risk lands on Task 9, where the filename is rendered from this metadata.
+    the dedup risk lands on the API layer, where the filename is rendered from this
+    metadata.
     One request per single-track paste is a small, bounded price for a leaf that is
     actually describable; a whole class of "it re-downloaded a track I already have" bug
     is not.

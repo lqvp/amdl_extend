@@ -1,4 +1,4 @@
-"""The HTTP surface: auth, `POST /api/jobs`, the queue, and the SSE stream (spec §9).
+"""The HTTP surface: auth, `POST /api/jobs`, the queue, and the SSE stream.
 
 Everything here runs against `httpx`'s ASGI transport, so there is no live server, no
 wrapper binary and no network. The three collaborators the app owns -- the supervisor, the
@@ -9,7 +9,7 @@ reach the expansion, that the leaves come back as queue rows, and that the job t
 later runs is rendered with the same name the library will hold.
 
 The filesystem is not faked either. The dedup check is the whole point of this task
-(spec §7.3) and it works by walking real directories, so these tests build real trees from
+and it works by walking real directories, so these tests build real trees from
 `conftest.make_library` and let `scan_roots` walk them.
 
 The failures that matter here are all *silent* ones -- a dedup check fed a tag title instead
@@ -293,7 +293,7 @@ class FakeRipper:
         `hub.app`'s handler hops to the loop with `call_soon_threadsafe`. A fake cannot
         reproduce the thread hop without being a fake of the hop, so it calls the handler
         directly -- and `test_progress_reaches_the_store_and_the_stream` therefore covers the
-        handler, while `spike/task9_hub_check.py` covers the real poll.
+        handler, while the real poll is exercised by the acceptance run.
         """
         reading = Progress(
             bytes_done=done,
@@ -413,7 +413,7 @@ def _store(settings) -> JobStore:
 # Authentication
 # --------------------------------------------------------------------------- #
 async def test_health_needs_no_auth(client):
-    """§9 marks exactly one route as reachable without a session.
+    """Exactly one route is reachable without a session.
 
     It is the compose healthcheck's target, so it has to answer before a login exists. It
     therefore reports *liveness only* -- no queue, no wrapper state, no library paths --
@@ -626,7 +626,7 @@ def _route_table(app) -> list[tuple[str, str]]:
 #: Paths that legitimately answer without a session, and why each one does. Anything not
 #: listed here is a bug, and this is the list a new route has to argue its way onto.
 OPEN_WITHOUT_A_SESSION = {
-    ("GET", "/api/health"): "spec §9's compose healthcheck target; liveness only",
+    ("GET", "/api/health"): "the compose healthcheck target; liveness only",
     ("POST", "/api/auth/login"): "mints the session",
     ("GET", "/login"): "the form itself, which is how a session is obtained",
     ("POST", "/login"): "the form's no-JS target",
@@ -714,7 +714,7 @@ async def test_the_session_cookie_is_httponly_and_samesite_lax(client):
     assert "SameSite=lax" in header.lower().replace("samesite=lax", "SameSite=lax")
     assert "amd_hub_session=" in header
     # Plain HTTP, so no `Secure` -- a hardcoded one would make the cookie undeliverable on
-    # the LAN deployment spec §14 describes.
+    # the LAN deployment the image is built for.
     assert "Secure" not in header
 
 
@@ -919,9 +919,10 @@ async def test_post_jobs_reports_created_skipped_and_deduplicated(authed):
     r = await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     body = r.json()
     assert r.status_code == 200
-    # Four keys, not the spec §9 three: `create_batch` raises `ValueError` on an unusable
-    # leaf *after* applying the earlier ones, so a name is needed for the one that was not
-    # queued. Without it a 19-track album with one bad track is a 500 and 19 queued tracks.
+    # Four keys, not the three the contract names: `create_batch` raises `ValueError` on an
+    # unusable leaf *after* applying the earlier ones, so a name is needed for the one that
+    # was not queued. Without it a 19-track album with one bad track is a 500 and 19 queued
+    # tracks.
     assert set(body) == {"created", "skipped", "deduplicated", "rejected"}
     assert body["created"] == [1]
     assert body["skipped"] == []
@@ -1010,7 +1011,7 @@ async def test_an_album_expands_to_one_job_per_track(authed, settings):
 
 
 async def test_the_same_track_in_two_languages_is_one_job(authed, settings):
-    """`language` is not in the dedup key (spec §6) and must not be in the API's answer.
+    """`language` is not in the dedup key and must not be in the API's answer.
 
     One download serves both; two rows would download it twice.
     """
@@ -1128,7 +1129,7 @@ async def test_deduplication_folds_onto_the_running_job_not_the_oldest_one(authe
 
 
 async def test_force_does_not_buy_a_second_job_for_one_track(authed):
-    """§6's index has no way to express `force`, and that is the point.
+    """The dedup index has no way to express `force`, and that is the point.
 
     `force` means "re-download this even though it is on disk", which is decided per *file*
     at execution time -- not "run this twice at once".
@@ -1146,10 +1147,10 @@ def _unusable_leaf_batch(settings) -> None:
     """Two good leaves and then one with no `adam_id`, through the real store.
 
     Written against `JobStore` directly rather than through the API because the resolver
-    refuses to *produce* such a leaf (`hub.resolver._required`). The refusal Task 9 has to
-    survive is a leaf from a future resolver change or a hand-edited database, not one this
-    build can make -- and a test that can only be reached through a code path that cannot
-    fail is not a test.
+    refuses to *produce* such a leaf (`hub.resolver._required`). The refusal the API layer
+    has to survive is a leaf from a future resolver change or a hand-edited database, not
+    one this build can make -- and a test that can only be reached through a code path that
+    cannot fail is not a test.
     """
     from hub.jobs import Leaf
 
@@ -1183,7 +1184,7 @@ async def test_create_batch_applies_the_leaves_before_the_bad_one(settings):
 async def test_a_refused_leaf_answers_200_with_what_landed_and_a_rejected_name(
     authed, settings, monkeypatch
 ):
-    """§7.3 must not turn one bad track into a 500 with 19 tracks queued behind it.
+    """One bad track must not become a 500 with 19 tracks queued behind it.
 
     The handler catches `ValueError`, reads back the batch **by `parent_url`** and reports
     the two that landed plus a `rejected` entry naming the one that did not.
@@ -1267,7 +1268,7 @@ def _expansion_with_one_unusable_leaf():
 async def test_a_job_already_on_disk_is_skipped_with_the_matched_paths(
     running, authed, settings, library, ripper
 ):
-    """§7.3 steps 1-3, end to end, on a real tree.
+    """The dedup check end to end, on a real tree.
 
     `skip_reason` carries the matched paths *verbatim* and they are the whole of the
     evidence: `loose` matching is deliberately willing to treat two same-named albums as one,
@@ -1294,7 +1295,7 @@ async def test_a_job_already_on_disk_is_skipped_with_the_matched_paths(
 async def test_the_dedup_check_is_given_the_rendered_file_name_not_the_tag_title(
     running, authed, settings, library, ripper
 ):
-    """The one silent bug this task exists to avoid (spec §7.6, last row).
+    """The one silent bug this suite exists to avoid.
 
     `normalize` is not idempotent. The file on disk is `1-01 1 a.m. (feat. …).m4a`, whose key
     is `1 a.m. (feat. …)`; the tag title is `1 a.m. (feat. …)`, whose own key is
@@ -1382,9 +1383,9 @@ async def test_the_same_track_in_another_album_is_never_skipped(
 async def test_force_downloads_a_file_that_is_already_on_disk(
     running, authed, settings, library, ripper
 ):
-    """§7.6's escape hatch, and it is `force` *at execution time*.
+    """The escape hatch, and it is `force` *at execution time*.
 
-    The queue index cannot honour it (spec §6), so the flag is stored and read here, where
+    The queue index cannot honour it, so the flag is stored and read here, where
     the file that would be skipped actually exists.
     """
     album = library / "toe/4pi"
@@ -1403,7 +1404,7 @@ async def test_the_job_contract_does_not_fabricate_is_music_video(
 ):
     """I7: the key is absent, because there is no honest value to put in it.
 
-    Round 0 wrote `data["is_music_video"] = False` into every serialised job. §6's `job` table
+    Round 0 wrote `data["is_music_video"] = False` into every serialised job. The `job` table
     has no such column -- `Leaf`'s own docstring says it is not persisted -- so that line was
     the *only* reason the key appeared in the API, and it was a fabrication: a music-video job
     reported `False` while the leaf it came from said `True`.
@@ -1414,8 +1415,8 @@ async def test_the_job_contract_does_not_fabricate_is_music_video(
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     job = (await authed.get("/api/jobs/1")).json()
     assert "is_music_video" not in job, (
-        f"the serialised job carries is_music_video={job.get('is_music_video')!r}; §6 has no "
-        f"column for it, so any value here is invented"
+        f"the serialised job carries is_music_video={job.get('is_music_video')!r}; the `job` "
+        f"table has no column for it, so any value here is invented"
     )
 
     # And the same for a music video, which is where the fabrication was actually wrong. It
@@ -1444,7 +1445,8 @@ async def test_the_job_contract_is_exactly_the_stores_columns(running, authed, s
     """No key in, no key out: the serialised job is `asdict(Job)`.
 
     Which is what makes I7 structural rather than a line that could be re-added -- a column
-    appears when §6 grows one, and nothing else. Compared as sets so the assertion is about
+    appears when `JOB_TABLE_SQL` grows one, and nothing else. Compared as sets so the assertion
+    is about
     the *shape* of the contract rather than about every value.
     """
     from dataclasses import fields
@@ -1461,7 +1463,7 @@ async def test_the_job_contract_is_exactly_the_stores_columns(running, authed, s
 
 
 async def test_a_music_video_is_never_deduplicated(running, authed, settings, library, ripper):
-    """§2's non-goal: a music video has no album scope to compare against.
+    """A deliberate non-goal: a music video has no album scope to compare against.
 
     `rip.py` writes every video into one flat `mv.saveDir`, so the album-directory
     comparison cannot hold and the video is always re-downloaded. The user must not be told
@@ -1479,7 +1481,7 @@ async def test_a_music_video_is_never_deduplicated(running, authed, settings, li
 async def test_a_failing_rip_fails_the_job_with_the_reason(
     running, authed, settings, ripper, supervisor
 ):
-    """§10: a download failure is shown, not swallowed.
+    """A download failure is shown, not swallowed.
 
     `RipperHostError`'s message is carried through verbatim because upstream's is the
     diagnosis; replacing it with "download failed" would send the reader to the wrong place.
@@ -1510,7 +1512,7 @@ async def test_a_job_whose_leaf_this_process_never_expanded_is_failed_with_a_rea
 ):
     """A row written by a previous process cannot be ripped from its columns alone.
 
-    §6's `job` table stores `adam_id`, `title`, `codec` and `language` -- not the album name,
+    The `job` table stores `adam_id`, `title`, `codec` and `language` -- not the album name,
     the artist or the storefront, all of which `rip_song` and the dedup render need. So the
     hub re-expands the parent URL when it can, and when it cannot the job is failed with a
     message that says to re-submit, rather than being left `queued` forever or run with
@@ -1559,7 +1561,7 @@ async def test_run_one_reports_that_the_queue_was_empty(running):
 async def test_progress_reaches_the_store_and_the_stream(
     running, authed, settings, progress_ripper
 ):
-    """§9's "SSE: 転送速度", end to end, and with no polling in the test.
+    """The "SSE: 転送速度" requirement, end to end, and with no polling in the test.
 
     The three pieces the ruling named, all of which were missing in round 0: the seam's
     callback, the `mark` that writes it, and the `publish` that puts the row on the stream.
@@ -1849,7 +1851,7 @@ async def test_deleting_a_queued_job_frees_its_dedupe_slot(running, authed, sett
 
 
 async def test_get_jobs_filters_by_status_and_by_parent(running, authed, settings):
-    """§9's `GET /api/jobs ?status=&parent=`, which round 0 implemented and never tested.
+    """`GET /api/jobs ?status=&parent=`, which round 0 implemented and never tested.
 
     Both filters were undefended: deleting `parent_url=parent` from the handler left the suite
     green, in a codebase whose stated failure mode is a filter that quietly stops filtering.
@@ -1885,7 +1887,7 @@ async def test_get_jobs_filters_by_status_and_by_parent(running, authed, setting
     assert [job["id"] for job in by_parent] == [1]
     assert by_parent[0]["parent_url"] == ALBUM_URL
 
-    # And the two compose, which is the case §9's `?status=&parent=` actually describes.
+    # And the two compose, which is the case `?status=&parent=` actually describes.
     both = (
         await authed.get("/api/jobs", params={"status": "failed", "parent": ALBUM_URL})
     ).json()["jobs"]
@@ -1900,9 +1902,9 @@ async def test_get_jobs_filters_by_status_and_by_parent(running, authed, setting
 async def test_an_absent_filter_means_no_filter_not_everything_or_nothing(running, authed):
     """`?status=` with no value is absent, and absent means unfiltered.
 
-    The distinction matters because `parent_id=None` means "no filter" and a reader of §6
-    could reasonably expect "top level only". Both arguments default to None and None means
-    no filter, which is what an absent query parameter means.
+    The distinction matters because `parent_id=None` means "no filter" and a reader of the
+    `job` table could reasonably expect "top level only". Both arguments default to None and
+    None means no filter, which is what an absent query parameter means.
     """
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     every = (await authed.get("/api/jobs", params={})).json()["jobs"]
@@ -1949,7 +1951,7 @@ async def test_a_job_that_is_not_there_is_a_404(authed):
 # GET /api/status
 # --------------------------------------------------------------------------- #
 async def test_status_reports_degraded_roots(authed, settings, tmp_path):
-    """§8.1: an unmounted drive must be *loud*.
+    """An unmounted drive must be *loud*.
 
     `loose` dedup against the surviving roots still works, so the failure mode without this
     is a quiet re-download of everything that lived on the missing drive.
@@ -1969,7 +1971,7 @@ async def test_status_reports_a_per_root_count_so_an_empty_mount_is_visible(auth
     bind-mount autocreate makes the directory, so the root arrives mounted, readable, and
     empty. `reachable` is then `True`, `degraded_roots` is empty, and nothing anywhere says a
     drive is absent -- while the queue quietly re-downloads everything that lived on it, which
-    is the single worst failure mode in this design (spec §8.1).
+    is the single worst failure mode in this design.
 
     `library_scan` cannot resolve it: nothing on disk distinguishes an empty library from an
     absent drive. So the per-root count is surfaced, and a total cannot stand in for it -- a
@@ -2214,7 +2216,7 @@ async def test_a_rejected_password_is_a_failure_with_both_wordings(authed, super
 
 
 async def test_the_2fa_deadline_is_the_binaries_sixty_seconds(authed, supervisor):
-    """spec §10: the challenge TTL matches the binary's own `20 x 3s` poll window.
+    """The challenge TTL matches the binary's own `20 x 3s` poll window.
 
     A 300 s deadline would offer a user a code the child has already stopped reading, and
     the wrapper would exit with the hub still holding a "valid" challenge. The constant is
@@ -2283,7 +2285,7 @@ async def test_a_supervisor_that_cannot_start_after_a_login_says_so(authed, supe
 async def test_a_login_resumes_the_jobs_that_were_waiting_for_a_token(
     running, authed, supervisor, settings, ripper
 ):
-    """§10 end to end, and with no raw SQL anywhere in it.
+    """The token-expiry park end to end, and with no raw SQL anywhere in it.
 
     Round 0 hand-`INSERT`ed a `waiting` row, which is a unit test of `resume_waiting` wearing
     the clothes of an integration test: nothing produced the row, so nothing was under test
@@ -2307,7 +2309,7 @@ async def test_a_login_resumes_the_jobs_that_were_waiting_for_a_token(
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
 
     # Mid-download the account goes away: the wrapper keeps serving /status and `regions`
-    # goes empty, which is the state §10 describes.
+    # goes empty, which is the state described above.
     ripper.rip_error = RipperHostError("rip_song failed for adam_id=1: no such account")
     supervisor.regions = []
 
@@ -2315,7 +2317,7 @@ async def test_a_login_resumes_the_jobs_that_were_waiting_for_a_token(
 
     job = _store(settings).get(1)
     assert job.status == "waiting", (
-        f"the job is {job.status!r}; §10 says a token that expires during a download parks "
+        f"the job is {job.status!r}; a token that expires during a download parks "
         f"the job rather than failing it"
     )
     # The message names the *reason*, and `regions == []` with the wrapper up is the
@@ -2423,7 +2425,7 @@ async def test_a_failure_that_is_not_a_ripper_error_is_never_parked(
 async def test_a_genuine_download_failure_is_not_parked(running, authed, settings, ripper, supervisor):
     """The discriminator is the wrapper's state, not the error's wording.
 
-    §10 parks a job for an expired *token*. A download that fails while the wrapper is
+    A job is parked for an expired *token*. A download that fails while the wrapper is
     perfectly able to serve -- a bad file, a decode error, a network blip -- must still be
     `failed`, because `waiting` is not terminal: a job parked for a reason that never resolves
     is retried for ever and is never once visible as a failure.
@@ -2453,12 +2455,13 @@ async def test_a_wrapper_that_is_not_running_polls_the_job_instead_of_failing_it
 ):
     """A crashed wrapper is not an expired token, and parking is still the right answer.
 
-    §10's table says a stopped wrapper fails jobs with `wrapper_unavailable`; its *other* row
+    The park rules say a stopped wrapper fails jobs with `wrapper_unavailable`; its *other*
+    row
     says a token expiry parks them. The difference the hub can actually observe is whether the
     wrapper can serve: a crash and an expiry both leave it unable to, and in both cases the
     job's own outcome depends on the user doing something -- restarting the wrapper, or logging
     in. Failing it would throw away a queued track the user still wants; parking it costs
-    them nothing and the supervisor's own 3-restart budget (§10) will bring the wrapper back
+    them nothing and the supervisor's own 3-restart budget will bring the wrapper back
     on its own.
     """
     await authed.post("/api/wrapper/start")
@@ -2671,8 +2674,9 @@ async def test_create_app_hands_the_seam_a_live_progress_callback(settings, supe
 
     The round-1 tests called `app_module._on_progress(app.state)` themselves and assigned the
     result to the fake -- so the suite exercised the *callback* and never the thing that
-    installs it. Passing `on_progress=None` at `app.py:628` left all 539 tests green, so §9's
-    "SSE: … 転送速度" was not shown to be satisfied by the app a user actually runs.
+    installs it. Passing `on_progress=None` at `app.py:628` left all 539 tests green, so the
+    "SSE: … 転送速度" requirement was not shown to be satisfied by the app a user actually
+    runs.
 
     So this builds the app through the real `create_app` with **no injected ripper**, which is
     the branch that constructs a `RipperHost`, and replaces only the class. That is the
@@ -3035,14 +3039,15 @@ async def _wait_until(predicate, timeout: float, *, interval: float = 0.02) -> b
 
 
 async def test_the_2fa_route_refuses_a_code_when_nothing_is_waiting(authed):
-    """§9's `{code}` is enough, because the id lives here -- but only while it is live."""
+    """The wire shape's `{code}` is enough, because the id lives here -- but only while it
+    is live."""
     response = await _post_2fa(authed, "123456")
     assert response.status_code == 400
     assert response.json()["problem"] == "no-challenge"
 
 
 async def test_the_apple_password_is_never_echoed_back(authed, supervisor):
-    """§11: the Apple password is held in memory only, never echoed and never stored."""
+    """The Apple password is held in memory only, never echoed and never stored."""
     response = await authed.post(
         "/api/wrapper/login", json={"username": "me@x.example", "password": "s3cret"}
     )
@@ -3242,7 +3247,7 @@ async def test_the_snapshot_reflects_the_queue_as_it_is(running, authed, setting
     Nothing publishes a snapshot by itself -- `EventBroker.subscribe` deliberately hands a
     late subscriber only what is in the channel's backlog -- so a stream that did not publish
     one would render an empty queue for a tab that connected after the queue was already
-    full. That is the failure Task 7's report named, and this is where it is closed.
+    full. That failure is closed here.
     """
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     _store(settings).mark(1, "done")
@@ -3259,7 +3264,7 @@ async def test_a_skipped_jobs_matched_paths_reach_a_reconnecting_tab(running, au
 
     A tab that was closed when the skip happened reconnects and gets the snapshot. If
     `skip_reason` were not in it, the row would render as a bare "skipped" with nothing to
-    look at -- the one outcome §7.4 says must never happen.
+    look at -- the one outcome a skipped job must never present.
     """
     album = library / "toe/4pi"
     album.mkdir(parents=True)
@@ -3315,7 +3320,7 @@ async def test_a_subscription_is_released_when_the_client_goes_away(running, aut
 
 
 async def test_the_wrapper_log_reaches_the_same_stream(running, authed, supervisor):
-    """spec §9's stream is "job 状態 + ログ行", and it is one channel rather than two.
+    """The stream is "job 状態 + ログ行", and it is one channel rather than two.
 
     Two channels would need two subscriptions interleaved, and a snapshot published to one of
     them could not be placed correctly relative to the other's live frames. One channel means
@@ -3390,8 +3395,8 @@ async def test_a_scan_result_cannot_inject_markup_into_the_page(authed, running,
     untrusted input here.
 
     A directory called `<img src=x onerror=alert(1)>` is not an exotic name to end up with:
-    these libraries are user-curated and ripped from arbitrary sources, and §7.5's own rule
-    about keeping ` - Single` and ` (feat. …)` means odd characters are *kept* rather than
+    these libraries are user-curated and ripped from arbitrary sources, and the rule about
+    keeping ` - Single` and ` (feat. …)` means odd characters are *kept* rather than
     stripped. Jinja2's autoescaping is what stands between that and the browser, and this is
     the test that would notice if a template were marked `|safe`.
     """
@@ -3720,7 +3725,7 @@ async def test_a_wrapper_that_will_not_start_does_not_stop_the_hub(live_app, sup
 async def test_list_parent_url_is_a_filter_and_not_a_second_meaning_of_none(settings):
     """`parent_id=None` means *no filter*, and `parent_url=None` has to mean the same.
 
-    Two different readings of `None` on one method is how §9's `?parent=` would end up
+    Two different readings of `None` on one method is how `?parent=` would end up
     rendering the whole queue as a single batch.
     """
     from hub.jobs import Leaf
@@ -3843,7 +3848,7 @@ async def test_an_idle_hub_probes_the_wrapper_rarely_and_one_more_when_waking(
 
     The loop used to call `supervisor.status()` on every iteration whether or not there was
     anything to claim, sleeping 0.5 s between them: 2.0 probes/s, ~172,800 HTTP requests a day
-    from a hub doing nothing. §10's requirement is real -- a token expiring while the hub runs
+    from a hub doing nothing. The requirement is real -- a token expiring while the hub runs
     is a state change a cache would hide -- but 0.5 s was the wrong instrument for it.
 
     So the bound is asserted directly: the probes are *counted* over a real slice of the
@@ -3880,7 +3885,7 @@ async def test_an_idle_hub_probes_the_wrapper_rarely_and_one_more_when_waking(
         f"idle hub and the zero-probe assertion means nothing"
     )
     # And the bound is not met by a lucky short window: the interval a *ready* wrapper with
-    # queued work is polled at is deliberately short, because §10 wants a token change noticed
+    # queued work is polled at is deliberately short, because a token change must be noticed
     # quickly and the queue is being actively used. The idle case is the one that was 2 Hz.
     assert live_app_module.IDLE_POLL_SECONDS <= 1.0, (
         "an empty queue should be re-checked at the queue rate, not slower -- it costs a "
@@ -3946,8 +3951,9 @@ async def test_a_claim_is_never_made_on_a_stale_readiness_answer(
 async def test_a_cached_ready_answer_does_not_claim(live_app, settings, supervisor):
     """The slow idle poll is only defensible because the claim is guarded by a fresh probe.
 
-    This is the mutation `spike/task9_fix1_check.py` applies, and the property it breaks is
-    §10's: "a token expiring while the hub runs is a state change a cache would hide". A loop
+    This is the mutation a probe of this loop applies, and the property it breaks is the one
+    under test: "a token expiring while the hub runs is a state change a cache would hide". A
+    loop
     that acted on `state.cached_problem` would claim the next job on the answer it happened to
     hold, and the queue would fill with rips against a wrapper that cannot serve them.
 
@@ -3992,7 +3998,7 @@ async def test_a_cached_ready_answer_does_not_claim(live_app, settings, supervis
             "stuck in the queue until the process restarts"
         )
         assert store.get(1).status == "done", (
-            f"the job is {store.get(1).status!r} after the wrapper recovered; §10's login "
+            f"the job is {store.get(1).status!r} after the wrapper recovered; the login "
             f"path is only half a fix if a cached 'not ready' outlives the recovery"
         )
 
@@ -4182,7 +4188,7 @@ def test_the_db_is_where_the_settings_said_and_the_roots_are_absolute(running, s
 
 
 def test_a_locked_database_is_reported_rather_than_served(running, settings):
-    """WAL + `busy_timeout` (§6) covers contention; an unusable file is an operator error."""
+    """WAL + `busy_timeout` covers contention; an unusable file is an operator error."""
     settings.db_path = settings.db_path.parent / "a-directory-not-a-file"
     settings.db_path.mkdir()
     from hub.jobs import JobStoreError
@@ -4732,7 +4738,7 @@ async def test_the_same_track_in_two_codecs_is_not_ripped_twice_at_once(
     """The one thing concurrency breaks that serialising hid.
 
     The queue's unique index is `(adam_id, codec)`, so one track in `alac` and in `aac` is two
-    legal active jobs -- spec §6 says so on purpose, because the two are different downloads.
+    legal active jobs -- on purpose, because the two are different downloads.
     But `rip.py:166` short-circuits on `download_manager.get_task(url.id)`, which is `adam_id`
     with no codec: whichever starts second finds the first in the table, returns immediately,
     and the hub marks it `done` having downloaded nothing.
@@ -4819,7 +4825,8 @@ async def test_one_failing_job_does_not_stop_the_others(
     This is the promise concurrency makes that serialising never had to keep: a `gather` over
     siblings where one raises is a failure of the gather, so the whole pass needs an explicit
     guard or the first bad track silently cancels the three good ones it happened to start
-    with. The symptom is the shape §10 is written to prevent -- rows that say `running` with
+    with. The symptom is the shape the park rules are written to prevent -- rows that say
+    `running` with
     nothing running, or a cancellation attributed to a shutdown that never happened.
 
     The wrapper is *ready* throughout, so a plain `RuntimeError` is failed rather than parked:
@@ -4876,7 +4883,7 @@ async def test_a_job_that_raises_out_of_execute_does_not_strand_its_siblings(
     leaf lookup, and the library walk. `_leaf_for` catches `ResolveError` and `RuntimeError`
     because those are its answer, so what reaches the scheduler here is something else
     entirely: an `OSError` from a client that lost the socket, a `KeyError` from a catalogue
-    response that is missing a field. The park rule deliberately does not cover them -- §10
+    response that is missing a field. The park rule deliberately does not cover them -- it
     says so by name -- so nothing between them and the row.
 
     Serialising, one of those ended the pass and the next pass retried it: the queue was a

@@ -59,7 +59,7 @@ from hub.jobs import Leaf, Progress
 from hub.ripper_host import RipperHost, RipperHostError
 
 # The project root, as `hub/tests/../../` -- the same derivation the seam uses,
-# and the one the brief's smoke test guards on.
+# and the one the smoke test guards on.
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 VENDOR = REPO_ROOT / "AppleMusicDecrypt"
 
@@ -139,8 +139,7 @@ _PATH_ATTRS = frozenset({"sys.path"})
 #
 # Keyed on the **resolved path**, not the basename: round 0's finding was that a name-only
 # key is a name that can be satisfied from the wrong directory, and round 2 confirmed the
-# shape was still open with two names in play -- a `hub/spike/vendor.py` was exempt purely
-# for being called `vendor.py`.
+# shape was still open while two files shared the `vendor.py` basename across directories.
 _EXEMPT_UPSTREAM_IMPORTERS = {
     (HUB_PACKAGE / "ripper_host.py").resolve(): frozenset({"upstream-import", "sys-path"}),
     (HUB_PACKAGE / "vendor.py").resolve(): frozenset({"upstream-import"}),
@@ -296,10 +295,10 @@ def _smuggling_offenders(path: Path) -> list[str]:
 def _hub_offenders() -> list[str]:
     """Every upstream reachability violation in the enforced roots, minus the exemptions.
 
-    The exemption is on the **resolved path**, not the basename: round 2 found
-    `hub/spike/vendor.py` exempt purely for being called `vendor.py`, which is round 0's
-    "key it on something unambiguous" finding one name short. Two files share those
-    basenames now, so a name-only key is a name that can be satisfied from the wrong
+    The exemption is on the **resolved path**, not the basename: round 2 found a
+    `vendor.py` outside the package exempt purely for being called `vendor.py`, which is
+    round 0's "key it on something unambiguous" finding one name short. Two files share
+    that basename now, so a name-only key is a name that can be satisfied from the wrong
     directory.
 
     What is skipped is per *file* and per *category*, and both directions matter.
@@ -719,8 +718,8 @@ class _RecordingRipper:
     **`outcome` and `registers_task` model the fact that upstream reports failure by
     *returning*.** The real `rip_song` catches everything, marks its `Task` FAILED, and
     returns; a fake that only raised would make `run_song`'s outcome check untested and the
-    queue would report `done` for a failed download. `spike/task9_contract_check.py` found
-    exactly that against the real client.
+    queue would report `done` for a failed download. Exactly that was found
+    against the real client.
     """
 
     def __init__(self) -> None:
@@ -898,8 +897,8 @@ async def test_run_song_wraps_an_upstream_failure_keeping_its_message(ripping_ho
 
 async def test_run_song_raises_when_upstream_reports_failure_by_returning(ripping_host):
     """**Upstream's `rip_song` does not raise on failure.** This is the whole reason the
-    method now reads the `Task` afterwards, and it was found by
-    `spike/task9_contract_check.py`: the queue said `done` for a track whose only outcome was
+    method now reads the `Task` afterwards, and it was found against
+    the real client: the queue said `done` for a track whose only outcome was
     a `ValidationError` from the catalogue.
 
     `rip_song`'s body is one `try`, and each failure arm does
@@ -950,7 +949,7 @@ async def test_run_song_does_not_raise_when_no_task_was_registered(ripping_host)
     """`task is None` means "I did not see it fail", and that is the honest answer.
 
     `rip_song` returns early for an `adam_id` already in flight, so no task is registered
-    for this call. The hub's §7.3 duplicate check runs *before* this and is what catches a
+    for this call. The hub's duplicate check runs *before* this and is what catches a
     track that is on disk, so treating "not seen" as failure would fail every re-entrant rip.
     """
     ripping_host._ripper.registers_task = False
@@ -999,7 +998,7 @@ async def test_run_music_video_ignores_force(ripping_host):
 
     `MVRipper.rip` is `async def rip(self, url, flags=None)` (`src/mv.py:89`) and
     its body never reads `flags`. So the seam builds a `Flags` and hands it over
-    and it does nothing -- a Task 8/9 caller that honours `force` would report a
+    and it does nothing -- a caller that honours `force` would report a
     re-download that upstream always performs anyway, and, worse, one that
     `force=False` "avoided" would have been re-downloaded regardless.
 
@@ -1043,8 +1042,8 @@ async def test_song_force_is_honoured_upstream_but_music_video_force_is_not(ripp
     assert "force_save" in rip_source, (
         "upstream rip_song no longer reads force_save, so `force` is inert for "
         "songs too. Update the run_song docstring, which currently states that "
-        "force is upstream's Flags.force_save, and re-check Task 8/9's re-download "
-        "decision for tracks."
+        "force is upstream's Flags.force_save, and re-check the scheduler's "
+        "re-download decision for tracks."
     )
 
     await ripping_host.run_song(LEAF, force=False)
@@ -1057,8 +1056,8 @@ async def test_song_force_is_honoured_upstream_but_music_video_force_is_not(ripp
         "upstream MVRipper.rip now reads force_save, so force is no longer inert "
         "for music videos. Do three things: (1) update the run_music_video "
         "docstring in hub/hub/ripper_host.py, which says the flag is ignored and "
-        "that a caller must not rely on it; (2) re-check whether Task 8/9's "
-        "per-file skip decision should now apply to music videos, since it "
+        "that a caller must not rely on it; (2) re-check whether the "
+        "scheduler's per-file skip decision should now apply to music videos, since it "
         "previously could not; (3) if upstream's use is unconditional, drop the "
         "claim that the music-video path has no 'already on disk' check."
     )

@@ -1,26 +1,27 @@
-"""The queue: enqueue, list, cancel, retry, and the live stream (spec §9, §7.3).
+"""The queue: enqueue, list, cancel, retry, and the live stream.
 
 This is where a request becomes queue rows, and there are two places where getting it wrong
 is silent:
 
-**The answer is four keys, not three.** spec §9 says `{created[], skipped[], deduplicated[]}`
+**The answer is four keys, not three.** The contract is
+`{created[], skipped[], deduplicated[]}`
 and `JobStore.create_batch` implements that. But `create_batch` *applies the leaves it could
 and then raises* `ValueError` on one it could not, because a 19-track album must not lose
 19 tracks to one bad `adam_id`. So the handler catches it, reads back what actually landed
 **by `parent_url`**, and adds a `rejected` list naming the one that did not. A 500 here
 would be a 19-track album queued behind an error the user cannot see.
 
-**The read-back is filtered by `parent_url` and not by `parent_id`.** `parent_id` is §6's
-self-reference and `create_batch` has no such parameter, so every row has `NULL` in it;
-`list(parent_id=None)` therefore means *no filter*, and using it to answer "what did this
-request create?" would return the user's entire queue and report all of it as this request's
-work. `store.list(parent_url=...)` is the only filter that means what it says.
+**The read-back is filtered by `parent_url` and not by `parent_id`.** `parent_id` is the
+`job` table's self-reference and `create_batch` has no such parameter, so every row has
+`NULL` in it; `list(parent_id=None)` therefore means *no filter*, and using it to answer
+"what did this request create?" would return the user's entire queue and report all of it as
+this request's work. `store.list(parent_url=...)` is the only filter that means what it says.
 
 Nothing here decides whether a track is already on disk. That is the scheduler's, at
 execution time, in `hub.app` -- because a queued job can sit long enough for the file to be
 deleted underneath it, and a second filesystem check at enqueue time would put two dedup
 checks with different timings into the codebase for them to disagree. `skipped` is
-therefore always empty in this response, and it is here because the spec's shape has it.
+therefore always empty in this response, and it is here because the contract above has it.
 """
 
 from __future__ import annotations
@@ -59,8 +60,9 @@ CODECS: frozenset[str] = frozenset(
     {"alac", "ec3", "ac3", "aac-binaural", "aac-downmix", "aac", "aac-legacy"}
 )
 
-#: spec §6's `url_type`, which is also `hub.jobs.PARENT_TYPES`. Duplicated for the same
-#: reason and checked in `test_the_codec_set_matches_the_clients`'s sibling assertion below.
+#: The `url_type` column's five values, which is also `hub.jobs.PARENT_TYPES`. Duplicated
+#: for the same reason and checked in `test_the_codec_set_matches_the_clients`'s sibling
+#: assertion below.
 PARENT_TYPES: frozenset[str] = frozenset(
     {"song", "album", "artist", "playlist", "music-video"}
 )
@@ -69,13 +71,13 @@ PARENT_TYPES: frozenset[str] = frozenset(
 def job_to_dict(job: Job) -> dict:
     """A `Job` as JSON: `asdict`, and nothing added.
 
-    `asdict` rather than a hand-written mapping, so a column added to §6's table appears here
-    without anyone remembering. `force` is an `int` in the row and a `bool` in the dataclass,
-    and the dataclass already converted it -- sending `1`/`0` would make the browser's
-    `if (job.force)` work by accident and its rendering show the wrong thing.
+    `asdict` rather than a hand-written mapping, so a column added to the `job` table
+    appears here without anyone remembering. `force` is an `int` in the row and a `bool` in
+    the dataclass, and the dataclass already converted it -- sending `1`/`0` would make the
+    browser's `if (job.force)` work by accident and its rendering show the wrong thing.
 
     **No `is_music_video` key.** It was here as a hardcoded `False`, which is the one value a
-    music-video job must never report: §6's `job` table has no column for it (`Leaf`'s own
+    music-video job must never report: the `job` table has no column for it (`Leaf`'s own
     docstring says so, and it is not persisted), so this line was the only reason the key
     appeared in the API at all, and it was a fabrication. Nothing renders it today, but it is
     in the public JSON contract and a Phase 2 filter over `/api/jobs?type=music-video` would
@@ -97,12 +99,13 @@ def job_to_dict(job: Job) -> dict:
 class LeafRegistry:
     """`job id -> Leaf`, for the leaves this process expanded.
 
-    **Why it has to exist.** §6's `job` table stores `adam_id`, `title`, `codec` and
+    **Why it has to exist.** The `job` table stores `adam_id`, `title`, `codec` and
     `language` -- deliberately, because the filesystem is the source of truth for what is
     downloaded and a description of the track is operational state. But both consumers of a
-    job need more than that: `RipperHost.run_song` needs the storefront, and §7.3's
-    duplicate check needs the album name and the artist to render the file name. So the
-    expansion is held here, from the request that made it until the job finishes.
+    job need more than that: `RipperHost.run_song` needs the storefront, and the scheduler's
+    duplicate check in `hub.app` needs the album name and the artist to render the file
+    name. So the expansion is held here, from the request that made it until the job
+    finishes.
 
     **What a miss means, and why it is a failure rather than a blank.** A row whose leaf this
     process never saw was enqueued by a previous hub process (or by hand). `hub.app`'s
@@ -156,7 +159,7 @@ class _JobsBody(BaseModel):
 
 
 def parent_type_for(url: str, leaf_count: int) -> str:
-    """The `url_type` §6 stores for a batch, from the URL.
+    """The `url_type` stored for a batch, from the URL.
 
     Asked *before* the expansion because `create_batch` requires a type and `expand` does not
     return one. Two sources, in order:
@@ -207,7 +210,7 @@ def _path_segment(url: str) -> str | None:
 async def create_jobs(request: Request, body: _JobsBody | None = None) -> Response:
     """Expand each URL and enqueue every track it names.
 
-    The whole of spec §7.3's *enqueue* half. The other half -- "is it already on disk" -- is
+    The whole of the *enqueue* half of dedup. The other half -- "is it already on disk" -- is
     per-file and happens at execution time in `hub.app`, so `skipped` is always empty here
     and the response says so by carrying the key.
 
@@ -442,8 +445,8 @@ def _publish_batch(state, *, url: str, created: list[int], deduplicated: list[in
 async def list_jobs(request: Request, status: str | None = None, parent: str | None = None) -> dict:
     """The queue, oldest first, optionally filtered by `?status=` and `?parent=`.
 
-    `parent` is a *url*, matching what `create_batch` wrote. §6's `parent_id` is a
-    self-reference that nothing populates, so a filter on it would be a filter on nothing --
+    `parent` is a *url*, matching what `create_batch` wrote. The `parent_id` self-reference
+    is populated by nothing, so a filter on it would be a filter on nothing --
     see the module docstring.
     """
     state = request.app.state
@@ -615,8 +618,8 @@ async def delete_finished_jobs(request: Request) -> Response:
 
     **Irreversible, and the answer says how much of it there was.** What is lost is the
     record that a track was attempted -- the title, the error text and the `skip_reason`
-    evidence paths. The file is not touched and nothing re-downloads: spec §7.1 makes the
-    filesystem the source of truth for what is on disk, and the execution-time dedup check
+    evidence paths. The file is not touched and nothing re-downloads: the filesystem is
+    the source of truth for what is on disk, and the execution-time dedup check
     reads the library rather than this table.
 
     A `running` row is not a finished row and survives, so a bulk delete issued while

@@ -1,13 +1,13 @@
-"""The job store, its queue dedup, and the event broker (spec §6, §2.4).
+"""The job store, its queue dedup, and the event broker.
 
-The first seven tests are the brief's, character for character. The rest exist because
+The first seven tests came first, character for character. The rest exist because
 "it returned 2 and 1" is also what a wrong implementation returns most of the time.
 
 **What each section is for.** The schema itself -- the DDL, the partial index, the three
 pragmas -- is *not* asserted here, because asserting it needs a raw connection and this
 suite has never reached into an object's internals. It is asserted where a raw connection is
-the right tool, in `spike/task7_schema_check.py`, which prints `sqlite_master`, the index
-definition, and the pragmas. What is pinned here is everything the schema exists to *do*:
+the right tool, by a check that prints `sqlite_master`, the index definition, and the
+pragmas. What is pinned here is everything the schema exists to *do*:
 
 - the dedup key is `(adam_id, codec)` over active jobs, and it deliberately excludes
   `language`, `force` and `is_music_video` (three separate tests, because getting one of
@@ -48,7 +48,7 @@ from hub.jobs import (
     Leaf,
 )
 
-# --- the brief's tests, verbatim -------------------------------------------
+# --- the first tests, verbatim ------------------------------------------------
 #
 # Character for character, including two assignments (`a`, `res`) that nothing reads. The
 # only thing appended to any of them is a suppression marker for F841 on those two lines, so
@@ -93,7 +93,7 @@ def test_a_finished_job_frees_the_dedupe_slot(tmp_path):
 
 
 def test_waiting_jobs_hold_the_dedupe_slot(tmp_path):
-    # spec §6: 'waiting' is in the index so a token-blocked job is not re-run
+    # 'waiting' is in the index so a token-blocked job is not re-run
     store = JobStore(tmp_path / "hub.db")
     store.create_batch("u", "album", [leaf("1")], force=False)
     job = store.claim_next()
@@ -120,7 +120,7 @@ async def test_broker_delivers_to_a_late_subscriber_the_current_snapshot():
     assert '"snapshot"' in got[0] and got[0].startswith("data: ")
 
 
-# --- the interfaces Task 6 and Task 8 import -------------------------------
+# --- the interfaces `ripper_host.py` and `resolver.py` import ---------------
 #
 # Pinned as data rather than as behaviour: renaming a field breaks a module written against
 # this one in another task, and it breaks at the import site with nothing of ours to explain
@@ -154,7 +154,7 @@ def test_a_leaf_cannot_be_edited_after_it_has_been_deduplicated():
 
 
 def test_the_leaf_is_not_slotted_so_vars_still_works():
-    # `test_queue_dedup_ignores_language_and_force` is the brief's test and it copies a leaf
+    # `test_queue_dedup_ignores_language_and_force` is one of those and it copies a leaf
     # with `vars()`. `slots=True` removes `__dict__` and makes that a TypeError, so the
     # dataclass is deliberately plain. Asserted because the symptom it causes is a TypeError
     # in a test that reads like a typo, several files away from the cause.
@@ -352,7 +352,7 @@ def test_every_terminal_status_frees_the_dedupe_slot(tmp_path, status):
 def test_every_active_status_holds_the_dedupe_slot(tmp_path, status):
     """The other half of the index predicate, which is the part that can bite.
 
-    `queued` is the obvious case. `waiting` is the one the spec calls out, and `running` is
+    `queued` is the obvious case. `waiting` is the one the index calls out, and `running` is
     the one a naive `'status = 'queued''` pre-check would get wrong: a download in progress
     holds the key, so a second copy of the same URL pasted in during it is deduplicated
     rather than run alongside it.
@@ -384,7 +384,7 @@ def test_force_is_stored_and_does_not_buy_a_second_slot(tmp_path):
     store = JobStore(tmp_path / "hub.db")
     first = store.create_batch("u", "album", [leaf("1")], force=True)
     assert store.get(first.created[0]).force is True
-    # `force` is deliberately not in the key: spec §6's index has no way to express it, and a
+    # `force` is deliberately not in the key: the index has no way to express it, and a
     # force that produced a second concurrent job for one track would be the opposite of what
     # the user asked for. It is passed through and honoured later, by the execution task.
     second = store.create_batch("u", "album", [leaf("1")], force=True)
@@ -394,8 +394,8 @@ def test_force_is_stored_and_does_not_buy_a_second_slot(tmp_path):
 def test_is_music_video_is_not_part_of_the_key(tmp_path):
     """A music video and a song for one adam_id are one queue entry, not two.
 
-    `is_music_video` is a `Leaf` field with no `job` column behind it (§6 has no such
-    column): it selects the Widevine path in Task 6/9 and nothing else, so it cannot reach
+    `is_music_video` is a `Leaf` field with no `job` column behind it: it selects the
+    Widevine path and nothing else, so it cannot reach
     the key. Said out loud here because it is the one field on a `Leaf` that a reader would
     expect to be a key component.
     """
@@ -430,11 +430,11 @@ def test_a_key_with_no_identity_in_it_is_refused(tmp_path, field, value):
 
     `""` would collide with every other `""` -- including from a different album, a
     different codec and a different URL -- so unrelated tracks would deduplicate against each
-    other. `None` is the subtler one: §6 allows `adam_id` to be NULL and a SQLite unique
-    index treats every NULL as distinct, so a NULL row does not deduplicate against anything
-    *and* does not stop a second NULL row from being created. The index would look present
-    and simply not apply. `dedup.find_duplicate` refuses both for the same reason and in the
-    same direction: a re-download is recoverable, a false skip is not.
+    other. `None` is the subtler one: the schema allows `adam_id` to be NULL and a SQLite
+    unique index treats every NULL as distinct, so a NULL row does not deduplicate against
+    anything *and* does not stop a second NULL row from being created. The index would look
+    present and simply not apply. `dedup.find_duplicate` refuses both for the same reason
+    and in the same direction: a re-download is recoverable, a false skip is not.
     """
     store = JobStore(tmp_path / "hub.db")
     with pytest.raises(ValueError, match=field):
@@ -450,8 +450,9 @@ def test_a_refused_key_stops_the_batch_but_keeps_what_had_already_landed(tmp_pat
     leaf that was neither created nor deduplicated, and inventing a fourth list for a case
     that should not occur is worse than a loud failure -- but it does not roll the batch back,
     because autocommit means the earlier leaves are already rows. The leaves *after* the bad
-    one are not attempted, and that is the part Task 9 has to know: it is the one caller of
-    this, and it catches the `ValueError`, reads `list()`, and shows what is queued. A retry
+    one are not attempted, and that is the part the API layer has to know: it is the one
+    caller of this, and it catches the `ValueError`, reads `list()`, and shows what is
+    queued. A retry
     is safe, because the index makes the already-enqueued leaves come back as
     `deduplicated` rather than as duplicates.
     """
@@ -467,8 +468,8 @@ def test_a_url_that_identifies_nothing_is_refused(tmp_path, url):
     """I2: `parent_url` is validated, so a blank one is a `ValueError` and not a 500.
 
     Without the check it escapes as a bare `sqlite3.IntegrityError: NOT NULL constraint
-    failed: job.url`, which is outside the one `except ValueError` Task 9 is written around.
-    The `url` column is not decoration: §9's `GET /api/jobs?parent=` filters on it, so a
+    failed: job.url`, which is outside the one `except ValueError` the API layer is written
+    around. The `url` column is not decoration: `GET /api/jobs?parent=` filters on it, so a
     batch with no usable one could neither be listed nor retried.
     """
     store = JobStore(tmp_path / "hub.db")
@@ -502,7 +503,7 @@ def test_a_url_with_only_surrounding_whitespace_is_refused_not_stored(tmp_path):
 def test_an_unknown_parent_type_is_refused(tmp_path):
     """A closed set, not a free string.
 
-    §6 names the five types, and the type is what Task 9 switches on to decide between
+    Five types, and the type is what the API layer switches on to decide between
     resolving a track and resolving an album. A typo would store cleanly and be rendered as an
     unrecognised kind forever, so the refusal happens where the value came from.
     """
@@ -533,7 +534,7 @@ def test_claim_next_starts_exactly_one_job(tmp_path):
     because SQLite evaluates a subquery with no outer reference a single time. Were it
     re-evaluated per candidate row, the first row examined would become `running` and the
     next evaluation would name a different id -- so one call would claim the entire queue in
-    a single sweep. The *count* is what catches that; the brief's `a.id != b.id` does not,
+    a single sweep. The *count* is what catches that; the `a.id != b.id` assertion does not,
     because a one-at-a-time implementation returns a different id for the second call too.
     """
     store = JobStore(tmp_path / "hub.db")
@@ -549,7 +550,7 @@ def test_claim_next_stamps_started_at_and_leaves_finished_at_alone(tmp_path):
     job = store.claim_next()
     assert job.status == "running"
     assert job.finished_at is None
-    # An offset, not a naive stamp: Task 9 renders these in the browser and a stamp with no
+    # An offset, not a naive stamp: the browser renders these and a stamp with no
     # zone in it reads as local time in whatever timezone the reader is in.
     assert datetime.fromisoformat(job.started_at).tzinfo is not None
     assert datetime.fromisoformat(job.created_at).tzinfo is not None
@@ -696,7 +697,7 @@ def test_finished_at_is_set_exactly_for_the_terminal_statuses(tmp_path, status):
 
 
 def test_re_queuing_a_finished_job_clears_its_finished_at(tmp_path):
-    """`POST /api/jobs/{id}/retry` (§9) re-queues a row that already has a `finished_at`.
+    """`POST /api/jobs/{id}/retry` re-queues a row that already has a `finished_at`.
 
     Leaving it would render a queued job as finished. The invariant behind
     `test_finished_at_is_set_exactly_for_the_terminal_statuses` is what prevents that: the
@@ -916,11 +917,11 @@ def test_list_rejects_an_unknown_status(tmp_path):
 
 
 def test_list_has_no_top_level_filter_because_nothing_writes_a_parent_id(tmp_path):
-    """`parent_id` is in §6's schema and in the brief's `Job`, and nothing sets it yet.
+    """`parent_id` is in the schema and in the brief's `Job`, and nothing sets it yet.
 
-    `create_batch`'s signature -- the brief's, and pinned by Task 8 -- has no `parent_id`
+    `create_batch`'s signature -- the brief's -- has no `parent_id`
     parameter, so every row it writes is top level and `parent_id=None` has to mean "no
-    filter" rather than "top level only": §9's `GET /api/jobs?parent=` is absent-means-no-
+    filter" rather than "top level only": `GET /api/jobs?parent=` is absent-means-no-
     filter like every other query parameter. Asserted so the two readings cannot be swapped
     by a later task, and so the day a row does carry a parent the filter is already the one
     the API needs.
@@ -928,9 +929,9 @@ def test_list_has_no_top_level_filter_because_nothing_writes_a_parent_id(tmp_pat
     **And there is no `parent_url` filter**, which is the point of the assertion: filtering a
     batch by `parent_id` is impossible today, so a caller that needs "the jobs of *this*
     request" has nothing to filter on and `list()` returning everything is the only answer it
-    has. Task 9's handler needs `list(parent_url=...)`; it is not here, on purpose -- adding a
+    has. The API handler needs `list(parent_url=...)`; it is not here, on purpose -- adding a
     query parameter before the caller exists is how `parent_id` ended up in this signature in
-    the first place. See the round-1 report for what Task 9 should add.
+    the first place.
     """
     store = JobStore(tmp_path / "hub.db")
     res = store.create_batch("u", "album", [leaf("1")], force=False)
@@ -1073,8 +1074,8 @@ async def test_a_subscriber_finds_no_snapshot_on_a_channel_nobody_published_on()
     A browser that connects to a quiet channel and is handed `{"kind": "snapshot", "jobs":
     []}` would render an empty queue the store never asserted -- a lie that looks like good
     news, and it would be indistinguishable from a real one. So nothing is buffered until
-    something is published, and a subscriber waits. The snapshot is Task 9's to publish, from
-    a real `list()`.
+    something is published, and a subscriber waits. The snapshot is the API layer's to
+    publish, from a real `list()`.
     """
     broker = EventBroker()
     agen = broker.subscribe("jobs")
@@ -1197,8 +1198,9 @@ async def test_a_subscriber_that_falls_too_far_behind_is_told_rather_than_fed():
     Unbounded, a browser tab that stopped reading grew its queue for the life of the process --
     measured at 200,000 retained frames, about 8 MB, for one subscriber. What the broker does
     *not* do is choose the policy: it counts what the subscriber missed and raises
-    `SubscriberOverrun` on its next turn, so Task 9's SSE handler decides whether its client
-    reconnects, re-reads a snapshot, or renders "connection lost". The broker cannot know
+    `SubscriberOverrun` on its next turn, so the API layer's SSE handler decides whether its
+    client reconnects, re-reads a snapshot, or renders "connection lost". The broker cannot
+    know
     whether the stream is a queue state (where a lost message costs nothing) or a log line
     (where it is the whole point), and it will not quietly deliver the stale frames on the
     way out -- `depth` is 7 because 3 fit in a queue of 3 and 7 did not.
@@ -1264,9 +1266,10 @@ async def test_a_subscriber_within_its_queue_is_never_told_it_overran():
 async def test_the_default_queue_takes_a_whole_burst_without_complaint():
     """The default capacity is a capacity, and it is large enough to be invisible.
 
-    `EventBroker()` with no arguments is what Task 9 will write, so the default is what has to
-    be right: a subscriber that is keeping up must never see `SubscriberOverrun`, or the signal
-    becomes noise and Task 9 learns to ignore it. A full default queue's worth of messages --
+    `EventBroker()` with no arguments is what the SSE handler will write, so the default is
+    what has to be right: a subscriber that is keeping up must never see
+    `SubscriberOverrun`, or the signal becomes noise and the handler learns to ignore it. A
+    full default queue's worth of messages --
     `SUBSCRIBER_QUEUE_SIZE`, read rather than restated -- is delivered one at a time with the
     reader interleaving, which is what a browser doing ordinary work looks like.
     """
@@ -1352,11 +1355,11 @@ def test_a_payload_that_is_not_json_fails_at_publish_time():
         broker.publish("jobs", {"when": object()})
 
 
-# --- what Task 9 will serialise --------------------------------------------
+# --- what the SSE layer will serialise -------------------------------------
 
 
 def test_every_public_object_survives_a_json_round_trip(tmp_path):
-    """Task 9 puts these straight into an SSE payload and into a JSON response.
+    """The SSE layer puts these straight into an SSE payload and into a JSON response.
 
     `asdict` is the call it will make, and `force` is the field most likely to break it: a
     `bool` in Python and an INTEGER in the row, where a `1` in place of a `true` is a silent

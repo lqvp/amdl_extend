@@ -1,7 +1,7 @@
-"""Album-scoped duplicate detection for downloads (spec §7.3 Steps 2–3, §7.4).
+"""Album-scoped duplicate detection for downloads.
 
 The question this module answers is "is this track already on disk?", and the answer has
-to be scoped to the album. Measured on the 341 GB external library (§7.2.1), `intro`,
+to be scoped to the album. Measured on the 341 GB external library, `intro`,
 `escapism`, `mu` and `yoake` each appear in **six** different albums, and a normalized
 title is shared by 2+ album directories for 1,207 of 8,721 titles -- 13.8%. A global
 title match would therefore skip real downloads at a rate no user would accept. The
@@ -18,10 +18,10 @@ container the candidates came from.
 
 `find_duplicate` is **pure**: it reads a `LibraryScan` that has already been taken and
 touches nothing else. No filesystem access, no config, no clock, no network. The caller
-decides when to scan (§7.1: the filesystem is the only source of truth and a scan costs
+decides when to scan (the filesystem is the only source of truth and a scan costs
 0.09 s, so it is re-taken per request) and which `artist_scope` to apply, which is why
-`artist_scope` is a keyword argument and is never read from settings here. Task 9 owns
-that wiring; a config read inside this function would make the result untestable and
+`artist_scope` is a keyword argument and is never read from settings here. The API layer
+owns that wiring; a config read inside this function would make the result untestable and
 would put a policy decision in the middle of a pure comparison.
 """
 
@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from hub.library_scan import LibraryScan, album_key
 from hub.normalize import normalize
 
-# The two modes of §7.4, and the only two this function accepts. A closed set, not a
+# The two modes `find_duplicate` accepts, and the only two. A closed set, not a
 # truthy/falsy switch: an unrecognised value is a typo in a config literal, and silently
 # reading it as `loose` would either skip tracks the user asked for (if the typo was meant
 # to be `strict`) or fail to skip tracks that are already on disk. Raising puts the error
@@ -51,7 +51,7 @@ class DuplicateHit:
 
     - A relpath is not resolvable once there is more than one root. One album name filed
       under both roots yields `9Lana/x` and `new-dl/9Lana/x`, and neither string exists
-      under both roots. §7.4's entire adjudication story is "a user can overrule a `loose`
+      under both roots. The entire adjudication story is "a user can overrule a `loose`
       false positive by reading which directories were matched", and a user cannot open a
       path that does not exist. Measured on the real two-root library: 493 of 493 hits named
       paths that no single root resolved.
@@ -93,11 +93,11 @@ def find_duplicate(
 
     `album_name` / `track_title` / `artist_name` are the values a download would be
     rendered from, i.e. what a *file* in the album would be called and who is credited on
-    it -- not what the API reported as the title. The comparison basis is the filename
-    (§7.5), so a caller that passes a tag instead of a rendered name will miss, and miss
+    it -- not what the API reported as the title. The comparison basis is the filename,
+    so a caller that passes a tag instead of a rendered name will miss, and miss
     quietly, in the safe direction.
 
-    `artist_scope` (§7.4):
+    `artist_scope`:
       - `"loose"` (default) matches on the album name alone, so it catches both shapes of
         duplicate the real library actually contains: 種別 A, one release filed in two
         places, and 種別 B, a collab fanned out across every credited artist's folder. On

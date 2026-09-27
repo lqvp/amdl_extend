@@ -1,4 +1,4 @@
-"""The in-process broker Task 9 streams to the browser over SSE (spec §5, §9).
+"""The in-process broker the API layer streams to the browser over SSE.
 
 The hub has one consumer of live state -- `GET /api/jobs/stream` -- and it is a browser that
 was not connected when the interesting thing happened. A download takes minutes; a tab opened
@@ -23,7 +23,7 @@ window from the outside.
 **Nothing is invented for a quiet channel.** A subscriber to a channel nothing has been
 published on waits, and is not handed an empty snapshot: a fabricated `{"kind": "snapshot",
 "jobs": []}` would be indistinguishable from a real one, and it would be a lie that looks like
-good news. The snapshot is Task 9's to publish, from a real `list()`.
+good news. The snapshot is the API layer's to publish, from a real `list()`.
 
 **Frames.** A message is one `data: <json>` line closed by a blank line, per the SSE grammar.
 That is only safe because `json.dumps` escapes every character that could end the line --
@@ -39,15 +39,16 @@ not bound what a *connected* one can fall behind by either. A browser tab that s
 measured at 200,000 retained frames, about 8 MB, for one subscriber, with no signal to
 anything. So a subscriber that cannot keep up is **told**, by a `SubscriberOverrun` raised
 from inside its own stream, and the choice of what to do about it belongs to the layer that
-owns the connection -- Task 9's SSE handler, which can let the client reconnect and re-read a
-snapshot. The broker deliberately does not make that choice, because it cannot know whether
-the stream is a snapshot (where a dropped message costs nothing) or a log line (where it is the
-entire point), and it will not quietly hand over the stale frames on the way out.
+owns the connection -- the API layer's SSE handler, which can let the client reconnect and
+re-read a snapshot. The broker deliberately does not make that choice, because it cannot
+know whether the stream is a snapshot (where a dropped message costs nothing) or a log line
+(where it is the entire point), and it will not quietly hand over the stale frames on the
+way out.
 
 **Nothing is invented for a quiet channel.** A subscriber to a channel nothing has been
 published on waits, and is not handed an empty snapshot: a fabricated `{"kind": "snapshot",
 "jobs": []}` would be indistinguishable from a real one, and it would be a lie that looks like
-good news. The snapshot is Task 9's to publish, from a real `list()`.
+good news. The snapshot is the API layer's to publish, from a real `list()`.
 
 **Frames.** A message is one `data: <json>` line closed by a blank line, per the SSE grammar.
 That is only safe because `json.dumps` escapes every character that could end the line --
@@ -75,7 +76,7 @@ HISTORY = 50
 # policy: at roughly 200 bytes a frame the worst case is about 200 KB per subscriber, which is
 # noise, and a browser that pauses for a few seconds on a stream of a few messages a second
 # never comes near it. What happens *at* the limit is `SubscriberOverrun`, and who decides
-# what to do about it is Task 9.
+# what to do about it is the layer that owns the connection.
 SUBSCRIBER_QUEUE_SIZE = 1000
 
 
@@ -83,14 +84,15 @@ class SubscriberOverrun(RuntimeError):
     """A subscriber fell more than its queue allows behind, and was given up on.
 
     Raised from inside the stream rather than swallowed, so the decision belongs to the layer
-    that owns the connection. The obvious answer for Task 9 is to let the client reconnect and
-    take a fresh snapshot, which is exactly why this is a signal and not a silent drop: the
+    that owns the connection. The obvious answer for the API layer is to let the client
+    reconnect and take a fresh snapshot, which is exactly why this is a signal and not a
+    silent drop: the
     broker cannot tell whether the frames it is holding are a queue state (where losing one
     costs nothing, because the next snapshot is complete) or a log line (where losing one is
     the whole point of the stream).
 
-    `depth` is how many messages the subscriber missed, which is what tells Task 9 whether the
-    client was briefly busy or gone entirely.
+    `depth` is how many messages the subscriber missed, which is what tells the API layer
+    whether the client was briefly busy or gone entirely.
     """
 
     def __init__(self, channel: str, depth: int, limit: int) -> None:
@@ -148,17 +150,18 @@ class EventBroker:
 
     **Not thread-safe, and it does not need to be.** `publish` is called from the scheduler
     task and `subscribe` is awaited by the request handler, both on the one event loop of the
-    one process spec §3 describes; the only cross-thread caller in the codebase is
-    `WrapperSupervisor.log_sink`, and Task 5's pump already runs on that loop. A caller that
-    does have a thread should go through `loop.call_soon_threadsafe`, not through this.
+    one process the design assumes; the only cross-thread caller in the codebase is
+    `WrapperSupervisor.log_sink`, and the supervisor's own pump already runs on that loop. A
+    caller that does have a thread should go through `loop.call_soon_threadsafe`, not
+    through this.
 
-    Not a singleton either: the brief puts it behind `creart` like everything else, and two
+    Not a singleton either: it is built behind `creart` like everything else, and two
     brokers in two processes must not be mistaken for one bus.
     """
 
     def __init__(self, *, queue_size: int = SUBSCRIBER_QUEUE_SIZE) -> None:
-        # A keyword so Task 9 can size a log channel differently from a job channel without
-        # a second broker; the default is the capacity the brief's own use implies.
+        # A keyword so the API layer can size a log channel differently from a job channel
+        # without a second broker; the default is the capacity this use implies.
         self._queue_size = queue_size
         self._channels: dict[str, _Channel] = {}
 
@@ -241,7 +244,7 @@ class EventBroker:
         **no observable consequence from outside the broker**. A subscriber that stays
         registered costs a little memory and one dict-lookup per publish, and nothing anyone
         can look at afterwards says so. So this is the assertion surface for it, the same way
-        `spike/task7_schema_check.py` is the assertion surface for the schema -- and for the
+        a raw-connection check is the assertion surface for the schema -- and for the
         same reason: the alternative is a test reading `_channels`, which is worse than a
         method that admits what it is for.
 
