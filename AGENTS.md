@@ -70,12 +70,6 @@ and re-run.
 
 Run tests: `cd hub && uv run pytest -v`
 
-## Config changes touch three places
-
-1. Add the field to the matching model in `src/config.py` with a default.
-2. Add it to the same `[section]` in `config.example.toml` with its comment.
-3. Bump `CONFIG_VERSION` in *both* files. They must match.
-
 ## Client architecture
 
 - **DI is `creart`.** Creators are registered in `main.py` in strict dependency
