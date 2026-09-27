@@ -30,8 +30,8 @@
 
 Five input classes the spec implies that no existing test exercises. Each line names a condition and the behaviour a reasonable person would expect; the task that owns the code carries the test.
 
-1. **`LIBRARY_B` points at a directory that does not exist.** The user follows the README exactly on a fresh machine and runs `docker compose up -d` before creating anything. Expectation: a failed start naming `LIBRARY_B`, never an empty library that reads as healthy. Pinned in Task 4.
-2. **`LIBRARY_B` points at a plain directory on a machine with no external drive at all** — the primary target user. Expectation: the stack starts and the scan finds the tree. Pinned in Task 4 by asserting the compose file names no drive, UUID, or filesystem type anywhere in its non-comment lines.
+1. **`AMD_LIBRARY_HOST` points at a directory that does not exist.** The user follows the README exactly on a fresh machine and runs `docker compose up -d` before creating anything. Expectation: a failed start naming `AMD_LIBRARY_HOST`, never an empty library that reads as healthy. Pinned in Task 4.
+2. **`AMD_LIBRARY_HOST` points at a plain directory on a machine with no external drive at all** — the primary target user. Expectation: the stack starts and the scan finds the tree. Pinned in Task 4 by asserting the compose file names no drive, UUID, or filesystem type anywhere in its non-comment lines.
 3. **`AMD_LIBRARY_ROOTS` unset while `AMD_PASSWORD` is set**, in a bare `docker run` that bypasses compose. Expectation: `RuntimeError` naming `AMD_LIBRARY_ROOTS` and showing the format, not a silent empty scan. Pinned in Task 2.
 4. **Neither `AMD_PASSWORD` nor `AMD_LIBRARY_ROOTS` set.** Expectation: the message names `AMD_PASSWORD`, because that is the one the operator is likelier to have meant. Pinned in Task 2.
 5. **The repository is cloned or moved to a different absolute path.** Expectation: no file in the shipped tree names the old path, and `ripper_host._VENDOR_ROOT` / `app.vendor_config_path()` still resolve. Pinned in Task 3 as a repo-wide grep with an explicit exclusion list, and re-checked in Task 5.
@@ -67,7 +67,7 @@ def test_requires_library_roots():
 def test_the_missing_library_roots_message_says_how_to_set_it():
     # A message that only names the variable leaves the operator to guess the format, and
     # the format is a comma-separated list of *container* paths -- not the host path they
-    # put in LIBRARY_B. Both halves are asserted because the point of this change is that
+    # put in AMD_LIBRARY_HOST. Both halves are asserted because the point of this change is that
     # a new user can get it right without reading the source.
     with pytest.raises(RuntimeError) as excinfo:
         load_settings({"AMD_PASSWORD": "x"})
@@ -277,7 +277,7 @@ if not ROOTS:
 
 Run: `cd hub && uv run pytest tests/test_deployment.py -v`
 
-Expected: **32 passed**, 0 skipped. `test_the_library_root_is_mounted_through_the_symlink_and_not_resolved` still passes here because Task 4 has not yet changed `LIBRARY_B`'s syntax — it is Task 4 that replaces it.
+Expected: **32 passed**, 0 skipped. `test_the_library_root_is_mounted_through_the_symlink_and_not_resolved` still passes here because Task 4 has not yet changed `AMD_LIBRARY_HOST`'s syntax — it is Task 4 that replaces it.
 
 - [ ] **Step 5: Run the full suite and lint**
 
@@ -301,7 +301,7 @@ value in one file."
 
 ---
 
-### Task 4: Make `LIBRARY_B` required so no host path ships in the compose file
+### Task 4: Make `AMD_LIBRARY_HOST` required so no host path ships in the compose file
 
 A default here is a host-specific path baked into a file every deployment reads, and it is wrong on every machine but the one it was written on. The two tests that currently pin it — one of which asserts a personal directory name as a literal — are replaced rather than updated.
 
@@ -311,7 +311,7 @@ A default here is a host-specific path baked into a file every deployment reads,
 - Test: `hub/tests/test_deployment.py`
 
 **Interfaces:**
-- Consumes: the compose file from Task 3, whose `LIBRARY_B` source is at line 111 and whose `/library` target is at line 112.
+- Consumes: the compose file from Task 3, whose `AMD_LIBRARY_HOST` source is at line 111 and whose `/library` target is at line 112.
 - Produces: no new code names. The invariant produced is that the compose file's non-comment lines contain no `/home/m/` and no `/run/media/`.
 
 - [ ] **Step 1: Make the variable required**
@@ -319,16 +319,16 @@ A default here is a host-specific path baked into a file every deployment reads,
 `compose.yaml:111` — replace
 
 ```yaml
-        source: ${LIBRARY_B:-/home/m/Music/HDD_Music}
+        source: ${AMD_LIBRARY_HOST:-/home/m/Music/HDD_Music}
 ```
 
 with
 
 ```yaml
-        source: ${LIBRARY_B:?set LIBRARY_B in .env to the host directory that holds your music library}
+        source: ${AMD_LIBRARY_HOST:?set AMD_LIBRARY_HOST in .env to the host directory that holds your music library}
 ```
 
-The message deliberately does not name `LIBRARY_B`: compose renders the `:?` form as `required variable LIBRARY_B is missing a value: <message>`, so naming it again would print it twice. Measured, not assumed.
+The message deliberately does not name `AMD_LIBRARY_HOST`: compose renders the `:?` form as `required variable AMD_LIBRARY_HOST is missing a value: <message>`, so naming it again would print it twice. Measured, not assumed.
 
 `create_host_path: false` on line 114 is unchanged. It is the property that turns a missing directory into a failed start instead of a directory Docker created and mounted as an empty library that reads as healthy — and it is what makes Review Focus 1 and 2 safe.
 
@@ -368,11 +368,11 @@ def test_the_library_directory_is_required_and_nothing_defaults_to_this_host():
         "Docker creates on the host, and an empty root reads as healthy"
     )
     assert ":?" in binds[0]["source"], (
-        f"LIBRARY_B must be required (:?) rather than defaulted: got {binds[0]['source']!r}"
+        f"AMD_LIBRARY_HOST must be required (:?) rather than defaulted: got {binds[0]['source']!r}"
     )
 ```
 
-`_compose` is `yaml.safe_load` over the file's text (line 154) and never shells out to `docker compose`, so the `${LIBRARY_B:?...}` in `source` is never interpolated and the test needs no `monkeypatch` and no `LIBRARY_B` in the environment. Nothing else in this file resolves that interpolation either, so `:?` is safe to assert on directly.
+`_compose` is `yaml.safe_load` over the file's text (line 154) and never shells out to `docker compose`, so the `${AMD_LIBRARY_HOST:?...}` in `source` is never interpolated and the test needs no `monkeypatch` and no `AMD_LIBRARY_HOST` in the environment. Nothing else in this file resolves that interpolation either, so `:?` is safe to assert on directly.
 
 - [ ] **Step 3: Run the deployment tests**
 
@@ -390,7 +390,7 @@ cd "$(mktemp -d)" && cp /home/m/amdl_extend/compose.yaml . && \
   docker compose config 2>&1 | head -3
 ```
 
-Expected: a line containing `required variable LIBRARY_B is missing a value` and the message text from Step 1. If it prints something else, the `:?` did not take effect — stop and report rather than proceeding.
+Expected: a line containing `required variable AMD_LIBRARY_HOST is missing a value` and the message text from Step 1. If it prints something else, the `:?` did not take effect — stop and report rather than proceeding.
 
 - [ ] **Step 5: Run the full suite and lint**
 
@@ -402,12 +402,12 @@ Expected: **644 passed** (645 minus the one net test removal in Step 3), and `Al
 
 ```bash
 git add compose.yaml hub/tests/test_deployment.py
-git commit -m "fix: require LIBRARY_B rather than defaulting to this host's drive
+git commit -m "fix: require AMD_LIBRARY_HOST rather than defaulting to this host's drive
 
 A default here is a host-specific path baked into a file every deployment
 reads, and it is wrong on every machine but this one. The message does not
 repeat the variable name: compose already renders it as 'required variable
-LIBRARY_B is missing a value: <message>'.
+AMD_LIBRARY_HOST is missing a value: <message>'.
 
 The test it replaces read the default out of the compose file and asked
 whether it was a symlink on the machine running the suite, skipping when
@@ -456,8 +456,8 @@ Delete lines 58-69 — the `The library is the external drive, and it is the onl
 # root that is a silently empty mount point is not, so an added root that is mounted and
 # empty is invisible. The library page shows a per-root album count for exactly that case.
 #
-# The host side of this mount is `LIBRARY_B` below. The two are different kinds of path:
-# this one is inside the container and is the same on every machine, and `LIBRARY_B` is on
+# The host side of this mount is `AMD_LIBRARY_HOST` below. The two are different kinds of path:
+# this one is inside the container and is the same on every machine, and `AMD_LIBRARY_HOST` is on
 # the host and is yours.
 AMD_LIBRARY_ROOTS=/library
 
@@ -472,19 +472,19 @@ AMD_LIBRARY_ROOTS=/library
 # name, and Docker resolves it before the mount exists inside the container.
 #
 # compose refuses to create the host path (`create_host_path: false`), so an absent
-# directory is a failed start with a message naming LIBRARY_B, rather than a directory
+# directory is a failed start with a message naming AMD_LIBRARY_HOST, rather than a directory
 # Docker quietly created and mounted as an empty library.
 #
-# LIBRARY_B=/home/you/Music
+# AMD_LIBRARY_HOST=/home/you/Music
 ```
 
 `test_deployment.py:589-594` requires the word `contain` inside the TODO block, and Step 1 does not touch the TODO block, so that assertion still has a target. Run Step 6 to confirm rather than reasoning about it.
 
 - [ ] **Step 3: Update `README.md`, including the local-run note**
 
-Line 39's `ls -L /home/m/Music/HDD_Music >/dev/null && echo mounted   # check first; see below` becomes `ls -d "$LIBRARY_B" >/dev/null && echo "library found"   # check first; see below`.
+Line 39's `ls -L /home/m/Music/HDD_Music >/dev/null && echo mounted   # check first; see below` becomes `ls -d "$AMD_LIBRARY_HOST" >/dev/null && echo "library found"   # check first; see below`.
 
-Line 96's `Downloads go to /library/a, which is AppleMusicDecrypt/downloads/ on the host.` becomes `Downloads go to /library, which is your library directory (LIBRARY_B) on the host.`
+Line 96's `Downloads go to /library/a, which is AppleMusicDecrypt/downloads/ on the host.` becomes `Downloads go to /library, which is your library directory (AMD_LIBRARY_HOST) on the host.`
 
 `AMD_LIBRARY_ROOTS` being required also affects running the hub without compose, because the app does not read `.env` — that has always been true of `AMD_PASSWORD`, but there is now a second variable, so state it. Add one sentence to `README.md`'s development section, next to where `AMD_PASSWORD` is already mentioned for local runs:
 
@@ -537,8 +537,8 @@ so once Step 1 lands, this task's Step 6 fails with `SKIP (did not apply)` and a
 ```python
     "a host-specific library default reinstated in compose.yaml": (
         C, lambda t: t.replace(
-            "source: ${LIBRARY_B:?set LIBRARY_B in .env to the host directory that holds your music library}",
-            "source: ${LIBRARY_B:-/home/m/Music/HDD_Music}")),
+            "source: ${AMD_LIBRARY_HOST:?set AMD_LIBRARY_HOST in .env to the host directory that holds your music library}",
+            "source: ${AMD_LIBRARY_HOST:-/home/m/Music/HDD_Music}")),
     "the drive-is-required wording back in .env.example": (
         ENV, lambda t: t.replace(
             "it does not have to be a separate drive",
@@ -600,7 +600,7 @@ single library, and only the prose survived it. A new operator reading
 this file was told a drive was mandatory and that a root that did not
 exist needed to be listed.
 
-Its host-side companion is now LIBRARY_B, required, with no default: any
+Its host-side companion is now AMD_LIBRARY_HOST, required, with no default: any
 directory works, including one that is not a separate drive.
 
 The mutation that targeted the deleted string is retargeted in the same
@@ -623,6 +623,6 @@ Every task ends with `uv run pytest -q` and `uv run ruff check .` green. After T
 - [ ] `cd hub && uv run pytest -q` reports **644 passed**, 0 failed, 0 skipped
 - [ ] `cd hub && uv run ruff check .` reports `All checks passed!`
 - [ ] `docker compose build` reaches the Dockerfile's last `RUN` and prints `BUILD GATE OK`. This is the check that `load_settings()` inside the image still finds `AMD_LIBRARY_ROOTS` — it comes from `ENV AMD_LIBRARY_ROOTS=${AMD_DOWNLOAD_ROOT}`, and the spec requires it be measured rather than assumed.
-- [ ] With `LIBRARY_B` unset, `docker compose config` fails with a message naming `LIBRARY_B` (Task 4 Step 4 already establishes this)
-- [ ] With `LIBRARY_B` set in `.env` — **uncomment line 95 of your `.env`**, which is currently `# LIBRARY_B=/home/m/Music/HDD_Music` — `docker compose up -d` starts, and `/api/status` reports the expected per-root album counts. A plausible total is equally consistent with a full library and an empty mount, so read the per-root numbers, not the sum.
+- [ ] With `AMD_LIBRARY_HOST` unset, `docker compose config` fails with a message naming `AMD_LIBRARY_HOST` (Task 4 Step 4 already establishes this)
+- [ ] With `AMD_LIBRARY_HOST` set in `.env` — **uncomment line 95 of your `.env`**, which is currently `# AMD_LIBRARY_HOST=/home/m/Music/HDD_Music` — `docker compose up -d` starts, and `/api/status` reports the expected per-root album counts. A plausible total is equally consistent with a full library and an empty mount, so read the per-root numbers, not the sum.
 - [ ] `git status --short` shows the 15 pre-existing files still modified with 77 insertions and 77 deletions, and nothing else

@@ -60,7 +60,7 @@ AMD_LIBRARY_ROOTS: /library/a,/library/b
 > **`/home/m/Music/HDD_Music` を含むホスト固有のリテラルをなくし、他人のマシン
 > （外付け NTFS ドライブ無し）でも動かせるようにしたい。**
 
-技術的にはドライブは不要である。ライブラリ bind は `LIBRARY_B` でパラメータ化
+技術的にはドライブは不要である。ライブラリ bind は `AMD_LIBRARY_HOST` でパラメータ化
 済みで、マシン内の普通のディレクトリでも動作する。可搬性を阻むのは
 **ハードコードされた既定値と、存在しない前提に基づく原稿**だけだった。
 
@@ -132,7 +132,7 @@ AMD_LIBRARY_ROOTS: /library/a,/library/b
 | # | 決定 | 理由 |
 |---|---|---|
 | D1 | 対象は**他人のマシン**（外付けドライブ無し） | 要求の明示。技術的には drive は不要 |
-| D2 | `LIBRARY_B` は**必須化**し fail-fast | 第 2 階層のルール。`AMD_PASSWORD` と同型 |
+| D2 | `AMD_LIBRARY_HOST` は**必須化**し fail-fast | 第 2 階層のルール。`AMD_PASSWORD` と同型 |
 | D3 | `AMD_LIBRARY_ROOTS` も**必須化**、`DEFAULT_LIBRARY_ROOTS` を**削除** | D2 と同じ哲学を逸らさない。黙って空をスキャンする footgun を残さない |
 | D4 | `/library/b` → **`/library`** | 孤児になった `a` を消す。「`b` は何?」という質問自体を起こさない |
 | D5 | **2 コミット**（挙動 → 原稿） | ①はテストが証明し、②は機械的で挙動リスクゼロ |
@@ -202,7 +202,7 @@ README に 1 行書く（§5.6）。
 
 # 110-114 行目
       - type: bind
-        source: ${LIBRARY_B:?set LIBRARY_B in .env to the host directory that holds your music library}
+        source: ${AMD_LIBRARY_HOST:?set AMD_LIBRARY_HOST in .env to the host directory that holds your music library}
         target: /library
         bind:
           create_host_path: false
@@ -212,7 +212,7 @@ README に 1 行書く（§5.6）。
 ```
 
 `create_host_path: false` は**維持する**。これは現在の compose で最も慎重に守られ
-ている安全装置であり、可搬性の問題ではない。`LIBRARY_B` が未設定なら compose は
+ている安全装置であり、可搬性の問題ではない。`AMD_LIBRARY_HOST` が未設定なら compose は
 **変数名つきのエラーで停止**し、存在しないパスに空のライブラリを mount する
 ことはない。**正しい挙動である。**
 
@@ -265,7 +265,7 @@ def test_requires_library_roots():
 def test_the_missing_library_roots_message_says_how_to_set_it():
     # A message that only names the variable leaves the operator to guess the format, and
     # the format is a comma-separated list of *container* paths -- not the host path they
-    # put in LIBRARY_B. Both halves are asserted because the point of this change is that a
+    # put in AMD_LIBRARY_HOST. Both halves are asserted because the point of this change is that a
     # new user can get it right without reading the source.
     with pytest.raises(RuntimeError) as excinfo:
         load_settings({"AMD_PASSWORD": "x"})
@@ -312,7 +312,7 @@ def test_the_password_is_still_checked_before_the_library_roots():
 **現行 1566-1571 を置き換える。**
 
 ```python
-match = re.search(r"LIBRARY_B:-([^}]+)\}", binds[0]["source"])
+match = re.search(r"AMD_LIBRARY_HOST:-([^}]+)\}", binds[0]["source"])
 assert match, f"the source should be an overridable host path, got {binds[0]['source']!r}"
 assert match.group(1).endswith("HDD_Music"), (
     "the host path is the symlink, not the /run/media/<UUID> target it points at: ..."
@@ -325,9 +325,9 @@ assert match.group(1).endswith("HDD_Music"), (
 へ改名する。置き換え:
 
 ```python
-match = re.search(r"LIBRARY_B:\?([^}]+)\}", raw)
+match = re.search(r"AMD_LIBRARY_HOST:\?([^}]+)\}", raw)
 assert match, (
-    f"LIBRARY_B must be required (:?) rather than defaulted: a default is a host-specific "
+    f"AMD_LIBRARY_HOST must be required (:?) rather than defaulted: a default is a host-specific "
     f"path baked into the file, and it is wrong on every machine but this one. "
     f"got {binds[0]['source']!r}"
 )
@@ -340,15 +340,15 @@ assert "HDD_Music" not in raw, (
 **現行 1085-1112 `test_the_library_root_is_mounted_through_the_symlink_and_not_resolved`
 は前提が成立しなくなる。** このテストは compose から**このマシンの実パス**を
 抜き出し、シンボリックリンクか否かを**実行環境に問い合わせ**、そうでなければ
-`skip` する。`LIBRARY_B` に既定値がなくなったことで成立しなくなる。
+`skip` する。`AMD_LIBRARY_HOST` に既定値がなくなったことで成立しなくなる。
 
 置き換え:
 
 - **残す**: `assert "/run/media/" not in code`（出荷ファイルが udev の UUID を
-  名指ししないこと。`LIBRARY_B` を経由する形でも同じ）
+  名指ししないこと。`AMD_LIBRARY_HOST` を経由する形でも同じ）
 - **削除する**: 「既定値がこのマシンでシンボリックリンクか」の判定部分。パスは
   `.env` から来るものであり、compose ファイルが検査できる対象ではない
-- **追加する**: `LIBRARY_B` が `:?` 構文であること（上記と同じ assert）
+- **追加する**: `AMD_LIBRARY_HOST` が `:?` 構文であること（上記と同じ assert）
 - ガイダンスは **原稿**（`.env.example` / `README`）へ移す:
   「`/run/media/<UUID>/` ではなく、自分で管理する安定したパスを指せ」
 
@@ -385,7 +385,7 @@ so the mutation did not apply」）。**標的が消える前に置き換える�
 
 | ファイル | 変更 |
 |---|---|
-| `.env.example` | 43-56 行（「`/library/a` MUST BE IN THE LIST」）と 58-69 行（「the only root」）の**矛盾した 14 行**を統合する。新人がすることは「ライブラリのあるディレクトリを 1 つ指定するだけ」。`LIBRARY_B` が必須であることも常务。58-61 行の「ドライブ必須」という記述を外し、「マシン内の任意のディレクトリでよい」と書く |
+| `.env.example` | 43-56 行（「`/library/a` MUST BE IN THE LIST」）と 58-69 行（「the only root」）の**矛盾した 14 行**を統合する。新人がすることは「ライブラリのあるディレクトリを 1 つ指定するだけ」。`AMD_LIBRARY_HOST` が必須であることも常务。58-61 行の「ドライブ必須」という記述を外し、「マシン内の任意のディレクトリでよい」と書く |
 | `.env.example` | compose を経由しないローカル実行の手順を追記する（§5.1） |
 | `README.md:39` | `ls -L /home/m/Music/HDD_Music` を汎用手順へ置き換える |
 | `README.md:96` | 「`/library/a`」を `/library` へ |
@@ -416,13 +416,13 @@ so the mutation did not apply」）。**標的が消える前に置き換える�
 
 以下は**実測済み**であり、推測で書いていない。
 
-### `LIBRARY_B` 未設定時
+### `AMD_LIBRARY_HOST` 未設定時
 
 compose が変数名つきで停止する。実測した形式:
 
 ```
 error while interpolating services.amd-hub.volumes.0.source: required variable
-LIBRARY_B is missing a value: set LIBRARY_B in .env to the host directory that holds your music library
+AMD_LIBRARY_HOST is missing a value: set AMD_LIBRARY_HOST in .env to the host directory that holds your music library
 ```
 
 一時ディレクトリに `compose.yaml` を書いて `${BAR:?set BAR in .env}` を
@@ -439,7 +439,7 @@ AMD_LIBRARY_ROOTS is unset. Name every host directory that holds your music
 library, comma-separated, e.g. AMD_LIBRARY_ROOTS=/library
 ```
 
-**コンテナ内のパス**である `/library` を例として示す点が重要で、`LIBRARY_B` には
+**コンテナ内のパス**である `/library` を例として示す点が重要で、`AMD_LIBRARY_HOST` には
 **ホストの**パスが入る。2 つの変数が別物であることがメッセージだけで分かるように
 するためである。
 
@@ -449,10 +449,10 @@ library, comma-separated, e.g. AMD_LIBRARY_ROOTS=/library
 
 既存デプロイへの影響:
 
-1. **`.env` で `LIBRARY_B` を有効にする必要がある。** 実測で現在の `.env` は
-   95 行目に `# LIBRARY_B=/home/m/Music/HDD_Music` と**コメントアウト**した状態で
+1. **`.env` で `AMD_LIBRARY_HOST` を有効にする必要がある。** 実測で現在の `.env` は
+   95 行目に `# AMD_LIBRARY_HOST=/home/m/Music/HDD_Music` と**コメントアウト**した状態で
    持つだけで、**変数は未設定**である。これまでの起動は compose の既定値に
-   依存していた。必須化により、`LIBRARY_B` を有効にするまで `docker compose up`
+   依存していた。必須化により、`AMD_LIBRARY_HOST` を有効にするまで `docker compose up`
    は失敗する
 2. これを回避するため、実装時に**このマシンの `.env` の 95 行目をコメントアウト
    解除する**（gitignore 済み、オペレータ所有）
@@ -482,7 +482,7 @@ library, comma-separated, e.g. AMD_LIBRARY_ROOTS=/library
 | リスク | 評価 |
 |---|---|
 | `build_gate.py` が `AMD_LIBRARY_ROOTS` を要求するため壊れる | **低**。Dockerfile:302 の `ENV` が値を供給する。§5.7-4 で実測する |
-| 既存デプロイが `.env` の更新を忘れる | **中**。§7 で緩和する。忘れた場合、他マシンでは「`LIBRARY_B` が必須」というエラーが出るので**静かには壊れない** |
+| 既存デプロイが `.env` の更新を忘れる | **中**。§7 で緩和する。忘れた場合、他マシンでは「`AMD_LIBRARY_HOST` が必須」というエラーが出るので**静かには壊れない** |
 | 17 箇所の `test_config.py` 修正漏れ | **低**。`pytest` が全てを報告する |
 | `/library` への改名でイメージ内の `dirPathFormat` が変わる | **低**。`AMD_DOWNLOAD_ROOT` 経由なので自動的に一貫する。`build_gate.py:169-185` の包含チェックがこれを検証する |
 | `AGENTS.md` の書き換えが不徹底で、このマシン固有の情報が失われる | **低**。方向は §5.6 で決まっている。**判定はレビューで行う** — §10 の grep で 3 箇所が生きているか確認する |
@@ -521,7 +521,7 @@ library, comma-separated, e.g. AMD_LIBRARY_ROOTS=/library
 - [ ] `cd hub && uv run pytest -q` が green
 - [ ] `cd hub && uv run ruff check .` が clean
 - [ ] `docker compose build` が `BUILD GATE OK` で通る（§5.7-4 の実測）
-- [ ] このマシンの `.env` で `LIBRARY_B` がコメントアウト解除されている
-- [ ] `docker compose up -d` が `LIBRARY_B` 必須のエラーを出さずに起動する
+- [ ] このマシンの `.env` で `AMD_LIBRARY_HOST` がコメントアウト解除されている
+- [ ] `docker compose up -d` が `AMD_LIBRARY_HOST` 必須のエラーを出さずに起動する
 - [ ] `/api/status` が**期待するアルバム数**を per-root で報告する
   （空ライブラリが「健全」に見えないこと。§3 の第 2 階層の存在理由）
