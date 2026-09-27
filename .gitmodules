@@ -1,0 +1,8 @@
+[submodule "AppleMusicDecrypt"]
+	path = AppleMusicDecrypt
+	url = https://github.com/WorldObservationLog/AppleMusicDecrypt
+	branch = v3
+[submodule "wrapper"]
+	path = wrapper
+	url = https://github.com/itouakirai/wrapper
+	branch = lite

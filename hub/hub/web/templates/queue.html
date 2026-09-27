@@ -1,0 +1,178 @@
+{#
+  queue.html -- the page the whole project is for.
+
+  **The enqueue form is first, and that is a decision rather than an accident.** It used
+  to be the fourth card, below the wrapper, the login form and the library. Those three
+  are things you check *when something is wrong*; this one is what you came to do. The two
+  status cards are now `<details>`, open only when they have something to say -- the
+  wrapper opens when it is not serving, the library opens when a root cannot be read -- so
+  a healthy hub is one form and one table.
+
+  The wrapper keeps `problem` apart on purpose. "No account is logged in" gets a *Log in*
+  button; "did not become ready" gets *Start* and a log. They are never collapsed into one
+  "unavailable", because they ask different things of the user and the first one tells them
+  not to wait.
+
+  The queue table is rendered server-side from a real `list()` and patched in place by
+  `EventSource` frames. Three things were added because a queue that only ever grows is a
+  queue you scroll: the counts (`queue_counts`) so the state is readable without reading the
+  table; the two bulk controls, because there is otherwise no way to remove a row at all --
+  `DELETE /api/jobs/{id}` only marks a job `cancelled`; and `data-finished` on terminal rows
+  so the browser can collapse them, with a control to bring them back.
+
+  A skipped row shows its matched paths verbatim: `loose` matching is deliberately willing
+  to treat two same-named albums as one, and those paths are the only thing a human has to
+  overrule it with.
+#}{% extends "base.html" %}
+{% block title %}Queue &middot; amd-hub{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h2>Queue something</h2>
+  <form id="enqueue" method="post" action="/enqueue">
+    <label for="urls">Apple Music links</label>
+    <textarea id="urls" name="urls" rows="3" required
+              placeholder="https://music.apple.com/jp/album/...&#10;https://music.apple.com/jp/song/..."></textarea>
+    <div class="row">
+      <label for="codec">Codec</label>
+      <select id="codec" name="codec">
+        {% for codec in ['alac', 'aac', 'aac-legacy', 'ec3', 'ac3', 'aac-binaural', 'aac-downmix'] %}
+          <option value="{{ codec }}"{% if codec == 'alac' %} selected{% endif %}>{{ codec }}</option>
+        {% endfor %}
+      </select>
+      <label for="language">Language</label>
+      <input id="language" name="language" placeholder="from the client's own config">
+      <label class="inline"><input type="checkbox" name="force" value="1"> force</label>
+    </div>
+    <button type="submit">Queue</button>
+  </form>
+  <p class="error" id="enqueue-error" role="alert" hidden></p>
+</section>
+
+<details class="card" id="wrapper-state"
+         data-problem="{{ wrapper.problem or '' }}"
+         data-ready="{{ '1' if wrapper.ready else '0' }}"
+         {% if wrapper.problem %}open{% endif %}>
+  <summary><h1>Wrapper</h1></summary>
+  {% if wrapper.problem == 'no-account' %}
+    <p class="error" role="alert">{{ wrapper.detail }}</p>
+    <button type="button" data-action="wrapper-login">Log in to Apple Music</button>
+  {% elif wrapper.problem == 'unavailable' %}
+    <p class="error" role="alert">{{ wrapper.detail }}</p>
+    <button type="button" data-action="wrapper-start">Start the wrapper</button>
+  {% else %}
+    <p class="ok">
+      Serving on port {{ wrapper.port }}{% if wrapper.pid %} (pid {{ wrapper.pid }}){% endif %},
+      regions: <code>{{ wrapper.regions | join(', ') or '—' }}</code>.
+      {% if wrapper.adopted %}<em>Adopted a wrapper this hub did not start, so it cannot be
+      logged into from here.</em>{% endif %}
+    </p>
+  {% endif %}
+  <p class="muted small">
+    <button type="button" data-action="wrapper-start">Start</button>
+    <button type="button" data-action="wrapper-stop">Stop</button>
+    <button type="button" data-action="wrapper-restart">Restart</button>
+  </p>
+</details>
+
+<section class="card" id="login-card" hidden>
+  <h2>Apple Music login</h2>
+  <form id="login-form">
+    <label for="apple-id">Apple ID</label>
+    <input id="apple-id" name="username" type="email" autocomplete="username" required>
+    <label for="apple-pw">Password</label>
+    <input id="apple-pw" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Log in</button>
+  </form>
+  <form id="twofa-form" hidden>
+    <p id="twofa-deadline"></p>
+    <label for="code">2FA code</label>
+    <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required>
+    <button type="submit">Send the code</button>
+  </form>
+  <p class="error" id="login-error" role="alert" hidden></p>
+  <p class="muted small">
+    The password is sent to the wrapper launcher on its own command line and is not stored
+    here. The launcher reads a 2FA code for 60 seconds after it asks for one.
+  </p>
+</section>
+
+<details class="card" id="library-state" {% if library.degraded_roots %}open{% endif %}>
+  <summary><h2>Library</h2></summary>
+  <p class="muted small">{{ library.albums }} album directories.</p>
+  <ul class="roots">
+    {% for root in library.roots %}
+      <li{% if root in library.degraded_roots %} class="bad"{% endif %}>
+        <code>{{ root }}</code>
+        {% if root in library.degraded_roots %}<strong>not readable</strong>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+  {% if library.degraded_roots %}
+    <p class="error" role="alert">
+      Downloads continue and duplicates are still found against the roots that are there, but
+      a track that lived on a missing drive will be downloaded again.
+    </p>
+  {% endif %}
+</details>
+
+<section class="card">
+  <h2>Queue</h2>
+
+  {#- The counts, so the state of the queue is readable without reading the queue. Rendered
+      from the same `queue_counts` the page has always had -- no new query, and no way for a
+      summary to disagree with the table because it is the same numbers. -#}
+  <p id="queue-summary" class="summary">
+    {%- for status, count in queue_counts.items() if status != 'total' and count %}
+      <span class="count" data-count="{{ status }}">
+        <span class="count-n">{{ count }}</span> {{ status }}
+      </span>
+    {%- endfor %}
+  </p>
+
+  {#- Two controls, because until now there was no way to remove a row: `DELETE
+      /api/jobs/{id}` only marks a job `cancelled`, so a queue could only grow. The scope is
+      a choice rather than a constant because "everything not done" includes `skipped`, which
+      on a dedup-heavy library is the largest group and re-skips the moment it runs. -#}
+  <div class="row bulk">
+    <form data-action="queue-requeue" class="inline-form">
+      <label for="requeue-scope">Re-queue</label>
+      <select id="requeue-scope" name="scope">
+        <option value="failed">failed only</option>
+        <option value="unfinished">everything not done</option>
+      </select>
+      <button type="submit">Re-queue</button>
+    </form>
+    <button type="button" data-action="queue-delete-finished" class="danger">
+      Delete finished
+    </button>
+    <button type="button" data-action="queue-toggle-finished" aria-pressed="false">
+      Show finished
+    </button>
+  </div>
+  <p class="muted small">
+    Deleting removes the rows and nothing else. The files stay, and duplicates are found
+    against the library on disk rather than against this list.
+  </p>
+
+  <table id="queue-table">
+    <thead>
+      <tr>
+        <th>title</th><th>status</th><th>codec</th><th>progress</th>
+        <th>detail</th><th class="num">id</th><th></th>
+      </tr>
+    </thead>
+    <tbody id="queue-body">
+      {% for job in jobs %}
+        {% include "job_row.html" %}
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small" id="stream-state">connecting&hellip;</p>
+</section>
+
+<section class="card">
+  <h2>Log</h2>
+  <pre id="log" aria-live="polite"></pre>
+</section>
+{% endblock %}

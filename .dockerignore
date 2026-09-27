@@ -1,0 +1,86 @@
+# Docker build context exclusions.
+#
+# The build context is the workspace root, and that is not a choice: hub/hub/ripper_host.py
+# derives the vendor root as `parents[2] / "AppleMusicDecrypt"`, so with the package at
+# /app/hub/hub/ the client has to land at /app/AppleMusicDecrypt for the derivation to hold.
+# Moving either tree breaks the seam in a way that only shows up as a missing config.
+#
+# The two upstream clones ARE therefore needed -- the Dockerfile COPYs the prebuilt
+# wrapper-lite-rootless plus its rootfs, and the whole AppleMusicDecrypt tree. But the 69 GB
+# downloads/ tree, every venv, and the host's real config.toml must never enter the context.
+#
+# Both are submodules now, and that changes one thing worth stating: **git's ignore rules do
+# not apply to a Docker build context.** `wrapper/.gitignore` keeps its build/ and its NDK out
+# of *git*, and `AppleMusicDecrypt/.gitignore` keeps its downloads/ out of git, but Docker
+# reads only this file. So every exclusion below is load-bearing on its own account, and
+# moving a rule into a submodule would silently un-exclude it from the context.
+
+# --- Never ship these ---------------------------------------------------
+AppleMusicDecrypt/downloads/
+AppleMusicDecrypt/.venv/
+AppleMusicDecrypt/.idea/
+AppleMusicDecrypt/.git/
+# The operator's real config. It is gitignored, it is host-specific, and the image builds
+# its own at <vendor>/config.toml from config.example.toml instead -- see the Dockerfile.
+AppleMusicDecrypt/config.toml
+AppleMusicDecrypt/config.toml.bak
+
+wrapper/.git/
+wrapper/build/
+wrapper/android-ndk-r23b/
+wrapper/android-ndk-r23b-linux.zip
+# rootfs/data is excluded in the secrets section below, next to the other account material
+# and with the reason spelled out where the `**/data/` pattern it would otherwise rely on is
+# visible. It is a real mpl_db from the host's logged-in wrapper, and the launcher mkdirs its
+# own --base-dir at startup, so the image needs none of it.
+
+# --- hub: not runtime ---------------------------------------------------
+# A host venv would land in the image and its pyvenv.cfg points at the host interpreter.
+hub/.venv/
+# The runtime image has no pytest and no wrapper path; the test suite and the probe run on
+# the host. 1.7 MB, and shipping them would imply they are runnable in there.
+hub/tests/
+hub/spike/
+
+# --- VCS / docs / cache -------------------------------------------------
+.git/
+.gitignore
+.github/
+docs/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+
+# --- Secrets and local data --------------------------------------------
+# `**/` on every one of these, and that is not decoration. A Docker pattern without a leading
+# `**/` is anchored at the context root, so the bare `*.db` that was here matched the context
+# root and nothing else: `hub/hub/web/worker-check.db` -- a gitignored test artifact -- was in
+# the image for the whole of task 10 and nothing caught it, because the only test that reads
+# this file asked about root-anchored paths and therefore agreed with itself.
+#
+# It matters for what could come next, not just for the 12 KB of empty sqlite that was in
+# there: `AMD_DB_PATH=/data/hub.db` is on a volume, but a hub.db created *in the tree* by any
+# mundane slip is queue rows -- requested URLs, adam_ids, `skip_reason` strings. That is the
+# user's listening history. A pattern that only guards the context root is not a guard.
+**/.env
+**/.env.*
+!.env.example
+**/data/
+**/tmp/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+**/*.sqlite
+**/*.sqlite3
+# The Apple account database, named explicitly as well as by the `**/data/` above, because it
+# is the one exclusion whose value cannot be read off a pattern: `wrapper/rootfs/data/` holds a
+# real `accounts.sqlitedb`, `cookies.sqlitedb` and `token_cache.json` from a wrapper somebody
+# logged in by hand, and `docker history` reads an image layer.
+wrapper/rootfs/data/
+
+# --- Editors ------------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store

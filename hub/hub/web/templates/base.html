@@ -1,0 +1,49 @@
+{#
+  base.html -- the layout every page extends.
+
+  No client framework. The queue's live updates use the platform's own `EventSource` (see
+  app.js) and every other action is a plain form post, so the hub works with scripting
+  turned off, which matters for something that runs on a home LAN behind whatever the
+  operator's router does to it.
+
+  Autoescaping is on (Jinja2's default) and nothing in these templates turns it off. The
+  queue renders `skip_reason`, which is built from directory names read off the
+  filesystem, and a library that was ripped from arbitrary sources has directories called
+  `<img src=x onerror=...>`. `test_no_template_escapes_its_output` reads every template and
+  fails on `|safe`, on `{% autoescape false %}` and on `Markup(`;
+  `test_a_scan_result_cannot_inject_markup_into_the_page` renders such a directory for real
+  and checks the response.
+#}<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}amd-hub{% endblock %}</title>
+    {#
+      Both assets are external, and they have to be: the CSP sent with every response is
+      `default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'` and
+      carries no `unsafe-inline` and no `unsafe-eval`. An inline `<script>` here would be
+      refused by the browser, which is the correct outcome -- a page whose queue silently
+      stops updating is a much better failure than a CSP weakened to permit an injected
+      script because one template wanted a convenience. See `SECURITY_HEADERS` in
+      `hub/api/__init__.py`.
+    #}
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <header class="bar">
+      <a class="brand" href="/">amd-hub</a>
+      <nav>
+        <a href="/queue">Queue</a>
+        <a href="/library">Library</a>
+      </nav>
+      <form class="logout" method="post" action="/logout">
+        <button type="submit" class="link">Log out</button>
+      </form>
+    </header>
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

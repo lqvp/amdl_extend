@@ -1,0 +1,86 @@
+{#
+  library.html -- what the filesystem says, per spec §8.
+
+  Read-only, and deliberately so: §2 refuses destructive cleanup of the library outright,
+  because a file operation run by mistake against 341 GB of real data is a far larger harm
+  than the convenience of offering it. Phase 2 adds search and deletion, behind the same
+  decision; this page is the list.
+#}{% extends "base.html" %}
+{% block title %}Library &middot; amd-hub{% endblock %}
+
+{% block content %}
+<section class="card">
+  <h1>Library</h1>
+  <p class="muted small">
+    {{ listing.albums | length }} album directories across
+    {{ listing.roots | length }} root(s), {{ listing.artists | length }} artists.
+    Read from disk on every request: a folder moved or renamed outside the hub is followed
+    immediately, and there is no index to go stale.
+  </p>
+  {% if listing.degraded_roots %}
+    <p class="error" role="alert">
+      Unreadable: {% for root in listing.degraded_roots %}<code>{{ root }}</code>{% if not loop.last %}, {% endif %}{% endfor %}.
+      Downloads continue; duplicates are only detected against the roots that are readable.
+    </p>
+  {% endif %}
+  {#-
+    A per-root count, and a warning for a root that is readable but *empty*.
+
+    The second half is the one that matters, and `degraded_roots` above cannot cover it: a
+    drive that is not plugged in can be mounted and empty rather than missing -- Docker's
+    bind-mount autocreate makes the directory -- and that reads as a perfectly healthy root
+    with nothing in it. Nothing on disk distinguishes an empty library from an absent drive,
+    so the only honest thing is to show the count and let a human notice a zero. Without this
+    the failure is a silent re-download of everything that lived on the drive, which is the
+    one outcome §8.1 exists to prevent.
+  -#}
+  <table class="roots small">
+    <thead>
+      <tr><th>root</th><th class="num">album directories</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for root in listing.roots %}
+        <tr>
+          <td><code>{{ root }}</code></td>
+          <td class="num">{{ listing.per_root[loop.index0] }}</td>
+          <td>
+            {%- if root in listing.degraded_roots -%}
+              <span class="error-text">unreadable</span>
+            {%- elif listing.per_root[loop.index0] == 0 -%}
+              <span class="error-text" role="alert">empty &mdash; is this mounted?</span>
+            {%- endif -%}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <table>
+    <thead>
+      <tr><th>artist</th><th>album</th><th>tracks</th><th>path</th></tr>
+    </thead>
+    <tbody>
+      {% for album in listing.albums %}
+        <tr>
+          <td>{{ album.artist or "—" }}</td>
+          <td>{{ album.name or "—" }}</td>
+          <td class="num">{{ album.tracks }}</td>
+          {#-
+            `album.path`, not `album.relpath`. A bare relpath does not resolve once more
+            than one library root is configured -- it says which directory but not which
+            library, and in a listing that matters as much as it does in a `skip_reason`.
+            This is the same defect one layer over and the fix is the same expression:
+            `roots[root_index] / relpath`, which `_album_dict` already builds and which
+            `DuplicateHit.resolved` is built from.
+          -#}
+          <td class="small"><code>{{ album.path }}</code></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4" class="muted">No album directories were found.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

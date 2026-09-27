@@ -1,0 +1,30 @@
+# Spike-only compose file used to verify the finding in
+# docs/superpowers/findings/2026-09-26-wrapper-child-process-spike.md
+# section 5.4 -- that the two security_opt values are accepted by `docker compose`
+# and sufficient end to end.  NOT the amd-hub compose file; Task 2 writes that.
+#
+#   docker compose -f hub/spike/compose.probe.yaml up \
+#       --abort-on-container-exit --exit-code-from amd-hub
+#
+# Change security_opt to reproduce the other rows of the finding's control table:
+#
+#   [seccomp:unconfined]                          -> mount proc failed: EPERM  (spec §14 as written)
+#   [systempaths=unconfined]                      -> unshare: EPERM            (default seccomp)
+#   [seccomp:unconfined, systempaths=unconfined]   -> VERDICT: works
+#
+services:
+  amd-hub:
+    image: amd-hub-spike:probe
+    working_dir: /w/hub
+    command:
+      - uv
+      - run
+      - python
+      - spike/child_process_probe.py
+      # 0 = pick a free ephemeral port, so the probe never collides with
+      # anything else listening in the container's netns.
+      - --binary=/w/wrapper-lite-rootless
+      - --port=0
+    security_opt:
+      - seccomp:unconfined
+      - systempaths=unconfined

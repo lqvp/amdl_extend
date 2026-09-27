@@ -1,0 +1,112 @@
+[project]
+name = "amd-hub"
+version = "0.1.0"
+description = "Web UI over the AppleMusicDecrypt client and the wrapper-lite backend"
+requires-python = ">=3.11"
+# Deliberately minimal, and each task adds only the deps it needs (see the plan's
+# Step 1 table) so that a pure-logic task stays fast and hermetic. The AppleMusicDecrypt
+# runtime set is the one exception, and it arrives in Task 6 below, because Task 6 is the
+# task that needs it -- do not move it up, and do not add any further upstream package
+# outside that block.
+dependencies = [
+    "pydantic>=2",
+    # Task 5. The wrapper readiness gate is `GET /status` (R6: never log text), and this is
+    # the same client the downloader already uses against the same envelope
+    # (AppleMusicDecrypt/src/wrapper.py), so the hub and the CLI agree on what a healthy
+    # instance looks like.
+    "httpx>=0.27",
+    # Task 6. This is the one dependency block that cannot stay hermetic, because
+    # `hub/ripper_host.py` imports `AppleMusicDecrypt/src/*` in-process -- the seam runs
+    # the real ripper rather than reimplementing it, and `creart` and the client it
+    # configures have to be importable for the hub to start at all. These are the
+    # upstream client's own pins, not a hub-side selection, and they are listed
+    # individually rather than as a path dependency so that the hub keeps resolving
+    # `src.*` through the seam's own sys.path entry (the thing the boundary test
+    # enforces) instead of through an installed AppleMusicDecrypt package. An upstream
+    # dependency bump is then a change to *this* list, and only Task 6's tests notice
+    # it, which is the whole reason the seam is a single file.
+    #
+    # These are floors, which is all `requires-python`-era packaging gives us here, and
+    # the consequence is worth stating: an upstream release that *raises* a floor does not
+    # fail at `uv sync` -- the lock is already satisfied -- it fails at `import src.*` on
+    # a version this list no longer permits. So the floors below are a lower bound on
+    # what has been *tested*, not a statement of what will work. Re-verify the seam with
+    # `cd hub && uv run pytest tests/test_ripper_host.py -v` after any bump.
+    "creart>=0.3.0",
+    "async-lru>=2.2.0",
+    "loguru>=0.7.2",
+    "lxml>=6.0.2",
+    "beautifulsoup4>=4.14.3",
+    "m3u8>=6.0.0",
+    "regex>=2026.2.28",
+    "temari>=0.3.1",
+    "mutagen>=1.47.0",
+    "prompt-toolkit>=3.0.52",
+    "pycryptodome>=3.20.0",
+    "pywidevine>=1.9.0",
+    "tabulate>=0.10.0",
+    "tenacity>=9.1.4",
+    # Task 9. The HTTP surface. `fastapi` is the framework and `uvicorn[standard]` is
+    # what serves it, so the two are one row: an ASGI app with no server behind it is
+    # not a deployment. `itsdangerous` signs the session cookie (spec §11's "HMAC
+    # 署名済み cookie" -- one shared secret, no server-side session table), `jinja2`
+    # renders the HTMX templates server-side (no Node toolchain in the image, §13),
+    # and `python-multipart` is what makes `POST /api/auth/login` accept a form body
+    # at all -- FastAPI refuses a form without it, which is a 422 on the login page
+    # rather than an error anyone would read as a missing dependency.
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "itsdangerous>=2.2",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "pyyaml>=6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# The project root is `hub/`, so the importable package is the nested `hub/hub/`.
+# Siblings such as `hub/spike/` are deliberately not packaged.
+packages = ["hub"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Rootdir is this directory, so this puts the project root on sys.path and makes
+# `from hub... import ...` resolve for the tests under `tests/` without relying on the
+# editable install being present.
+pythonpath = ["."]
+
+[tool.ruff]
+# There was no config at all, which is how a fatal `NameError` shipped: ruff's
+# defaults *do* include F821 (undefined name), but every "ruff clean" in this
+# project's history was a run that did not cover `hub/hub/ripper_host.py` with
+# that rule. Pin the rule set explicitly so the claim has a fixed meaning.
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E501 is off: the codebase is written to a ~100 column guide and 1362 hits of
+# "line too long" is noise that would train everyone to ignore the output.
+# F821 is the one that matters -- it is pyflakes' undefined-name check, and it
+# is the rule that would have caught `asyncio` and `contextlib` being used in
+# `_with_progress` and never imported.
+select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# `spike/` holds the throwaway harnesses that produced the evidence in
+# docs/superpowers/findings/. They are deliberately rough -- several edit real
+# files -- and they are not shipped, so they are not held to the rule set.
+"spike/*" = ["ALL"]
+# The seam's `from src.* import ...` lines are function-local by design: the
+# vendor tree must stay off sys.path until the seam has inserted it, and the
+# boundary test is what enforces that. A top-level import would defeat it.
+"hub/ripper_host.py" = ["E402"]

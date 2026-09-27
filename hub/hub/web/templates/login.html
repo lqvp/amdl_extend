@@ -1,0 +1,38 @@
+{#
+  login.html -- one field, one button, and one message.
+
+  A plain form post to /login, which redirects on both success and failure. No JavaScript is
+  involved in authenticating, so a browser with scripting disabled -- or a browser behind a
+  proxy that mangles one script -- can still get in. That is a deliberate choice for a tool
+  that runs on one person's LAN.
+
+  The failure message is `Wrong password.` and nothing else. It is the same string for an
+  empty field, a wrong password and a body that was not a form at all, because the hub has
+  one secret and there is nothing to narrow down. See hub/auth.py.
+#}{% extends "base.html" %}
+{% block title %}Sign in &middot; amd-hub{% endblock %}
+
+{% block content %}
+<section class="card narrow">
+  <h1>Sign in</h1>
+  <p class="muted">This hub has one shared password. There are no accounts.</p>
+
+  {% if failed %}
+    <p class="error" role="alert">{{ failed_message }}</p>
+  {% endif %}
+
+  <form method="post" action="/login">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password"
+           required autofocus>
+    <button type="submit">Sign in</button>
+  </form>
+
+  {% if not settings.wrapper_binary.exists() %}
+    <p class="warn">
+      The wrapper launcher is not at <code>{{ settings.wrapper_binary }}</code>, so downloads
+      cannot start until it is. The login page still works.
+    </p>
+  {% endif %}
+</section>
+{% endblock %}

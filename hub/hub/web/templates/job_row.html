@@ -1,0 +1,72 @@
+{#
+  job_row.html -- one queue row, included per job.
+
+  The `detail` cell is the part that matters. For a skipped job it holds
+  the literal `duplicate:` followed by root-qualified absolute paths joined with `|`, so
+  that each one opens -- it used to carry a bare `relpath`, which does not resolve once more
+  than one library root is configured. The paths are rendered **verbatim and individually**
+  rather than as the raw `skip_reason` string: they are the only thing that makes a `loose`
+  match adjudicable by a human, since `loose` deliberately treats two same-named albums as
+  one release (that is what catches a collab fanned out across every credited artist's
+  folder -- 164 of the 223 duplicate album names in the real library -- and it is the only
+  thing that can also produce a false positive).
+
+  They come off the filesystem, so they are untrusted text: Jinja2 escapes them, and the
+  `join('|')` is added back for display only, never taken apart. A directory called
+  `<img src=x onerror=...>` is a name a user-curated, third-party-sourced library really can
+  have, and §7.5's own rules keep odd characters rather than stripping them.
+#}
+<tr id="job-{{ job.id }}" data-job-id="{{ job.id }}"
+    class="status-{{ job.status }}"
+    data-finished="{{ '1' if job.status in ('done', 'failed', 'skipped', 'cancelled') else '0' }}">
+  {#- The cell order is `queue.html`'s `<thead>`, and it is load-bearing in both directions:
+      a header over the wrong column is worse than no header, and `buildRow` in `app.js`
+      rebuilds every row from JSON on the first stream frame. The `id` is a database rowid,
+      kept because the retry/cancel buttons and the stream both address jobs by it, and put
+      last because it is not what a reader is looking for. -#}
+  <td class="title">{{ job.title or "(no title)" }}</td>
+  <td class="status-cell"><span class="status status-{{ job.status }}">{{ job.status }}</span></td>
+  <td class="num">{{ job.codec }}</td>
+  <td class="progress">
+    {#-
+      Three answers, and the middle one says *why* it is indeterminate rather than leaving a
+      bar that looks like progress and is not. There are two reasons a running job has no
+      `progress`: the transfer's total size is unknown (the wrapper's HLS segments do not
+      always carry a content length), or the job is a music video, which goes through
+      `MVRipper.rip` rather than `Ripper.download_manager` and so never registers a `Task` to
+      read a count from -- see `RipperHost._read_progress`. A row cannot tell those apart,
+      because neither is stored on the job, so the title names both rather than guessing.
+    -#}
+    {% if job.progress is not none %}
+      <progress max="1" value="{{ job.progress }}"
+                title="{{ (100 * job.progress) | round(1) }}%"></progress>
+    {% elif job.status == 'running' %}
+      <progress title="Working, but the total size is not known -- so no percentage. This is
+                   also what a music video looks like: that path reports no byte count."></progress>
+    {% else %}
+      <span class="muted">&mdash;</span>
+    {% endif %}
+  </td>
+  <td class="detail">
+    {% if job.status == 'skipped' and job.skip_reason %}
+      <span class="muted">already on disk at</span>
+      <ul class="paths">
+        {% for path in job.skip_reason.removeprefix('duplicate:').split('|') %}
+          <li><code>{{ path }}</code></li>
+        {% endfor %}
+      </ul>
+    {% elif job.error %}
+      <span class="error-text">{{ job.error }}</span>
+    {% elif job.parent_url %}
+      <a class="muted small" href="{{ job.parent_url }}" rel="noreferrer noopener">source</a>
+    {% endif %}
+  </td>
+  <td class="num muted">{{ job.id }}</td>
+  <td class="actions">
+    {% if job.status in ('done', 'failed', 'skipped', 'cancelled') %}
+      <button type="button" data-action="job-retry" data-job-id="{{ job.id }}">Retry</button>
+    {% elif job.status == 'queued' %}
+      <button type="button" data-action="job-cancel" data-job-id="{{ job.id }}">Cancel</button>
+    {% endif %}
+  </td>
+</tr>

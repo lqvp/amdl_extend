@@ -1,0 +1,252 @@
+# amd-hub -- the whole thing is one service (spec §3.1, §14; task 10 of the phase-1 plan).
+#
+#   cp .env.example .env      # then put AMD_PASSWORD in it
+#   docker compose up -d --build
+#   docker compose logs -f amd-hub
+#   open http://<this-host>:8080/
+#
+# Every value the operator is expected to change lives in .env, not here, so that this file
+# stays a reviewable record of the deployment's *shape* rather than of one host's paths.
+
+services:
+  amd-hub:
+    build:
+      # The workspace root, because hub/hub/ripper_host.py derives the vendor root as
+      # parents[2] / "AppleMusicDecrypt" and hub/deploy/build_gate.py asserts the result.
+      # A context of ./hub would not contain AppleMusicDecrypt/ or wrapper/ at all.
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Region metadata language, baked into <vendor>/config.toml at build time. Upstream's
+        # example ships zh-Hant-HK; this operator's own config.toml is ja. It is an ARG rather
+        # than a hardcoded sed because it is a per-account preference, not a property of the
+        # build -- change it here and `docker compose build` again.
+        AMD_VENDOR_LANGUAGE: ${AMD_VENDOR_LANGUAGE:-ja}
+        # The library, in one place: this is both what the client writes into and what the
+        # hub scans. See the volumes block for why they have to be the same tree, and why
+        # this is stated rather than defaulted -- a default loses to `.env`, and that is how
+        # 3,670 albums ended up mounted and unscanned once already.
+        AMD_DOWNLOAD_ROOT: /library/b
+
+    # 8080 only. The wrapper's 12340 is deliberately NOT published: it is an unauthenticated
+    # HTTP API that serves decrypted audio, so reaching it from the LAN would be a data leak
+    # rather than a feature (spec §11). It is bound to 127.0.0.1 inside the container, which
+    # is a different loopback from the host's.
+    ports:
+      - "${AMD_HTTP_PORT:-8080}:8080"
+
+    # No `network_mode: host`, and this is not a style preference. The launcher does *not*
+    # unshare a network namespace (wrapper-lite-rootless.c:44 has no CLONE_NEWPID's sibling,
+    # CLONE_NEWNET), so it binds in whatever netns it inherited. On the host that is the whole
+    # loopback -- which is already occupied by the operator's own wrapper QEMU instance on
+    # 127.0.0.1:12340, and a failed bind makes the payload signal *itself*, producing a log
+    # line identical to an external kill (spike §6.5). The default bridge network gives the
+    # container its own netns, which closes that whole class of collision.
+    #
+    # The corollary is that `ports:` above is a one-way door for the wrapper: anything that
+    # put the container on the host network would re-expose 12340.
+    #
+    # No `user:`, and that is load-bearing too. The launcher unshare(CLONE_NEWUSER)s with a
+    # single-uid map ("0 0 1") before it touches the filesystem, which leaves any file owned
+    # by another uid unmapped; a rootfs owned by uid 1000 is unwritable to the child even
+    # under CAP_DAC_OVERRIDE (spike §5.1 F2). The image COPYs the rootfs so it is root-owned,
+    # and the container therefore has to run as root to match. Running as root inside an
+    # unprivileged container is not the same thing as `privileged`, and the capabilities
+    # below are still the docker defaults.
+    security_opt:
+      # Both, and both are required. This is the measured answer to "can the rootless launcher
+      # run as a child process in a container", not a guess:
+      #
+      #   seccomp only                 -> mount proc failed: EPERM   FAILS
+      #   systempaths only             -> unshare: EPERM            FAILS
+      #   seccomp + systempaths        -> works
+      #   seccomp + cap_add SYS_ADMIN  -> mount proc failed: EPERM   FAILS
+      #
+      # (spike §1 verdict table; spec §14.1.) Docker over-mounts 12 paths under /proc, and the
+      # launcher mounts its own procfs inside its user namespace; the kernel's
+      # mount_too_revealing() check refuses because of the hidden existing mounts. It is a
+      # visibility judgement, not a privilege one, which is why cap_add cannot fix it -- and
+      # why no cap_add appears here, having been proven useless.
+      - seccomp:unconfined
+      # THE HARDENING REDUCTION, stated plainly because it is a real one.
+      # systempaths=unconfined removes Docker's /proc masking, so inside this container
+      # /proc/{bus,fs,irq,sys} become read-write and the /dev/null binds over
+      # /proc/{kcore,keys,timer_list,interrupts} are removed. The material exposure is that a
+      # root process in here can write arbitrary /proc/sys tunables -- including
+      # /proc/sys/kernel/sysrq, which together with the now-writable /proc/sysrq-trigger
+      # gives reboot, crash and signal-all-tasks (sysrq is 16 on this host, i.e. bit 4 only,
+      # so the trigger alone is close to harmless; it is the combination that is not).
+      # /proc/kcore is NOT a live leak here: CapEff has no CAP_SYS_RAWIO, so reads return
+      # EPERM. The risk is conditional on that capability being added later.
+      #
+      # What it is traded against, per spec §14.1: not `privileged`, no added capabilities,
+      # and exactly one published port. If you need stronger isolation than that, the fallback
+      # is §3.1's two-container topology, not a bigger security_opt list.
+      - systempaths=unconfined
+
+    volumes:
+      # --- The library: the external NTFS drive, and REQUIRED --------------------
+      #
+      # This is both the scan root and the download target. It is one directory on purpose:
+      # if the client wrote somewhere the scan does not read, every track would download
+      # twice, and nothing anywhere would say so. `AMD_DOWNLOAD_ROOT` below states the same
+      # path a second time, inside the image, because `dirPathFormat` is baked into
+      # `<vendor>/config.toml` at build time and cannot be read from the environment.
+      #
+      # `create_host_path: false` is load-bearing. Compose's short bind syntax creates the
+      # host path when it is missing, and Docker resolves the symlink first -- so with the
+      # drive unplugged the stack would start happily against a directory Docker had just
+      # mkdir'd inside /run/media/, mount it as an empty library, and re-download all 3,670
+      # albums with no error anywhere. An empty root reads as healthy: `degraded_roots`
+      # covers a root that cannot be *read*, not one that was never populated. This makes
+      # the absent drive a failed start, which is the honest answer now that the library
+      # lives there.
+      #
+      # The host path is the SYMLINK, not the /run/media/<UUID>/ target it points at. The
+      # UUID path is udev's automount point: it disappears on unmount and changes if the
+      # volume is reformatted, so a compose file naming it is a file that silently rots. The
+      # symlink is the stable, user-managed name, and Docker resolves it on the host before
+      # the mount exists inside the container, so the two are equivalent while it is up.
+      - type: bind
+        source: ${LIBRARY_B:-/home/m/Music/HDD_Music}
+        target: /library/b
+        bind:
+          create_host_path: false
+
+      # The hub's own state: hub.db, the only thing the hub persists (spec §6). A named
+      # volume, not a bind mount: it is ours and nothing outside should touch it.
+      - ./data/hub-data:/data
+
+      # The Apple token database, and this one is NOT under /data -- which is worth being
+      # explicit about, because the plan's compose comment claims otherwise and it is wrong.
+      # The launcher chroots into its own rootfs before it resolves --base-dir
+      # (wrapper-lite-rootless.c:131-142), so `--base-dir /data/wrapper` means
+      # <rootfs>/data/wrapper *inside the chroot*, i.e.
+      # /opt/wrapper/rootfs/data/wrapper/mpl_db on this side. It cannot be the /data mount
+      # above, and the two are in different namespaces.
+      #
+      # So it gets its own volume, and it needs one: without it the token database lives in
+      # the image's writable layer, and `docker compose down && up` throws the Apple account
+      # away and demands a full 2FA login again. Two volumes rather than one mounted twice,
+      # because these two trees have nothing to do with each other and giving them one owner
+      # each is what stops a `docker volume rm` aimed at the wrong one.
+      - ./data/wrapper-data:/opt/wrapper/rootfs/data
+
+    environment:
+      # The hub's own login password. Required, with no default, because a shared LAN
+      # appliance with an empty password is not an appliance.
+      AMD_PASSWORD: ${AMD_PASSWORD:?set AMD_PASSWORD in .env, e.g. cp .env.example .env}
+      AMD_BIND: 0.0.0.0
+      AMD_PORT: "8080"
+
+      # Every root in the list is scanned, and the order changes nothing: `scan_roots` builds
+      # one index across all of them, so a track in root 2 is found whichever root is listed
+      # first. (An earlier version of this comment claimed the opposite -- that reordering
+      # would make dedup read a different tree than the client writes to. Measured on the real
+      # two-root library, both orders return identical `matched` and `resolved`, because
+      # `library_roots[0]` is read only by the build gate and never at runtime.)
+      #
+      # /library/a MUST BE IN THE LIST, and that is the real hazard. The image bakes
+      # `<vendor>/config.toml`'s `dirPathFormat` as /library/a/{album_artist}/{album} --
+      # upstream's example is relative, and a relative value resolves against
+      # AppleMusicDecrypt/ instead of the mount -- so the client always writes to /library/a.
+      # Drop it from this list and downloads land in a tree nothing ever scans: every track
+      # re-downloads, forever, with no error. No build can catch it, because this variable is
+      # read at runtime. TODO(spec §8.1, Phase 2): assert the containment at boot, in
+      # `create_app`'s lifespan, and refuse to start naming both values. See `.env.example` for
+      # where the check is meant to live and why it is not here.
+      #
+      # The NTFS root is absent from the default on purpose: an unreadable root is reported as
+      # degraded, but a root that is a silently empty mount point is not, so a drive that is not
+      # plugged in must not be named here by accident. (The library page shows a per-root album
+      # count for exactly that case, so a root that is mounted and empty is visible rather than
+      # silent.)
+      # Not an interpolation on purpose. It looked right and was not: a default only
+      # applies when the variable is unset, and compose reads `.env` for interpolation --
+      # where an operator's `AMD_LIBRARY_ROOTS=/library/a` would win, the scan would read a
+      # tree the client never writes into, and every track would re-download for ever. That
+      # is the failure the whole two-root design is most careful about, and it shipped once
+      # already. Stated here, matching `AMD_DOWNLOAD_ROOT` above.
+      AMD_LIBRARY_ROOTS: /library/b
+
+      # Optional. Unset means "generate one per process", which is safe -- a missing secret
+      # must not degrade into a constant shipped in the image -- but it means every container
+      # restart logs the browser out. `openssl rand -hex 32` in .env fixes that.
+      AMD_SESSION_SECRET: ${AMD_SESSION_SECRET:-}
+
+      # How many tracks to rip at once. 4 is the default and the number to leave alone
+      # unless a measurement says otherwise: a 41.8 MB ALAC track spends 6.1 s of its 9.8 s
+      # waiting on the wrapper's lyrics/album/codec round-trip before a byte of audio moves,
+      # and the audio itself then crosses at ~41 MB/s in about a second -- so almost all of a
+      # serial queue's wall clock is waiting, and overlapping four rips recovers most of it.
+      #
+      # This is an interpolation *because* it is safe to interpolate: it names a concurrency,
+      # not a path, and the two failure modes `AMD_LIBRARY_ROOTS` above is built to avoid (a
+      # value from `.env` silently disagreeing with one baked into the image) cannot happen to
+      # a number the image does not also hold. `AMD_RIP_CONCURRENCY=1` restores the old
+      # one-track-at-a-time behaviour; 0 or less is refused at startup rather than quietly
+      # claiming work it never started.
+      AMD_RIP_CONCURRENCY: ${AMD_RIP_CONCURRENCY:-4}
+
+      # Everything else is an ENV in the Dockerfile, deliberately, so that the values the
+      # image and the vendor config have to agree on (AMD_WRAPPER_BINARY, AMD_WRAPPER_PORT,
+      # AMD_WRAPPER_HOST, AMD_WRAPPER_BASE_DIR, AMD_DB_PATH) are asserted in exactly one place
+      # by hub/deploy/build_gate.py rather than restated here where a typo would be a
+      # boot-time mismatch instead of a diff.
+      #
+      # AMD_DEDUP_ARTIST_SCOPE is not listed because `loose` is the spec's default and
+      # changing it is a judgement about your library, not a deployment setting. Set it to
+      # `strict` in .env if same-named albums by different artists are causing false skips;
+      # §7.4 is the trade, and `skip_reason` always names the paths that matched so a human
+      # can overrule it either way.
+
+    # SINGLE PROCESS, and it is not configurable from here.
+    #
+    # `--workers 1` is deliberately absent from this file and must not be added to it. It
+    # lives inside `hub.app.main()`, which passes `workers=1` to uvicorn, so a second worker
+    # cannot be requested by editing compose -- which matters, because everything the app
+    # owns lives on `app.state`: the SSE broker, the job store, the leaf registry, the
+    # scheduler and the session generation. Two workers would be two of each -- two
+    # schedulers racing `claim_next` (which is atomic, so no double rip, but two leaf
+    # registries, so a job could be claimed by a worker that never expanded it) and two
+    # session generations, so a logout on one would not revoke a session minted by the
+    # other. Scaling out needs the out-of-process broker and a real session table first, not
+    # a number in a YAML file.
+    #
+    # Do not reach for `deploy.replicas` or a `--scale` to "use the other cores". See above.
+
+    healthcheck:
+      # The one route that answers without a session, which is the only reason it is the
+      # right target: this check runs before anybody has logged in, and /api/status would be
+      # a 401 that looked like a broken container.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      # start_period is not decoration, and the number is not a guess. uvicorn does not bind
+      # its socket until the ASGI lifespan's startup has finished, and the lifespan's first
+      # step is `await supervisor.start()`, which polls the wrapper for up to
+      # startup_timeout = 60 s. The launcher itself took 12-19 s to serve in the spike, so on
+      # a host with no Apple account the port is not open for roughly the full 60 s: the
+      # wrapper comes up, answers /status with regions: [], and the gate correctly refuses to
+      # call that ready. start_period has to cover that, or a correct boot is reported
+      # unhealthy and `restart: unless-stopped` turns a 60 s startup into a crash loop.
+      start_period: 120s
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+    # 330 s, and the arithmetic is app/app.py's: DRAIN_TIMEOUT_SECONDS = 300 for a rip that is
+    # in flight, plus the supervisor's own STOP_TIMEOUT = 15 for the launcher's SIGTERM.
+    # Docker's default grace is 10 s, which would SIGKILL a real download ten seconds in --
+    # and a SIGKILLed job leaves a row in `running` that nothing reaps, because `claim_next`
+    # only ever claims `queued` rows. Grace costs nothing when nothing is running (shutdown
+    # is a second or two) and 300 s of it when a rip is in flight, which is the right way
+    # round. `docker kill` is still there if you disagree.
+    stop_grace_period: 330s
+
+    restart: unless-stopped
+
+volumes:
+  # hub.db. See the mount above.
+  hub-data:
+  # The Apple account/token database, inside the launcher's chroot. Deleting this is how you
+  # make the hub ask for the Apple login again; deleting hub-data is how you lose the queue.
+  wrapper-data:

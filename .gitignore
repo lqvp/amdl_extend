@@ -1,0 +1,47 @@
+# --- Upstream trees are submodules, not ignored ------------------------
+# `AppleMusicDecrypt/` and `wrapper/` were whole-directory ignores until the image learned to
+# build the wrapper itself. They are gitlinks now: see .gitmodules, and the pinned commits
+# in the tree. Their own .gitignore files still apply *inside* them, which is what keeps
+# `wrapper/build/`, `wrapper/android-ndk-r23b/` and `AppleMusicDecrypt/downloads/` out.
+#
+# Nothing needs ignoring here for those two paths any more, and adding an ignore would be
+# actively wrong: it would hide the gitlink and `git submodule status` would report the
+# submodule as not initialised.
+
+# --- Local secrets -------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# --- Python --------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# --- Runtime data --------------------------------------------------------
+*.db
+*.db-wal
+*.db-shm
+/data/
+/tmp/
+
+# --- Build artifacts -----------------------------------------------------
+dist/
+build/
+*.so
+*.log
+
+# --- Editors / OS --------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+
+# --- superpowers SDD scratch (ledger, briefs, review packages) ---
+.superpowers/
+.kilo/
