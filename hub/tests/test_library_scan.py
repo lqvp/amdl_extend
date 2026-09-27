@@ -363,12 +363,12 @@ def test_a_walked_path_outside_the_root_raises_instead_of_finding_nothing():
     # configured with a redundant component, or a root normalized in one place and walked
     # in another, produces exactly this. _relpath refuses instead of returning "".
     with pytest.raises(ValueError, match="must both be used unresolved"):
-        _relpath("/somewhere/else/Album", "/library/b", "/library/b/")
+        _relpath("/somewhere/else/Album", "/library", "/library/")
 
 
 def test_a_symlinked_directory_inside_a_root_is_not_followed(tmp_path, make_library):
-    # A symlinked *root* is followed (Review Focus #1 -- that is the user's own
-    # a named symlink). A symlinked directory *inside* a root is not: os.walk is called
+    # A symlinked *root* is followed (Review Focus #1 -- operators point the root at a
+    # symlink of their own). A symlinked directory *inside* a root is not: os.walk is called
     # without followlinks, so `Linked` is listed but never visited. That keeps a
     # per-request scan bounded -- a link back up to an ancestor would otherwise recurse
     # forever on every download request -- and it keeps every reported path inside the

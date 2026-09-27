@@ -133,8 +133,10 @@ def main() -> int:
     for root in settings.library_roots:
         if not root.is_absolute():
             fail(f"library root {root} is not absolute")
-    if not settings.library_roots:
-        fail("AMD_LIBRARY_ROOTS resolved to nothing; the scan would be silently empty")
+    # There is no "AMD_LIBRARY_ROOTS resolved to nothing" check here any more, and its
+    # absence is not an oversight: `load_settings` now refuses to build a Settings with an
+    # empty `library_roots`, so this gate can never observe one. An empty scan is stopped at
+    # startup by the caller, named in the message it raises, rather than here.
 
     # The client's wrapper endpoint and the supervisor's must be the same loopback address,
     # or the client talks to a port nothing is on. `[instance].url` is "host:port" with no

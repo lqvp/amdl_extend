@@ -606,6 +606,36 @@ def test_the_containment_check_is_owed_and_its_todo_names_where_it_belongs():
         )
 
 
+def test_the_operator_is_told_a_separate_drive_is_not_required():
+    """The portability claim, pinned, because it is the one this change makes.
+
+    The deployment no longer needs a second volume: `AMD_LIBRARY_HOST` names any directory
+    and the only thing compose does with it is bind it. `.env.example` is what a new
+    operator reads before anything else, and a sentence telling them a separate drive is
+    required is the exact wrong thing to leave behind in it -- a machine with no external
+    drive would conclude the stack cannot be run there at all.
+
+    Asserted as a positive claim rather than a banned phrase, because the wrong wording is
+    unbounded: a reworded "you will need an external disk" would slip past a test that only
+    banned the one sentence that was there.
+    """
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    for claimed in (
+        "it does not have to be a separate drive",
+        "it does not have to be NTFS",
+    ):
+        assert claimed in text, (
+            f".env.example should tell the operator {claimed!r} explicitly. The deployment "
+            f"binds whatever directory AMD_LIBRARY_HOST names, so a machine with no external "
+            f"volume can run it, and this is the file that has to say so."
+        )
+    for wrong in ("must be a separate drive", "must be NTFS", "external drive is required"):
+        assert wrong not in text, (
+            f".env.example still says {wrong!r}, which is false: the library is any "
+            f"directory the operator names"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Environment names
 # --------------------------------------------------------------------------- #
@@ -1063,18 +1093,18 @@ def _merged_service(*paths: Path, name: str = "amd-hub") -> dict:
     return service
 
 
-def test_the_drive_is_required_and_the_whole_stack_survives_its_loss():
-    """The library *is* the drive now, so "optional" is no longer an option.
+def test_the_library_is_one_required_root_and_not_two_optional_ones():
+    """The library is one root, and which host directory backs it is the operator's.
 
-    The overlay existed so the stack could start whether or not the 341 GB drive was plugged
-    in, with the NVMe tree as the always-present root. That arrangement is gone: the drive is
-    both the download target and the only scan root, so there is nothing left to fall back to
-    and pretending otherwise would be a lie the operator has to remember to check.
+    An overlay once made the external volume optional, with a second always-present root as
+    the fallback. That arrangement is gone: the library is both the download target and the
+    only scan root, so there is nothing to fall back to and a second root would be a tree the
+    client never writes into -- a directory nothing ever scans.
 
-    What replaces the "drive absent" case is not a degraded mode but a failed start --
-    `create_host_path: false` on the bind, which is asserted in
-    `test_the_external_drive_is_mounted_by_the_base_compose_and_cannot_be_invented`. The
-    overlay is kept as an empty compatibility shim so an old two-file command still runs.
+    What replaces the "volume absent" case is not a degraded mode but a failed start, from
+    `create_host_path: false` on the bind. That is asserted in
+    `test_the_library_directory_is_required_and_nothing_defaults_to_this_host`, along with
+    the absence of any host default, so this test stays about the root count and the overlay.
     """
     service = _service(_compose(COMPOSE))
     targets = {m["target"] for m in _mounts(service)}
@@ -1129,8 +1159,43 @@ def test_the_library_directory_is_required_and_nothing_defaults_to_this_host():
         f"AMD_LIBRARY_HOST must be required (:?) rather than defaulted, or this file names one "
         f"machine's filesystem. got {binds[0]['source']!r}"
     )
-    # The mount point stays container-side, and it is what the scan is told.
-    assert _service(_compose(COMPOSE))["environment"]["AMD_LIBRARY_ROOTS"] == "/library"
+    # The variable name is pinned, not just the `:?` syntax: `:?` alone would pass on any
+    # other variable's required interpolation, which is a different requirement entirely.
+    assert binds[0]["source"].startswith("${AMD_LIBRARY_HOST:?"), binds[0]["source"]
+
+
+def test_the_container_side_library_path_is_the_same_value_everywhere_it_appears():
+    """Tie the four places together, because one place is not all there is.
+
+    `AMD_DOWNLOAD_ROOT` derives the image's two values -- the runtime `AMD_LIBRARY_ROOTS` and
+    the baked `dirPathFormat`. But compose cannot interpolate a build arg, so compose's own
+    three -- its `AMD_DOWNLOAD_ROOT`, the bind's `target:`, and its `AMD_LIBRARY_ROOTS` --
+    are literals. Nothing enforced that they agree: a coordinated edit that renamed the mount
+    in all three and left the ARG alone would pass every other test here, and the result is
+    a client writing to a path the hub never scans, which is the one failure this deployment
+    is most careful about and the one with no diagnostic.
+    """
+    service = _service(_compose(COMPOSE))
+    bind = next(m for m in _mounts(service) if m["target"] == "/library")
+    named = re.search(
+        r"AMD_DOWNLOAD_ROOT:\s*(\S+)", COMPOSE.read_text(encoding="utf-8")
+    )
+    assert named, "compose must name the container-side library path once, as a build arg"
+    root = Path(named.group(1))
+
+    assert bind["target"] == root.as_posix(), (
+        f"the bind mounts {bind['target']} but AMD_DOWNLOAD_ROOT is {root}; the two are the "
+        f"same directory and a mismatch means the client writes where the scan does not read"
+    )
+    assert service["environment"]["AMD_LIBRARY_ROOTS"] == root.as_posix(), (
+        f"the hub scans {service['environment']['AMD_LIBRARY_ROOTS']} but the client writes "
+        f"to {root}"
+    )
+    # And the image must be told the same value, by derivation rather than by a second copy.
+    assert "ARG AMD_DOWNLOAD_ROOT=" + root.as_posix() in _dockerfile(), (
+        f"the Dockerfile's ARG default is not {root}, so a `docker build` without "
+        f"--build-arg bakes a different write root than compose scans"
+    )
 
 
 def test_the_persistent_trees_are_outside_the_image_layer():
@@ -1568,7 +1633,7 @@ def test_the_write_root_and_the_scan_roots_come_from_one_build_argument():
     assert '{AMD_DOWNLOAD_ROOT}/playlists/{playlistName}' in dockerfile
 
 
-def test_the_library_is_the_external_drive_and_nothing_else():
+def test_the_library_is_one_root_and_nothing_else():
     """One root. `/library/a` is no longer mounted, so it cannot be scanned by accident."""
     targets = {m["target"] for m in _mounts(_service(_compose(COMPOSE)))}
     assert "/library/a" not in targets, (

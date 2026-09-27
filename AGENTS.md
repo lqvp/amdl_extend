@@ -1,4 +1,4 @@
-# AGENTS.md — apple-dl_extend
+# AGENTS.md — amdl_extend
 
 Workspace notes for agents. General engineering rules (Japanese-language guidelines, git safety,
 "don't delete/move files without asking") come from the global `~/.config/opencode/AGENTS.md` and
@@ -6,7 +6,7 @@ still apply. This file only records repo-specific facts that are hard to infer f
 
 ## Layout: one repo, two pinned submodules
 
-`/home/m/apple-dl_extend` is the git repo. `hub/` is the only code it owns; the two upstream
+`/home/m/amdl_extend` is the git repo. `hub/` is the only code it owns; the two upstream
 trees are **submodules**, pinned to a commit rather than floating on a branch:
 
 | Path | Gitlink | Upstream remote | Branch | Stack |
@@ -248,7 +248,7 @@ cp .env.example .env && $EDITOR .env        # AMD_PASSWORD is required
 docker compose up -d --build
 docker compose logs -f amd-hub
 
-cd hub && uv run pytest -v                   # 631 tests; 32 are hub/tests/test_deployment.py
+cd hub && uv run pytest -v                   # 648 tests; 33 are hub/tests/test_deployment.py
 ```
 
 The Go GUI has its own, unchanged: `cd wrapper/gui && go test ./...` (`main_test.go`), and note
@@ -326,9 +326,10 @@ keep it a pass-through, and do not widen it.
   for the upstream desktop deployment, so the **image** overrides it.
 - **`<vendor>/config.toml` is the only path the client opens.** The image builds it there from
   upstream's `config.example.toml` (three `sed`s, each asserted) rather than forking a copy.
-  `dirPathFormat` is rewritten **absolute** and to `/library/a`, because the seam `chdir`s into
-  the vendor root: left relative, the client writes to `AppleMusicDecrypt/downloads/` while the
-  scan reads the bind mount, and every track re-downloads forever with nothing red.
+  `dirPathFormat` is rewritten **absolute** and to `AMD_DOWNLOAD_ROOT`, because the seam
+  `chdir`s into the vendor root: left relative, the client writes to
+  `AppleMusicDecrypt/downloads/` while the scan reads the bind mount, and every track
+  re-downloads forever with nothing red.
 - **Both `security_opt` values are mandatory** and `cap_add` must stay absent —
   `seccomp:unconfined` alone gives `mount proc failed: EPERM`, and `cap_add: [SYS_ADMIN]` was a
   *control experiment* proving it cannot help (spike §5.5). `systempaths=unconfined` is a real
@@ -406,24 +407,30 @@ keep it a pass-through, and do not widen it.
 
 ### Library roots
 
-**There is one, and it is the external drive.** `/library/b` is the NTFS volume bind-mounted
-at `/home/m/Music/HDD_Music`, and it is simultaneously the scan root and the download target —
-`AMD_DOWNLOAD_ROOT` in the Dockerfile feeds both the baked `dirPathFormat` and
-`ENV AMD_LIBRARY_ROOTS`, so they cannot be set apart. The client's own `downloads/` tree is no
-longer mounted at all.
+**There is one, and which host directory backs it is the operator's.**
+`AMD_LIBRARY_HOST` in `.env` names it — any directory, required, with no default, because a
+wrong guess is an empty library that reads as healthy. On the machine this was written on it
+happens to be an external NTFS volume mounted at `/home/m/Music/HDD_Music`; that is a choice,
+not a requirement, and a machine with only an internal disk runs the same compose file
+unchanged. The container path is `/library`, and it is simultaneously the scan root and the
+download target — `AMD_DOWNLOAD_ROOT` in the Dockerfile feeds both the baked `dirPathFormat`
+and `ENV AMD_LIBRARY_ROOTS`, so they cannot be set apart. Compose's own three spellings of
+that path cannot derive from a build arg, so
+`test_the_container_side_library_path_is_the_same_value_everywhere_it_appears` is what ties
+them together. The client's own `downloads/` tree is no longer mounted at all.
 
 `create_host_path: false` on that bind is load-bearing. Compose's short syntax creates a
-missing host path, and Docker resolves the symlink first, so with the drive unplugged the stack
-would start against a directory Docker had just mkdir'd inside `/run/media/`, mount it as an
-empty library, and re-download all 3,670 albums with no error anywhere. An empty root reads as
+missing host path, and Docker resolves a symlink source first, so with the directory absent the
+stack would start against a directory Docker had just mkdir'd, mount it as an
+empty library, and re-download every album with no error anywhere. An empty root reads as
 healthy: `degraded_roots` covers a root that cannot be *read*, not one that was never populated.
 
 `library_scan` computes relpaths against
 the root **exactly as the caller passed it** and never resolves it — a relpath is stored, quoted
 into `skip_reason`, and joined back onto the same root string, so resolving it would be a bug.
-The compose file therefore mounts the operator's **symlink** (`/home/m/Music/HDD_Music`), not the
-`/run/media/<UUID>/` target it points at: the UUID path is udev's automount point and rots when
-the volume is reformatted or unplugged.
+The compose file therefore asks the operator for a **path they manage**, rather than naming the
+`/run/media/<UUID>/` automount target a volume would mount at: the UUID path is udev's and rots
+when the volume is reformatted or unplugged.
 
 A root that is *unreadable* is reported in `degraded_roots`. A root that is a **silently empty
 mount point** is not — `library_scan` has no way to tell an empty library from an absent drive —

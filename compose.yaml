@@ -85,7 +85,7 @@ services:
       - systempaths=unconfined
 
     volumes:
-      # --- The library: the external NTFS drive, and REQUIRED --------------------
+      # --- The library, and REQUIRED ----------------------------------------------
       #
       # This is both the scan root and the download target. It is one directory on purpose:
       # if the client wrote somewhere the scan does not read, every track would download
@@ -93,19 +93,22 @@ services:
       # path a second time, inside the image, because `dirPathFormat` is baked into
       # `<vendor>/config.toml` at build time and cannot be read from the environment.
       #
-      # `create_host_path: false` is load-bearing. Compose's short bind syntax creates the
-      # host path when it is missing, and Docker resolves the symlink first -- so with the
-      # drive unplugged the stack would start happily against a directory Docker had just
-      # mkdir'd inside /run/media/, mount it as an empty library, and re-download all 3,670
-      # albums with no error anywhere. An empty root reads as healthy: `degraded_roots`
-      # covers a root that cannot be *read*, not one that was never populated. This makes
-      # the absent drive a failed start, which is the honest answer now that the library
-      # lives there.
+      # Which host directory that is, is the operator's: AMD_LIBRARY_HOST in `.env`, and it
+      # can be any directory at all. A separate external volume is one convenient choice, not
+      # a requirement, and a machine with only an internal disk runs this unchanged.
       #
-      # The host path is the SYMLINK, not the /run/media/<UUID>/ target it points at. The
-      # UUID path is udev's automount point: it disappears on unmount and changes if the
-      # volume is reformatted, so a compose file naming it is a file that silently rots. The
-      # symlink is the stable, user-managed name, and Docker resolves it on the host before
+      # `create_host_path: false` is load-bearing. Compose's short bind syntax creates the
+      # host path when it is missing -- so with the path absent the stack would otherwise
+      # start happily against a directory Docker had just mkdir'd, mount it as an empty
+      # library, and re-download every album with no error anywhere. An empty root reads as
+      # healthy: `degraded_roots` covers a root that cannot be *read*, not one that was never
+      # populated. This makes an absent directory a failed start instead, which is the
+      # honest answer now that the library lives there.
+      #
+      # Point AMD_LIBRARY_HOST at a path you manage, and prefer a symlink you own over the
+      # /run/media/<UUID>/ automount target it may point at. The UUID path is udev's: it
+      # disappears on unmount and changes if the volume is reformatted, so a compose file
+      # naming it is a file that silently rots. Docker resolves a symlink on the host before
       # the mount exists inside the container, so the two are equivalent while it is up.
       - type: bind
         source: ${AMD_LIBRARY_HOST:?set AMD_LIBRARY_HOST in .env to the host directory that holds your music library}

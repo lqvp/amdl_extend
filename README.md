@@ -16,10 +16,18 @@ git clone --recurse-submodules <this repo> amdl_extend
 cd amdl_extend
 
 cp .env.example .env
-$EDITOR .env                      # AMD_PASSWORD is the only required value
+$EDITOR .env                      # two required values, see below
 docker compose up -d --build
 docker compose logs -f amd-hub
 ```
+
+`.env` needs **two** values, and `docker compose up` stops with a message naming whichever one
+is missing:
+
+| Variable | What it is |
+|---|---|
+| `AMD_PASSWORD` | The web UI's single shared password. Any string. |
+| `AMD_LIBRARY_HOST` | The absolute path of a directory holding your music. Any directory — it does not have to be a separate drive, and it does not have to be NTFS. |
 
 `--recurse-submodules` is not optional. `AppleMusicDecrypt/` and `wrapper/` are submodules
 pinned to a commit, and the image is built from both — the Dockerfile has a stage that compiles
@@ -33,13 +41,11 @@ part. Later builds reuse the layer and do not.
 Then open <http://localhost:8080/>. The first boot takes about a minute and a half before the
 port answers — see [Why the first boot is slow](#why-the-first-boot-is-slow).
 
-Before the first start, put the absolute path of the directory holding your music in
-`AMD_LIBRARY_HOST` in `.env` — any directory, and it does not need to be a separate drive.
-Then:
+To check the library directory before starting, read the value back out of `.env` rather than
+expecting your shell to have it — compose consumes that file, the shell does not:
 
 ```bash
-ls -d "$AMD_LIBRARY_HOST" >/dev/null && echo "library found"   # check first; see below
-docker compose up -d --build
+. ./.env && ls -d "$AMD_LIBRARY_HOST" && echo "library found"
 ```
 
 Stop it with `docker compose down`. Add `-v` to forget the Apple login and the queue.
@@ -150,7 +156,7 @@ crash loop.
 ## Development
 
 ```bash
-cd hub && uv run pytest -v          # 583 tests
+cd hub && uv run pytest -v          # 648 tests
 ```
 
 `hub/` is the only code here we own. `AppleMusicDecrypt/` and `wrapper/` are separate upstream

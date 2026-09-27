@@ -296,9 +296,13 @@ ENV AMD_WRAPPER_HOST=127.0.0.1
 ENV AMD_WRAPPER_PORT=12340
 ENV AMD_BIND=0.0.0.0
 ENV AMD_PORT=8080
-# With no AMD_LIBRARY_ROOTS the image would fall back to config.py's DEFAULT_LIBRARY_ROOTS,
-# which are host paths that do not exist in the container and would be reported as degraded
-# roots forever. compose always sets it; this is the single-root fallback for `docker run`.
+# There is no default for this one, anywhere. `load_settings` raises if it is unset, so this
+# ENV is not a fallback over a bad default -- it is the only thing that lets a bare
+# `docker run` of this image start at all. It names the container-side path, which the
+# `dirPathFormat` seds above also derive from, so the client's write target and the hub's
+# scan target cannot come apart. A `docker run` with no bind mounted at that path starts,
+# reports the root as degraded, and scans nothing -- so the bind is not optional in
+# practice, only in syntax.
 ENV AMD_LIBRARY_ROOTS=${AMD_DOWNLOAD_ROOT}
 
 EXPOSE 8080

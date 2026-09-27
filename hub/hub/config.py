@@ -109,15 +109,19 @@ def _required_paths(env: Mapping[str, str], key: str, example: str) -> list[Path
 
     A default for one of these is a host-specific path baked into the source, and it is
     wrong on every machine but the one it was written on. The message carries `example`
-    so the operator can see the format rather than infer it -- and `example` is a
-    *container* path, because that is what this list holds, not the host path the
-    operator thinks in terms of.
+    so the operator can see the format rather than infer it.
+
+    `example` is a *container-side* path, and the noun has to say so: an earlier wording
+    said "host directory" while showing `/library`, and an operator who obeys the noun sets
+    the host path here -- which resolves to nothing inside the container and scans an empty
+    tree. The host side of the same mount is `AMD_LIBRARY_HOST`, set in `.env`.
     """
     roots = _paths(env, key, ())
     if not roots:
         raise RuntimeError(
-            f"{key} is unset. Name every host directory that holds your music library, "
-            f"comma-separated, e.g. {key}={example}"
+            f"{key} is unset. Name every container-side directory that holds your music "
+            f"library, comma-separated, e.g. {key}={example}. If you meant a directory on "
+            f"this host, that is a different variable (see the deployment's .env)."
         )
     return roots
 

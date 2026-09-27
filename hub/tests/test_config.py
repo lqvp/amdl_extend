@@ -16,8 +16,8 @@ def test_requires_password_when_the_variable_is_absent():
 
 
 def test_parses_multiple_library_roots():
-    s = load_settings({"AMD_PASSWORD": "x", "AMD_LIBRARY_ROOTS": "/library/a,/library/b"})
-    assert [p.as_posix() for p in s.library_roots] == ["/library/a", "/library/b"]
+    s = load_settings({"AMD_PASSWORD": "x", "AMD_LIBRARY_ROOTS": "/library,/library/extra"})
+    assert [p.as_posix() for p in s.library_roots] == ["/library", "/library/extra"]
 
 
 def test_defaults_match_the_spec():
