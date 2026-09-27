@@ -74,7 +74,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 # The project root is `hub/`, so the importable package is the nested `hub/hub/`.
-# Siblings such as `hub/spike/` are deliberately not packaged.
 packages = ["hub"]
 
 [tool.pytest.ini_options]
@@ -102,10 +101,6 @@ select = ["E4", "E7", "E9", "F", "I", "B", "UP"]
 ignore = ["E501", "B008"]
 
 [tool.ruff.lint.per-file-ignores]
-# `spike/` holds the throwaway harnesses that produced the evidence in
-# docs/superpowers/findings/. They are deliberately rough -- several edit real
-# files -- and they are not shipped, so they are not held to the rule set.
-"spike/*" = ["ALL"]
 # The seam's `from src.* import ...` lines are function-local by design: the
 # vendor tree must stay off sys.path until the seam has inserted it, and the
 # boundary test is what enforces that. A top-level import would defeat it.

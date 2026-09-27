@@ -1407,7 +1407,6 @@ def test_the_context_excludes_what_must_never_ship():
         "AppleMusicDecrypt/config.toml",
         "hub/.venv",
         "hub/tests",
-        "hub/spike",
         "wrapper/rootfs/data",
         "wrapper/build",
         "wrapper/android-ndk-r23b",

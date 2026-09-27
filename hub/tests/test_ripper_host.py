@@ -116,20 +116,10 @@ _LOADER_MODULES = frozenset({
 _CODE_EXEC_BUILTINS = frozenset({"__import__", "exec", "eval", "compile"})
 
 # `sys` is deliberately *not* in `_LOADER_MODULES`. A bare `import sys` is not a
-# boundary violation -- `sys.stderr.write` and `sys.exit(1)` are ordinary code,
-# and three files under `hub/spike/` do exactly that. Round 0 flagged every one of
-# them, round 1 dropped the rule to make them pass, and the drop took the real
-# vector with it. What actually reaches upstream is mutating the search path, so
-# that is what is checked.
+# boundary violation -- `sys.stderr.write` and `sys.exit(1)` are ordinary code.
+# What actually reaches upstream is mutating the search path, so that is what is
+# checked.
 _PATH_ATTRS = frozenset({"sys.path"})
-
-# The one exemption, and it is exactly one vector. `spike/` is not packaged
-# (`pyproject.toml` ships `packages = ["hub"]`) and its two script files insert
-# the *hub* root so their `from hub...` imports resolve -- they do not point at the
-# vendor tree. The upstream-root and loader rules still apply there in full; only
-# `sys.path` is let through, and `test_the_spike_exemption_is_only_sys_path` holds
-# that line.
-_SPIKE_ROOT = REPO_ROOT / "hub" / "spike"
 
 # The two files allowed to import the upstream tree, and **what each is allowed to skip**.
 # A path -> set of rule categories is more honest than a path -> yes/no, because the two
@@ -168,22 +158,19 @@ def _dotted(node: ast.AST) -> str | None:
     parts.append(node.id)
     return ".".join(reversed(parts))
 
-# Directories walked for boundary violations. `hub/spike/` is included: it is
-# hub-owned Python, it is importable, and an unenforced directory is a boundary
-# that exists only until someone uses it. `__pycache__` and any `.egg-info` are
-# skipped -- compiled output is not a source module, and a `.pyc`-only module is
-# an artefact of a build rather than something to review.
+# Directories walked for boundary violations. `__pycache__` and any `.egg-info`
+# are skipped -- compiled output is not a source module, and a `.pyc`-only module
+# is an artefact of a build rather than something to review.
 #
-# `hub/deploy/` joined in task 10 for the reason above, not as a favour: it holds
-# `build_gate.py`, which runs *inside* the image and imports `hub.app` and
-# `hub.ripper_host`, and `acceptance_check.py`, which imports `hub.dedup` and
-# `hub.library_scan`. Both are hub-owned and importable, so both are exactly what
-# this boundary is for -- a deployment script that reached `import src.*` directly
-# would be a second, unreviewed way into the vendor tree, and the one file that
-# runs before the app does is the worst place for it to be invisible.
+# `hub/deploy/` is included: it holds `build_gate.py`, which runs *inside* the
+# image and imports `hub.app` and `hub.ripper_host`, and `acceptance_check.py`,
+# which imports `hub.dedup` and `hub.library_scan`. Both are hub-owned and
+# importable, so both are exactly what this boundary is for -- a deployment script
+# that reached `import src.*` directly would be a second, unreviewed way into the
+# vendor tree, and the one file that runs before the app does is the worst place
+# for it to be invisible.
 _ENFORCED_ROOTS = (
     HUB_PACKAGE,
-    REPO_ROOT / "hub" / "spike",
     REPO_ROOT / "hub" / "deploy",
 )
 _SKIP_DIRS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache", ".venv"})
@@ -284,7 +271,6 @@ def _file_offenders(path: Path) -> list[tuple[str, str]]:
         if (
             isinstance(node, ast.Attribute)
             and _dotted(node) in _PATH_ATTRS
-            and _SPIKE_ROOT not in path.parents
         ):
             offenders.append(("sys-path", f"{path}:{node.lineno}: {_dotted(node)}"))
     return offenders
@@ -353,7 +339,7 @@ def test_the_boundary_walk_visits_every_hub_module():
     assert len(files) == len(on_disk), (
         f"the boundary walk saw {len(files)} files, rglob sees {len(on_disk)}"
     )
-    assert len(files) >= 9, f"expected the hub package and spike to hold >= 9 modules, saw {files}"
+    assert len(files) >= 9, f"expected the hub package to hold >= 9 modules, saw {files}"
 
 
 def test_only_ripper_host_imports_applemusicdecrypt():
@@ -389,12 +375,8 @@ _BOUNDARY_BYPASSES = [
 ]
 
 
-# The other half of scoping the rule rather than deleting it. `hub/spike/` has three
-# files that use `sys.stderr` / `sys.exit`, and round 0's blanket `import sys` ban
-# flagged all of them. Round 1's answer was to drop the rule, which took
-# `importlib.import_module("src.rip")` with it. The rule is back and narrowed to
-# loaders and `sys.path`; these cases are what it must *not* catch, so a future
-# broadening fails here rather than in a spike file.
+# The other half of scoping the rule rather than deleting it. These cases are what
+# the boundary must *not* catch, so a future broadening fails here.
 _BENIGN_USES = [
     pytest.param('import sys\nsys.stderr.write("x")', id="sys-stderr"),
     pytest.param("import sys\nsys.exit(1)", id="sys-exit"),
@@ -431,13 +413,8 @@ def test_the_boundary_test_catches_every_bypass_form(source, tmp_path):
 def test_ordinary_stdlib_use_is_not_flagged(source):
     """The rule is scoped, not deleted -- and this is what keeps it scoped.
 
-    Round 0 flagged every `import sys`, which is why round 1 removed the
-    import-statement half of the rule when `hub/spike/` came under enforcement:
-    three spike files use `sys.stderr` and `sys.exit`, and none of that reaches
-    upstream. Round 1's answer was to drop the rule, which took
-    `importlib.import_module("src.rip")` with it. The rule is back and narrowed to
-    loaders and `sys.path`; these cases are what it must *not* catch, so a future
-    broadening fails here rather than in a spike file.
+    These cases are what the boundary must *not* catch, so a future broadening
+    fails here.
     """
     probe = HUB_PACKAGE / "_benign_probe.py"
     probe.write_text(source + "\n", encoding="utf-8")
@@ -466,32 +443,6 @@ def test_the_boundary_walk_visits_a_symlinked_subdirectory(tmp_path):
         # Only the symlink: `tmp_path` is pytest's to clean, and the linked directory
         # still holds `mod.py`, which is the whole reason it was created.
         (tmp_path / "real").unlink()
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        pytest.param("from src.rip import Ripper", id="upstream-import-in-spike"),
-        pytest.param("import importlib", id="dunder-import-in-spike"),
-        pytest.param("import importlib\nimportlib.import_module('src.rip')",
-                     id="dotted-loader-in-spike"),
-    ],
-)
-def test_the_spike_exemption_is_only_sys_path(source):
-    """`spike/` is exempt from the `sys.path` rule and nothing else.
-
-    It is not packaged and its two script files put the *hub* root on the path so their
-    `from hub...` imports resolve. That is not a licence to import upstream, and this is
-    the test that says so.
-    """
-    probe = _SPIKE_ROOT / "_probe.py"
-    probe.write_text(source + "\n", encoding="utf-8")
-    try:
-        offenders = _hub_offenders()
-        assert offenders, f"spike/ was exempt from more than sys.path: {source}"
-        assert all("_probe" in o for o in offenders), offenders
-    finally:
-        probe.unlink()
 
 
 def test_a_missing_root_is_a_failure_not_an_empty_pass(tmp_path):
@@ -606,25 +557,6 @@ def test_the_exemption_is_narrower_than_the_rule_it_escapes():
     assert [
         m for category, m in _file_offenders(vendor_path) if category == "sys-path"
     ] == [], "vendor.py must reach the vendor root through ripper_host, not sys.path"
-
-
-def test_a_file_outside_the_package_is_not_exempt_because_of_its_name():
-    """N3: the exemption is a path, and `hub/spike/vendor.py` is not it.
-
-    Round 0's finding was that a basename key can be satisfied from the wrong directory;
-    round 2 confirmed the shape was still open with two names in play, because
-    `test_the_exemptions_are_two_named_files_...` built its path as `HUB_PACKAGE / name`
-    and so could not see a same-named file elsewhere.
-    """
-    impostor = _SPIKE_ROOT / "vendor.py"
-    impostor.write_text("from src.rip import Ripper\n", encoding="utf-8")
-    try:
-        assert impostor.resolve() not in _EXEMPT_UPSTREAM_IMPORTERS
-        offenders = _hub_offenders()
-        assert offenders, "a same-named file outside the package was exempt"
-        assert all("spike" in o for o in offenders), offenders
-    finally:
-        impostor.unlink()
 
 
 def test_registers_every_creart_creator_in_dependency_order():

@@ -5,10 +5,6 @@ client and the `wrapper-lite` backend, packaged as one container. It watches you
 deduplicates against it, and drives the downloader so an album is requested from a browser
 instead of a terminal.
 
-Phase 1: login, library browsing, the download queue with live progress, and duplicate-aware
-skipping. See `docs/superpowers/specs/2026-09-26-amd-hub-design.md` for the design and §13 for
-what is deliberately out of scope.
-
 ## Run it
 
 ```bash
@@ -75,7 +71,7 @@ The wrapper takes credentials in exactly one way: `--login user:pass` on its com
 is no stdin path, no socket, no file. So for as long as the login process lives, its arguments
 are readable via `/proc/<pid>/cmdline` by any process running as the same user.
 
-This is a deliberate, recorded trade rather than an oversight (spec §11), and what bounds it is
+This is a deliberate, recorded trade rather than an oversight, and what bounds it is
 the shape of the deployment: the container runs a single service process as one user, so the only
 readers of that command line are the hub itself and the login process, and the login process
 lives for seconds. It is not protection on a multi-tenant host.
@@ -96,8 +92,7 @@ together with the now-writable `/proc/sysrq-trigger` gives `reboot` and `crash`.
 container cannot start the wrapper at all: Docker over-mounts twelve paths under `/proc`, the
 launcher mounts its own `procfs` in its user namespace, and the kernel refuses with
 `mount proc failed: Operation not permitted`. Adding `SYS_ADMIN` does not help — that was a
-control experiment, and it failed the same way. See spec §14.1 and the spike findings for the
-measurements.
+control experiment, and it failed the same way.
 
 ## The library root
 
