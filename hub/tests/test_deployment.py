@@ -613,13 +613,17 @@ def _names_load_settings_reads() -> set[str]:
     """The `AMD_*` names `load_settings` actually reads, from the source.
 
     Parsed out of `config.py` rather than listed, so a new setting cannot be added without
-    this noticing and cannot be misspelled without this noticing. The four helper calls are
-    the only ways a value is read; anything else in the function is a constant.
+    this noticing and cannot be misspelled without this noticing. The helper calls are the
+    only ways a value is read; anything else in the function is a constant.
     """
     source = (REPO_ROOT / "hub" / "hub" / "config.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     names: set[str] = set()
-    helpers = {"_text", "_port", "_paths", "_scope"}
+    # `_required_paths` is here because AMD_LIBRARY_ROOTS is read through it and has no
+    # default, which is the whole point of the helper. Leaving it out would make the
+    # deployment look like it sets a variable `load_settings` never reads -- which is
+    # exactly the misspelling this reader exists to catch, aimed the other way.
+    helpers = {"_text", "_port", "_paths", "_required_paths", "_scope"}
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue

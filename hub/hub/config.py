@@ -16,13 +16,6 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-# §7.2's two libraries, which exist on the host this was developed against and follow two
-# different naming conventions. compose.yaml overrides this with its own mount points
-# (`/library/a`, `/library/b`), so this default only decides local development behaviour.
-DEFAULT_LIBRARY_ROOTS: tuple[Path, ...] = (
-    Path("/home/m/apple-dl_extend/AppleMusicDecrypt/downloads"),
-    Path("/run/media/m/1A5E05A75E057D2F/Music"),
-)
 DEFAULT_BIND = "0.0.0.0"  # §11: reachable from the LAN.
 DEFAULT_PORT = 8080
 # §11: the wrapper is loopback-only and its port must never be published.
@@ -111,6 +104,24 @@ def _paths(env: Mapping[str, str], key: str, default: tuple[Path, ...]) -> list[
     return roots
 
 
+def _required_paths(env: Mapping[str, str], key: str, example: str) -> list[Path]:
+    """The same parsing as `_paths`, with no fallback.
+
+    A default for one of these is a host-specific path baked into the source, and it is
+    wrong on every machine but the one it was written on. The message carries `example`
+    so the operator can see the format rather than infer it -- and `example` is a
+    *container* path, because that is what this list holds, not the host path the
+    operator thinks in terms of.
+    """
+    roots = _paths(env, key, ())
+    if not roots:
+        raise RuntimeError(
+            f"{key} is unset. Name every host directory that holds your music library, "
+            f"comma-separated, e.g. {key}={example}"
+        )
+    return roots
+
+
 def _scope(env: Mapping[str, str]) -> ArtistScope:
     value = _text(env, "AMD_DEDUP_ARTIST_SCOPE", "loose")
     # Not a plain default lookup: an unrecognised value is a typo, and silently degrading
@@ -180,11 +191,16 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
             "default; set it in the environment (compose reads it from .env)."
         )
 
+    # Both of these are required, and the order matters: a caller who has set neither
+    # should be told about the password, which is the one it is more likely to have
+    # meant. `test_the_password_is_still_checked_before_the_library_roots` pins this.
+    library_roots = _required_paths(source, "AMD_LIBRARY_ROOTS", "/library")
+
     return Settings(
         password=password,
         bind=_text(source, "AMD_BIND", DEFAULT_BIND),
         port=_port(source, "AMD_PORT", DEFAULT_PORT),
-        library_roots=_paths(source, "AMD_LIBRARY_ROOTS", DEFAULT_LIBRARY_ROOTS),
+        library_roots=library_roots,
         rip_concurrency=_concurrency(source),
         wrapper_binary=Path(
             _text(source, "AMD_WRAPPER_BINARY", str(DEFAULT_WRAPPER_BINARY))
