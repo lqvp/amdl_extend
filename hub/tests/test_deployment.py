@@ -547,7 +547,7 @@ def test_the_clients_write_root_is_contained_in_the_scanned_roots():
     # this test used to do, and it is the reason the two could drift.
     image_roots = re.search(r"AMD_DOWNLOAD_ROOT=(\S+)", dockerfile).group(1)
     write_root = image_roots
-    assert write_root == "/library/b", write_root
+    assert write_root == "/library", write_root
     # And the sed has to actually use the argument, not a path that merely looks right.
     for key in ("dirPathFormat", "playlistDirPathFormat"):
         sed_line = next(
@@ -601,7 +601,7 @@ def test_the_containment_check_is_owed_and_its_todo_names_where_it_belongs():
         assert "KEEP /library/a FIRST" not in body, (
             f"{path.name} still states the ordering rule, which is false"
         )
-        assert "so /library/b comes first" not in body, (
+        assert "so /library comes first" not in body, (
             f"{path.name} still states the reordering trigger, which is false"
         )
 
@@ -1073,10 +1073,10 @@ def test_the_drive_is_required_and_the_whole_stack_survives_its_loss():
     """
     service = _service(_compose(COMPOSE))
     targets = {m["target"] for m in _mounts(service)}
-    assert "/library/b" in targets
-    assert service["environment"]["AMD_LIBRARY_ROOTS"] == "/library/b"
+    assert "/library" in targets
+    assert service["environment"]["AMD_LIBRARY_ROOTS"] == "/library"
     # Nothing else is a library, so there is no second root to degrade to.
-    assert not any(t.startswith("/library/") and t != "/library/b" for t in targets), targets
+    assert not any(t.startswith("/library/") and t != "/library" for t in targets), targets
 
     # And the overlay, if someone still passes it, must not undo any of that.
     assert not (REPO_ROOT / "hub" / "deploy" / "compose.ntfs.yaml").exists(), (
@@ -1113,7 +1113,7 @@ def test_the_library_root_is_mounted_through_the_symlink_and_not_resolved():
         f"{source} is not a symlink here, so the compose file cannot be relying on one"
     )
     # The mount point stays container-side, and it is what the scan is told.
-    assert _service(_compose(COMPOSE))["environment"]["AMD_LIBRARY_ROOTS"] == "/library/b"
+    assert _service(_compose(COMPOSE))["environment"]["AMD_LIBRARY_ROOTS"] == "/library"
 
 
 def test_the_persistent_trees_are_outside_the_image_layer():
@@ -1140,7 +1140,7 @@ def test_the_persistent_trees_are_outside_the_image_layer():
 
     hub_host = targets.get("/data")
     wrapper_host = targets.get("/opt/wrapper/rootfs/data")
-    library_host = targets.get("/library/b")
+    library_host = targets.get("/library")
     assert hub_host, f"hub.db must be mounted from the host, not left in the image layer: {mounts}"
     assert library_host, f"the library must be mounted from the host: {mounts}"
     assert wrapper_host, (
@@ -1561,7 +1561,7 @@ def test_the_external_drive_is_mounted_by_the_base_compose_and_cannot_be_invente
     as healthy, and a silent re-download of 3,670 albums. `create_host_path: false`
     turns that into a failed start.
     """
-    binds = [m for m in _mounts(_service(_compose(COMPOSE))) if m["target"] == "/library/b"]
+    binds = [m for m in _mounts(_service(_compose(COMPOSE))) if m["target"] == "/library"]
     assert binds, "the NTFS drive is the only library root now, so the base compose must mount it"
     assert binds[0]["create_host_path"] is False, (
         "without create_host_path: false, an absent drive becomes a directory Docker creates "
@@ -1583,4 +1583,4 @@ def test_the_library_is_the_external_drive_and_nothing_else():
         "present but not scanned is a tree the hub silently ignores"
     )
     env = _service(_compose(COMPOSE))["environment"]
-    assert env["AMD_LIBRARY_ROOTS"] == "/library/b", env["AMD_LIBRARY_ROOTS"]
+    assert env["AMD_LIBRARY_ROOTS"] == "/library", env["AMD_LIBRARY_ROOTS"]

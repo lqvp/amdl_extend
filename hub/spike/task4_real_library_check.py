@@ -1,10 +1,11 @@
 """Task 4 verification against the real libraries. Read-only; not part of the test suite.
 
-Run from `hub/`:  uv run python spike/task4_real_library_check.py
+Run from `hub/`:  AMD_LIBRARY_ROOTS=/library uv run python spike/task4_real_library_check.py
 """
 
 from __future__ import annotations
 
+import os
 import time
 from collections import Counter
 from pathlib import Path
@@ -13,10 +14,18 @@ from hub.dedup import find_duplicate
 from hub.library_scan import album_key, scan_roots
 from hub.normalize import normalize
 
+# Read from the environment rather than written out: this is a check against whatever
+# configuration is actually running, and a hardcoded pair of paths was both this machine's
+# and wrong the moment the client and the scanner stopped using the same directories.
 ROOTS = [
-    Path("/home/m/apple-dl_extend/AppleMusicDecrypt/downloads"),
-    Path("/run/media/m/1A5E05A75E057D2F/Music"),
+    Path(part.strip())
+    for part in os.environ.get("AMD_LIBRARY_ROOTS", "").split(",")
+    if part.strip()
 ]
+if not ROOTS:
+    raise SystemExit(
+        "set AMD_LIBRARY_ROOTS to the roots to check, e.g. AMD_LIBRARY_ROOTS=/library"
+    )
 
 
 def main() -> None:

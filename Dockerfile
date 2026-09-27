@@ -9,7 +9,7 @@
 #
 # The value is a path *inside* the container. The host side of the bind mount is compose's
 # business, and it is set from the same name in the same place.
-ARG AMD_DOWNLOAD_ROOT=/library/b
+ARG AMD_DOWNLOAD_ROOT=/library
 #
 # amd-hub runtime image (spec §3, §3.2, §4, §11; task 10 of the phase-1 plan).
 #

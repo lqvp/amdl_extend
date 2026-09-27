@@ -26,7 +26,7 @@ services:
         # hub scans. See the volumes block for why they have to be the same tree, and why
         # this is stated rather than defaulted -- a default loses to `.env`, and that is how
         # 3,670 albums ended up mounted and unscanned once already.
-        AMD_DOWNLOAD_ROOT: /library/b
+        AMD_DOWNLOAD_ROOT: /library
 
     # 8080 only. The wrapper's 12340 is deliberately NOT published: it is an unauthenticated
     # HTTP API that serves decrypted audio, so reaching it from the LAN would be a data leak
@@ -109,7 +109,7 @@ services:
       # the mount exists inside the container, so the two are equivalent while it is up.
       - type: bind
         source: ${LIBRARY_B:-/home/m/Music/HDD_Music}
-        target: /library/b
+        target: /library
         bind:
           create_host_path: false
 
@@ -167,7 +167,7 @@ services:
       # tree the client never writes into, and every track would re-download for ever. That
       # is the failure the whole two-root design is most careful about, and it shipped once
       # already. Stated here, matching `AMD_DOWNLOAD_ROOT` above.
-      AMD_LIBRARY_ROOTS: /library/b
+      AMD_LIBRARY_ROOTS: /library
 
       # Optional. Unset means "generate one per process", which is safe -- a missing secret
       # must not degrade into a constant shipped in the image -- but it means every container
