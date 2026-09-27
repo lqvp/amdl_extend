@@ -76,10 +76,6 @@ Run tests: `cd hub && uv run pytest -v`
 2. Add it to the same `[section]` in `config.example.toml` with its comment.
 3. Bump `CONFIG_VERSION` in *both* files. They must match.
 
-`.github/workflows/win-build.yml` string-replaces the **literal lines**
-`launcherBin = ""` and `enable = false` in `config.example.toml`. Reformatting
-or renaming those lines silently breaks the Windows artifact.
-
 ## Client architecture
 
 - **DI is `creart`.** Creators are registered in `main.py` in strict dependency

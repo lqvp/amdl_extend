@@ -5,15 +5,17 @@
 # /app/hub/hub/ the client has to land at /app/AppleMusicDecrypt for the derivation to hold.
 # Moving either tree breaks the seam in a way that only shows up as a missing config.
 #
-# The two upstream clones ARE therefore needed -- the Dockerfile COPYs the prebuilt
-# wrapper-lite-rootless plus its rootfs, and the whole AppleMusicDecrypt tree. But the 69 GB
-# downloads/ tree, every venv, and the host's real config.toml must never enter the context.
+# The two upstream trees are therefore **excluded, not shipped**: the Dockerfile clones both
+# at build time, pinned by commit hash, so a local checkout of either has no place in the
+# context -- and `AppleMusicDecrypt/downloads/` alone is tens of GB, with every host venv and
+# the host's real config.toml alongside it.
 #
-# Both are submodules now, and that changes one thing worth stating: **git's ignore rules do
-# not apply to a Docker build context.** `wrapper/.gitignore` keeps its build/ and its NDK out
-# of *git*, and `AppleMusicDecrypt/.gitignore` keeps its downloads/ out of git, but Docker
-# reads only this file. So every exclusion below is load-bearing on its own account, and
-# moving a rule into a submodule would silently un-exclude it from the context.
+# One lesson from when these trees were submodules is still load-bearing, and it is not
+# obvious: **git's ignore rules do not apply to a Docker build context.** `wrapper/.gitignore`
+# keeps its build/ and its NDK out of *git*, and `AppleMusicDecrypt/.gitignore` keeps
+# downloads/ out of git, but Docker reads only this file. So every exclusion below stands on
+# its own account, and a rule moved into one of those `.gitignore` files would silently stop
+# excluding anything here.
 
 # --- Upstream trees: cloned at build time, not shipped --------------------
 # The Dockerfile clones both upstream repos at build time (pinned by commit hash),

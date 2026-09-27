@@ -16,10 +16,18 @@ ARG AMD_DOWNLOAD_ROOT=/library
 # the old submodule arrangement: no .gitmodules, no gitlinks, no submodule status.
 # The commit hashes are the pin -- update them deliberately, the same way a submodule
 # pin was moved.
+#
+# **Full 40-character hashes, not the 7-character abbreviations these used to carry.** An
+# abbreviated SHA is a prefix that resolves only while no other object shares it, so a pin
+# written that way is not a pin: upstream can add an object that makes it ambiguous, and
+# `git checkout` then refuses. Full hashes are also checkable, which the abbreviations were
+# not -- `git rev-parse` in a clone of the same repo either produces this value or it does
+# not. `wrapper`'s `rootfs/` is 101 tracked .so files, so a re-pin changes the payload, and a
+# pin that is worth arguing about deserves to be unambiguous.
 ARG VENDOR_URL=https://github.com/WorldObservationLog/AppleMusicDecrypt
-ARG VENDOR_COMMIT=8b609df
+ARG VENDOR_COMMIT=8b609df027facb824f0f16f0fd42c2354b1cfce3
 ARG WRAPPER_URL=https://github.com/itouakirai/wrapper
-ARG WRAPPER_COMMIT=c61dea9
+ARG WRAPPER_COMMIT=c61dea9a09627300818a026879565a213be54b73
 #
 # amd-hub runtime image.
 #
@@ -104,13 +112,63 @@ RUN set -eux; \
 # than before it.
 ARG NDK_VERSION=23
 
-# Clone the wrapper repo at the pinned commit. The clone is shallow (--depth 1) but
-# `git checkout` needs the full history for the specific commit, so we fetch it explicitly.
+# Re-declared here for the same reason `AMD_DOWNLOAD_ROOT` is re-declared in the runtime
+# stage: a global `ARG` is not in scope inside a stage's instructions, only in the `FROM`
+# lines. Omitted for four args once, and the image did not build at all -- `sh` said
+# `WRAPPER_URL: parameter not set` and the stage failed. Bare, so the global default is
+# inherited and `compose`'s `build.args` still overrides it.
+ARG WRAPPER_URL
+ARG WRAPPER_COMMIT
+
+# Clone the wrapper repo at the pinned commit.
+#
+# **Full clone, deliberately, and not the shallow-plus-explicit-fetch this used to be.** The
+# earlier form was `git clone --no-checkout --depth 1` followed by
+# `git fetch --depth 1 origin <sha>`, on the reasoning that a shallow clone lacks the history
+# a specific commit lives in. The reasoning is right and the remedy is wrong: that `fetch`
+# asks the *server* for a ref **named** `<sha>`, and an abbreviated SHA is not a ref name.
+# GitHub does not set `uploadpack.allowAnySHA1InWant`, so the request is answered
+# `fatal: couldn't find remote ref` -- and writing the SHA out in full does not help, because
+# the problem is the lookup, not its length. The arrangement only worked at all because the
+# pin happened to be a branch tip *that had been pushed*; re-pinning to any older commit, on
+# any branch, would have broken the build.
+#
+# A full clone fetches every ref, so the commit is present whatever it is, and a full 40-char
+# SHA resolves unambiguously. It costs about 49 MB across the two repositories, against a
+# 692 MB NDK this stage has already downloaded, so there was never a reason to economise here.
 RUN set -eux; \
-    git clone --no-checkout "$WRAPPER_URL" /src/wrapper; \
-    cd /src/wrapper; \
-    git fetch --depth 1 origin "$WRAPPER_COMMIT"; \
-    git checkout "$WRAPPER_COMMIT"
+    git clone --quiet "$WRAPPER_URL" /src/wrapper; \
+    git -C /src/wrapper checkout --quiet "$WRAPPER_COMMIT"
+
+# The stage's working directory, and the absence of this line is why the build has never
+# once got past the compile step. Without it the CWD is `/` (debian:bookworm-slim's
+# default) and every relative path in the next RUN resolves against the wrong tree:
+#
+#   - `cmake -S . -B build` saw `/`, and stopped with
+#     `CMake Error: The source directory "/" does not appear to contain CMakeLists.txt`.
+#   - The NDK's own `aria2c -o ...` / `unzip -q ...` wrote and extracted beside it, putting
+#     `android-ndk-r23b/` at `/android-ndk-r23b/` -- one directory away from where it is
+#     looked for. `wrapper/CMakeLists.txt:6` says
+#     `set(ANDROID_NDK_PATH "${CMAKE_CURRENT_SOURCE_DIR}/android-ndk-r23b")`, and
+#     CMAKE_CURRENT_SOURCE_DIR is wherever CMakeLists.txt was found, so the toolchain has
+#     to be a *sibling* of the source, not merely somewhere on disk. That failure is
+#     quieter than the cmake one: a wrong compiler path is a configure error, or worse a
+#     build against a toolchain nobody meant to select.
+#
+# **Placed here, between the clone and the NDK, and nowhere else works.** After the clone
+# because the directory has to exist and already hold the checkout; before the NDK because
+# that is what makes the download and its extraction land next to CMakeLists.txt. Putting it
+# after the NDK would keep the layer cached and leave the toolchain in the wrong place, and
+# putting it at the top of the stage would have the clone write into its own CWD.
+#
+# Upstream spells this the same way: `WORKDIR /app`, then `unzip -q -d /app`, then
+# `COPY ./ ./`, then `cmake -S /app` -- one directory for the toolchain, the source and the
+# build, which is what this line recreates. Note what is *not* carried over: upstream also
+# installs LLVM through `apt.llvm.org`'s llvm.sh, and this stage deliberately does not.
+# CMakeLists pins both compilers to the NDK's own clang
+# (`${TOOLCHAIN}/bin/x86_64-linux-android22-clang`), so the host never selects a compiler,
+# and upstream's `lsb-release`/`gnupg` exist only to serve llvm.sh.
+WORKDIR /src/wrapper
 
 RUN set -eux; \
     aria2c -o "android-ndk-r${NDK_VERSION}b-linux.zip" \
@@ -141,7 +199,44 @@ RUN set -eux; \
     test -x ./rootfs/system/bin/lite
 
 # ---------------------------------------------------------------------------
-# Stage 2: the runtime image
+# Stage 2: the vendored client
+# ---------------------------------------------------------------------------
+# The second of the two upstream pins, cloned in a stage of its own rather than in the
+# runtime one -- which is what `wrapper` already gets, and for the same two reasons.
+#
+# **The clone used to live in the runtime stage, and died there with
+# `/bin/sh: 1: git: not found` (exit 127).** That stage installs
+# `ca-certificates curl ffmpeg`; `git` went into `wrapper-build` because *that* stage
+# clones, and nothing noticed that the runtime stage does the same job with none. It
+# could not have been noticed: every run so far had died in an earlier stage, which is
+# how a command nobody has ever executed keeps its mistake.
+#
+# Cloning here also keeps `git` out of the shipped image. Upstream's own runtime stage
+# installs nothing at all (`FROM`/`COPY`/`chmod`/`CMD`), and a package manager in a
+# stage that will only ever read a tree is a cost with no use behind it. A re-pin
+# invalidates this stage alone as well: installing `git` into the runtime stage moves
+# its apt layer and takes the `uv sync` above it down with it -- about 80 s of
+# dependency resolution spent because a commit hash changed.
+FROM debian:bookworm-slim AS vendor-clone
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends git ca-certificates; \
+    rm -rf /var/lib/apt/lists/*
+
+# Re-declared here for the same reason `wrapper-build` declares its two: a global `ARG`
+# is in scope for `FROM` lines only, not for a stage's instructions. Bare, so the global
+# default is inherited and compose's `build.args` still overrides it -- and so
+# `test_every_arg_a_stage_uses_is_declared_in_that_stage` sees it in this stage.
+ARG VENDOR_URL
+ARG VENDOR_COMMIT
+
+RUN set -eux; \
+    git clone --quiet "$VENDOR_URL" /app/AppleMusicDecrypt; \
+    git -C /app/AppleMusicDecrypt checkout --quiet "$VENDOR_COMMIT"
+
+# ---------------------------------------------------------------------------
+# Stage 3: the runtime image
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim
 
@@ -202,11 +297,24 @@ COPY --from=wrapper-build /src/wrapper/rootfs /opt/wrapper/rootfs
 RUN set -eu; \
     chmod 0755 /opt/wrapper/wrapper-lite-rootless; \
     # A missing payload surfaces at runtime as `execve: Permission denied` from inside a
-    # chroot, which reads like a namespace problem. Assert the layout the launcher needs.
+    # chroot, which reads like a namespace problem -- so assert what the image has to ship:
+    # the binary the launcher execs, and the libraries it loads.
+    #
+    # **Deliberately not asserted: `rootfs/proc` and `rootfs/dev`.** This block used to
+    # require both, and it passed where it was written while failing in every clone since.
+    # `wrapper/.gitignore:91` ignores `rootfs/` as a whole -- the 101 tracked files are
+    # `git add -f` exceptions -- and git cannot carry an empty directory at all, so `proc/`
+    # (empty) and `dev/` (holding one 0-byte `urandom`) are not in a checkout. What the
+    # author's tree did hold was evidence that the launcher had already run there: the
+    # forked child creates both itself, before the chroot, as
+    # `mkdir("./rootfs/dev", 0755) && errno != EEXIST` (wrapper-lite-rootless.c:103),
+    # `open("./rootfs/dev/urandom", O_CREAT | O_RDWR, 0666)` (:108) and
+    # `mkdir("./rootfs/proc", 0755) && errno != EEXIST` (:120). None of them assume the
+    # path is already there, and a failure is `perror`ed by name rather than surfacing as
+    # the `execve` above. Requiring them here asserted the machine that had last run the
+    # launcher -- a description of a layout, not the layout this image actually carries.
     test -x /opt/wrapper/rootfs/system/bin/lite; \
-    test -d /opt/wrapper/rootfs/system/lib64; \
-    test -d /opt/wrapper/rootfs/proc; \
-    test -d /opt/wrapper/rootfs/dev
+    test -d /opt/wrapper/rootfs/system/lib64
 
 # The vendored client, and the config it will read.
 #
@@ -246,14 +354,20 @@ RUN set -eu; \
 # which is what compose's `build.args` sets) is NOT in scope in a stage's instructions, so
 # without this line `${AMD_DOWNLOAD_ROOT}` would expand to nothing here and every sed below
 # would write `/{album_artist}/{album}`. Same reason `AMD_VENDOR_LANGUAGE` is here and not
-# only at the top.
+# only at the top. Four ARGs were missed on the first pass through this file -- the two
+# clone args among them -- and the symptom is a build that fails with `parameter not set`,
+# after the NDK has already been downloaded.
+# `test_every_arg_a_stage_uses_is_declared_in_that_stage` is what stops it recurring.
 ARG AMD_DOWNLOAD_ROOT
 ARG AMD_VENDOR_LANGUAGE=ja
-RUN set -eux; \
-    git clone --no-checkout "$VENDOR_URL" /app/AppleMusicDecrypt; \
-    cd /app/AppleMusicDecrypt; \
-    git fetch --depth 1 origin "$VENDOR_COMMIT"; \
-    git checkout "$VENDOR_COMMIT"
+
+# The client itself, taken from the stage that clones it. `VENDOR_URL` and `VENDOR_COMMIT`
+# are deliberately no longer declared here, because nothing in this stage reads them: they
+# are the clone's arguments, and the clone -- with the `git` it needs -- is `vendor-clone`'s
+# business. Keeping an ARG beside the instructions that use it is exactly what the test
+# named above asks for, and two ARGs declared for a stage that never mentions them would be
+# the same error in its quieter form.
+COPY --from=vendor-clone /app/AppleMusicDecrypt /app/AppleMusicDecrypt
 RUN set -eu; \
     cd /app/AppleMusicDecrypt; \
     cp config.example.toml config.toml; \
