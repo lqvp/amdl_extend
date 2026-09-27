@@ -23,9 +23,42 @@ name: build
 on:
   pull_request:
     branches: [master] # build to prove it builds; nothing is pushed
+    # Only where a change can move the image. A docs-only or test-only PR builds an
+    # image bit-identical to the last one, and skipping that is the whole point.
+    # The list is repeated under `push`.
+    paths:
+      - Dockerfile
+      - compose.yaml
+      - .dockerignore
+      - hub/pyproject.toml
+      - hub/uv.lock
+      - hub/hub/**
+      - hub/deploy/build_gate.py
+      - .github/workflows/build.yml
   push:
     branches: [master]
     tags: ["v*.*.*"]
+    # The same list, and GitHub documents that "Path filters are not evaluated for
+    # pushes of tags" -- so the `tags` line above is untouched by any of this and a
+    # release tag publishes whatever the tagged commit touched. Only branch pushes are
+    # filtered, which is where a docs-only commit would otherwise spend a full build to
+    # publish an image with nothing new in it.
+    #
+    # The inputs are the six COPY/ADD instructions in the Dockerfile plus the build block
+    # in compose.yaml: `VENDOR_URL`, `VENDOR_COMMIT`, `WRAPPER_URL` and `WRAPPER_COMMIT`
+    # are ARGs declared in the Dockerfile itself, so no `.env` file can move them -- and
+    # `.env` is gitignored, so it is never part of a push anyway. `build_gate.py` imports
+    # only the standard library and `hub.*`, which `hub/hub/**` covers; its three
+    # siblings in `hub/deploy/` are not COPYed and are not inputs.
+    paths:
+      - Dockerfile
+      - compose.yaml
+      - .dockerignore
+      - hub/pyproject.toml
+      - hub/uv.lock
+      - hub/hub/**
+      - hub/deploy/build_gate.py
+      - .github/workflows/build.yml
   workflow_dispatch:
 
 concurrency:
