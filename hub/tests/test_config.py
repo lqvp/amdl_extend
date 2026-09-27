@@ -27,6 +27,36 @@ def test_defaults_match_the_spec():
     assert s.dedup_artist_scope == "loose"
 
 
+def test_requires_library_roots():
+    # No default. The two roots this default was sized for no longer both exist, and the
+    # surviving one points into a directory upstream gitignores, so a fresh clone would
+    # scan nothing and report nothing -- the silent-empty-root failure the deployment
+    # notes are most careful about.
+    with pytest.raises(RuntimeError, match="AMD_LIBRARY_ROOTS"):
+        load_settings({"AMD_PASSWORD": "x"})
+
+
+def test_the_missing_library_roots_message_says_how_to_set_it():
+    # A message that only names the variable leaves the operator to guess the format, and
+    # the format is a comma-separated list of *container* paths -- not the host path they
+    # put in LIBRARY_B. Both halves are asserted because the point of this change is that
+    # a new user can get it right without reading the source.
+    with pytest.raises(RuntimeError) as excinfo:
+        load_settings({"AMD_PASSWORD": "x"})
+    message = str(excinfo.value)
+    assert "AMD_LIBRARY_ROOTS" in message
+    assert "comma-separated" in message
+
+
+def test_the_password_is_still_checked_before_the_library_roots():
+    # Both required settings fail this way, so the order is a contract: a caller who has
+    # set neither must be told about the one it is more likely to have meant. This is what
+    # keeps the two existing password tests honest -- without it they would pass for the
+    # wrong reason and stop testing the password.
+    with pytest.raises(RuntimeError, match="AMD_PASSWORD"):
+        load_settings({})
+
+
 def test_default_library_roots_are_the_two_spec_libraries():
     # §7.2 names the two libraries that actually exist on this host. compose.yaml
     # overrides them with its own mount points, so this default only decides local
@@ -35,7 +65,7 @@ def test_default_library_roots_are_the_two_spec_libraries():
     # through, which are the container mount points and are wrong for every local run.
     s = load_settings({"AMD_PASSWORD": "x"})
     assert [p.as_posix() for p in s.library_roots] == [
-        "/home/m/apple-dl_extend/AppleMusicDecrypt/downloads",
+        "/home/m/amdl_extend/AppleMusicDecrypt/downloads",
         "/run/media/m/1A5E05A75E057D2F/Music",
     ]
 
