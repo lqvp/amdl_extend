@@ -427,6 +427,10 @@ property of the file: no host path, no default."
 - Modify: `hub/deploy/build_gate.py` (comment only, lines 172-179)
 - Modify: `hub/deploy/acceptance_check.py` (comment and docstring only, lines 10 and 87)
 - Modify: `hub/tests/test_deployment.py` (docstrings only, lines 162-168, 180, 1499-1503)
+- Modify: `hub/hub/library_scan.py` (comment only, line 193)
+- Modify: `hub/hub/normalize.py` (comment only, line 14)
+- Modify: `hub/tests/test_library_scan.py` (comments only, lines 258, 259, 347)
+- Modify: `hub/tests/test_normalize.py` (comment only, line 189)
 - Modify: `hub/deploy/mutation_check.py:79-83`
 - Test: `hub/tests/test_deployment.py` (already covers the required strings), `hub/deploy/mutation_check.py`
 
@@ -499,6 +503,25 @@ Four files carry comments and docstrings that describe a deployment that no long
 
 `hub/tests/test_deployment.py:1499-1503` — the docstring of the test at 1519 narrates the two-root overlay as current history. It is accurate as history, so **keep the narration and add one clause** marking that `/library/a` is gone; do not delete it, because it is the reason the assertion below it exists. Same treatment for `:180` inside the docstring of the test at 216, and for the `_default_of` docstring at 162-168, which uses `/library/a,/library/b` as its worked example. Note `_default_of` has **no callers** — the test that used one was replaced in Task 4 — so leave the function in place and only correct the example it names.
 
+- [ ] **Step 4b: Generalise the machine-specific comments in four more files**
+
+Step 8 below is a gate, and a gate that fails on the last task for a reason the plan did not name is a broken plan. These four files carry **this machine's** drive name and volume UUID in comments, and no earlier task touches them. Each is a comment or docstring line; **no executable line changes**.
+
+| File | Line | What it says now |
+|---|---|---|
+| `hub/hub/library_scan.py` | 193 | ``path is the symlink `/home/m/Music/HDD_Music -> /run/media/m/.../Music`, so `relpath``` |
+| `hub/hub/normalize.py` | 14 | `# Measured on /run/media/m/1A5E05A75E057D2F/Music (§7.2.1), plus the siblings the Apple` |
+| `hub/tests/test_library_scan.py` | 258-259 | `# The user's own configuration is the symlink /home/m/Music/HDD_Music ->` and `# /run/media/.../Music, and §8.1 probes reachability from more than one call site, so` |
+| `hub/tests/test_library_scan.py` | 347 | `# Review Focus #1: the real path is /home/m/Music/HDD_Music -> /run/media/...` |
+| `hub/tests/test_normalize.py` | 189 | `# measured on /run/media/m/1A5E05A75E057D2F/Music` |
+
+For each, keep the sentence and its reasoning, and replace only the concrete path with a general form:
+
+- `/home/m/Music/HDD_Music` → `` a user-managed symlink `` (matching the phrasing compose.yaml and `library_scan` already use)
+- `/run/media/m/1A5E05A75E057D2F/Music` → `/run/media/<volume-UUID>/Music`, or "the external library root" where the sentence does not need the path shape
+
+`normalize.py:14` and `test_normalize.py:189` say the numbers were *measured* on a specific library. That is a real provenance claim and the §7.2.1 reference stays — only the path changes, because the path is not what makes the measurement reproducible.
+
 - [ ] **Step 5: Retarget the mutation, which Step 1 turns red**
 
 The entry at `hub/deploy/mutation_check.py:81-83` replaces the string `*** /library/a MUST BE IN THE LIST. ***`, which Step 1 deletes. The runner treats a mutation that does not change the file as a survivor:
@@ -548,22 +571,26 @@ Run:
 
 ```bash
 cd /home/m/amdl_extend
-git grep -nE '(/home/m/|/run/media/)' -- hub compose.yaml Dockerfile README.md .env.example
+git grep -nE '(/home/m/|HDD_Music|1A5E05A75E057D2F)' -- hub compose.yaml Dockerfile README.md .env.example
 ```
 
-Expected: **no output**. Four exclusions are deliberate, and each is a decision rather than an oversight:
+Expected: **no output**. Three patterns, not the `/run/media/` this step originally carried. `/run/media/` is a generic system path, not this machine's, and a gate that forbids it would fail on four occurrences that must stay:
 
-- `AGENTS.md` keeps three `/home/m/Music/HDD_Music` occurrences, because they record this machine's drive as a fact for whoever operates it. The `git grep` above does not include that file.
-- `docs/superpowers/**` holds verbatim transcripts and is excluded by the path list.
-- `AppleMusicDecrypt/` and `wrapper/` are submodules and are not searched.
-- `hub/.venv/` is untracked and therefore outside `git grep`.
+- `compose.yaml:99` and `:105` explain *why* the mount source is a symlink rather than udev's automount point. That reasoning is the reason this whole change exists; deleting it to satisfy a grep would be the tail wagging the dog.
+- the new test from Task 4 Step 2 asserts `"/run/media/" not in code`. An assertion has to name the string it forbids.
 
-If the command returns anything, that line is a miss this task did not catch. Fix it in this commit.
+`/home/m/`, `HDD_Music` and `1A5E05A75E057D2F` are what actually identify a machine: a home directory, the personal name of a drive, and a volume UUID. If the command returns anything, that line is a miss. Fix it in this commit.
+
+Three paths are excluded from the command, each a decision rather than an oversight:
+
+- `AGENTS.md` keeps three `/home/m/Music/HDD_Music` occurrences, because they record this machine's drive as a fact for whoever operates it. The path list does not include that file.
+- `docs/superpowers/**` holds verbatim transcripts and is outside the path list.
+- `AppleMusicDecrypt/` and `wrapper/` are submodules and are not searched. `hub/.venv/` is untracked and therefore outside `git grep`.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add .env.example README.md hub/deploy/build_gate.py hub/deploy/acceptance_check.py hub/tests/test_deployment.py hub/deploy/mutation_check.py
+git add .env.example README.md hub/deploy/build_gate.py hub/deploy/acceptance_check.py hub/tests/test_deployment.py hub/hub/library_scan.py hub/hub/normalize.py hub/tests/test_library_scan.py hub/tests/test_normalize.py hub/deploy/mutation_check.py
 git commit -m "docs: drop the drive-required and /library/a rationale from the operator docs
 
 .env.example told two contradictory things in fourteen lines: that
@@ -579,7 +606,12 @@ directory works, including one that is not a separate drive.
 The mutation that targeted the deleted string is retargeted in the same
 commit, because its runner counts a mutation that does not apply as a
 survivor and exits non-zero -- the check goes red the moment the string
-it targets is removed."
+it targets is removed.
+
+The four modules whose comments cited this machine's drive name or volume
+UUID are generalised in the same commit. A gate that runs at the end of
+the last task has to name every file it covers, or it fails for a reason
+nobody planned for."
 ```
 
 ---
