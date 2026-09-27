@@ -19,7 +19,7 @@ designed.
 ## 1. Step 1 — build
 
 ```bash
-cd /home/m/apple-dl_extend/wrapper
+cd /home/m/amdl_extend/wrapper
 aria2c -o android-ndk-r23b-linux.zip -x16 -s16 https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
 unzip -q android-ndk-r23b-linux.zip
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_HOST_LAUNCHERS=ON \
@@ -389,7 +389,7 @@ FAIL  SIGTERM shuts the child down  NOT TESTED: the child had already exited (re
 reproduces the reviewer's vacuous PASS verbatim; against the final probe it FAILs.
 
 ```
-$ cd /home/m/apple-dl_extend/hub
+$ cd /home/m/amdl_extend/hub
 $ uv run python /tmp/opencode/spike-n1-old/probe_head.py --binary /tmp/opencode/spike-n1-old/stub-a.sh --port 0
 ...
 === captured launcher output (stdout+stderr) ===

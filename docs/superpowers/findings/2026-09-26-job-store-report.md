@@ -207,9 +207,9 @@ $ cd hub && uv run pytest tests/test_jobs.py -v
 
 ```
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0, anyio-4.15.1
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
@@ -721,9 +721,9 @@ rows sharing a key over time a `fetchone()` should return.
 ```
 $ cd hub && uv run pytest tests/test_jobs.py -v
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0, anyio-4.15.1
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function

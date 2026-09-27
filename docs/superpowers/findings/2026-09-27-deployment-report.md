@@ -318,12 +318,12 @@ both roots:
 ```
 matched  (bare relpaths):
   '9Lana/Let me battle (feat. つぐ, わかばやし & みょみょ) - Single'
-      resolves under 1 root(s): ['/home/m/apple-dl_extend/AppleMusicDecrypt/downloads']
+      resolves under 1 root(s): ['/home/m/amdl_extend/AppleMusicDecrypt/downloads']
   'new-dl/9Lana/Let me battle (feat. つぐ, わかばやし & みょみょ) - Single'
       resolves under 1 root(s): ['/home/m/Music/HDD_Music']       <-- does not say WHICH
 resolved (root-qualified, what skip_reason now carries):
   /home/m/Music/HDD_Music/new-dl/Let me battle … - Single                is_dir=True
-  /home/m/apple-dl_extend/AppleMusicDecrypt/downloads/9Lana/… - Single    is_dir=True
+  /home/m/amdl_extend/AppleMusicDecrypt/downloads/9Lana/… - Single    is_dir=True
 ```
 
 Swept over the whole library — every album, every key — not just the example:
@@ -357,7 +357,7 @@ updated for the new field.
 image. Confirmed before fixing:
 
 ```
-$ docker run --rm --entrypoint sh apple-dl_extend-amd-hub -c 'ls -la /app/hub/hub/web/'
+$ docker run --rm --entrypoint sh amdl_extend-amd-hub -c 'ls -la /app/hub/hub/web/'
 -rw-r--r-- 1 root root 12288 Sep 26 23:46 worker-check.db
 ```
 

@@ -2,7 +2,7 @@
 
 - 日付: 2026-09-26
 - 状態: 設計レビュー待ち
-- 対象ワークスペース: `/home/m/apple-dl_extend`
+- 対象ワークスペース: `/home/m/amdl_extend`
 
 ---
 
@@ -123,7 +123,7 @@ Stage 1 は `COPY wrapper/` より**前**に NDK 取得と cmake 設定を置く
 > `wrapper` を `c61dea9`(lite) に pin している。
 
 ```
-/home/m/apple-dl_extend/        ← 既存の構成をそのまま使う（submodule 化しない）
+/home/m/amdl_extend/        ← 既存の構成をそのまま使う（submodule 化しない）
   hub/                          ← 新規: Python web アプリ
   Dockerfile                    ← 新規: multi-stage
   compose.yaml                  ← 新規

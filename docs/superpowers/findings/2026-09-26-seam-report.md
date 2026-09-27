@@ -237,9 +237,9 @@ Task 6 would be quietly undone by a convenience. 28 packages installed.
 ```
 $ cd hub && find . -name __pycache__ -type d -exec rm -rf {} + ; uv run pytest tests/test_ripper_host.py -v
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0, anyio-4.15.1
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
@@ -309,10 +309,10 @@ The real upstream modules import and the creators resolve. Verbatim from
 
 ```
 seam import: OK
-creart module: /home/m/apple-dl_extend/hub/.venv/lib/python3.13/site-packages/creart/__init__.py
-vendor root : /home/m/apple-dl_extend/AppleMusicDecrypt/config.toml
+creart module: /home/m/amdl_extend/hub/.venv/lib/python3.13/site-packages/creart/__init__.py
+vendor root : /home/m/amdl_extend/AppleMusicDecrypt/config.toml
 start()     : OK, started = True
-cwd now     : /home/m/apple-dl_extend/AppleMusicDecrypt
+cwd now     : /home/m/amdl_extend/AppleMusicDecrypt
   it(Config       ) supported=True  instance=Config
   it(WebAPI       ) supported=True  instance=WebAPI
   it(WrapperClient) supported=True  instance=WrapperClient
@@ -322,7 +322,7 @@ cwd now     : /home/m/apple-dl_extend/AppleMusicDecrypt
   ripper     = Ripper / mv = MVRipper
   wrapper url= http://127.0.0.1:12340
   Config region.language = ja
-close()     : OK, cwd restored = /home/m/apple-dl_extend/hub
+close()     : OK, cwd restored = /home/m/amdl_extend/hub
 ```
 
 All six creators report `supported=True` and hand back real instances;
@@ -372,8 +372,8 @@ I reproduced all four against the round-0 predicates first, and confirmed the
 review's root cause. The most serious is real and immediate:
 
 ```
-$ cd /tmp && /home/m/apple-dl_extend/hub/.venv/bin/python -c "
-import sys; sys.path.insert(0, '/home/m/apple-dl_extend')
+$ cd /tmp && /home/m/amdl_extend/hub/.venv/bin/python -c "
+import sys; sys.path.insert(0, '/home/m/amdl_extend')
 from AppleMusicDecrypt.src.url import Song
 print('V2 ->', Song)"
 V2 from AppleMusicDecrypt.src.url import Song -> <class 'AppleMusicDecrypt.src.url.Song'>
@@ -635,9 +635,9 @@ pins the ordering of the pre-flight checks.
 ```
 $ cd hub && find . -name __pycache__ -type d -exec rm -rf {} + ; uv run pytest tests/test_ripper_host.py -v
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0, anyio-4.15.1
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
@@ -851,11 +851,11 @@ cwd at end ok: True
 Reproduced exactly as described:
 
 ```
-caller cwd  : /home/m/apple-dl_extend/hub
-h1._origin_cwd = /home/m/apple-dl_extend/hub
-h2._origin_cwd = /home/m/apple-dl_extend/AppleMusicDecrypt   <- captured the vendor root
-after h1.close, cwd = /home/m/apple-dl_extend/hub
-after h2.close, cwd = /home/m/apple-dl_extend/AppleMusicDecrypt  <- caller cwd lost
+caller cwd  : /home/m/amdl_extend/hub
+h1._origin_cwd = /home/m/amdl_extend/hub
+h2._origin_cwd = /home/m/amdl_extend/AppleMusicDecrypt   <- captured the vendor root
+after h1.close, cwd = /home/m/amdl_extend/hub
+after h2.close, cwd = /home/m/amdl_extend/AppleMusicDecrypt  <- caller cwd lost
 ```
 
 This was the one path where the process could be stranded in the vendor tree with
@@ -868,7 +868,7 @@ cannot interleave with another task.
 
 ```
 $ uv run python -c "... h1.start(); h2.start() ..."
-caller cwd : /home/m/apple-dl_extend/hub
+caller cwd : /home/m/amdl_extend/hub
 h2 refused : another RipperHost is already started in this process (id=0x7f23d7
 cwd after refusal unchanged: True
 caller cwd restored: True
@@ -917,9 +917,9 @@ $ uv run pytest $(tr '\n' ' ' < /tmp/ids_rev.txt) tests/test_zzz_probe.py -q
 ```
 $ cd hub && find . -name __pycache__ -type d -exec rm -rf {} + ; uv run pytest tests/test_ripper_host.py -v
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0, anyio-4.15.1
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function

@@ -175,14 +175,14 @@ clearing the cache when a result contradicts the source.
 ## 5. Test command and verbatim output
 
 ```
-cd /home/m/apple-dl_extend/hub && uv run pytest -v
+cd /home/m/amdl_extend/hub && uv run pytest -v
 ```
 
 ```
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0
 asyncio: mode=AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
@@ -292,10 +292,10 @@ All checks passed!
 ## 6. Real-library verification
 
 ```
-cd /home/m/apple-dl_extend/hub && uv run python spike/task4_real_library_check.py
+cd /home/m/amdl_extend/hub && uv run python spike/task4_real_library_check.py
 ```
 
-Roots: `/home/m/apple-dl_extend/AppleMusicDecrypt/downloads` and
+Roots: `/home/m/amdl_extend/AppleMusicDecrypt/downloads` and
 `/run/media/m/1A5E05A75E057D2F/Music` (the user's symlink). Both reachable, no degradation.
 **4,739 album dirs, 3,431 distinct album names, `scan_roots` in 0.123 s.**
 
@@ -614,14 +614,14 @@ real property and the mutant.
 ### Test commands and verbatim output
 
 ```
-$ cd /home/m/apple-dl_extend/hub && PYTHONDONTWRITEBYTECODE=1 uv run pytest -v
+$ cd /home/m/amdl_extend/hub && PYTHONDONTWRITEBYTECODE=1 uv run pytest -v
 ```
 
 ```
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0
 asyncio: mode=AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function

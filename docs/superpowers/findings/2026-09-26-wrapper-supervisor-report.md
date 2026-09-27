@@ -133,9 +133,9 @@ $ cd hub && uv run pytest -v
 
 ```
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0, anyio-4.15.1
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
@@ -209,7 +209,7 @@ rootfs, 6–19 s and an account, none of which belongs in a hermetic suite).
 **Run 1 — spawn, readiness, stop, orphan check** (`--port 0`):
 
 ```
-  | spawning /home/m/apple-dl_extend/wrapper/wrapper-lite-rootless on 127.0.0.1:45367
+  | spawning /home/m/amdl_extend/wrapper/wrapper-lite-rootless on 127.0.0.1:45367
   | 2026-09-26 16:31:43.399 [INFO ] initializing...
   | 2026-09-26 16:31:43.418 [INFO ] initializing ctx...
   | 2026-09-26 16:31:48.124 [WARN ] missing music/dev token, run --login first
@@ -466,9 +466,9 @@ picked up by the *new* login and applied to the wrong account.
 ```
 $ cd hub && uv run pytest -v
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0, anyio-4.15.1
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
@@ -532,7 +532,7 @@ except the scratch `--base-dir` directory created and removed during the mapping
 **Run 1 — spawn, readiness, stop, orphan check** (`--port 0`):
 
 ```
-  | spawning /home/m/apple-dl_extend/wrapper/wrapper-lite-rootless on 127.0.0.1:43337
+  | spawning /home/m/amdl_extend/wrapper/wrapper-lite-rootless on 127.0.0.1:43337
   | 2026-09-26 17:06:00.547 [INFO ] initializing...
   | 2026-09-26 17:06:00.553 [INFO ] initializing ctx...
   | 2026-09-26 17:06:02.116 [WARN ] missing music/dev token, run --login first
@@ -746,9 +746,9 @@ Previously that mutant ran past 150 s and had to be killed without reaching an a
 ```
 $ cd hub && uv run pytest -v
 ============================= test session starts ==============================
-platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/apple-dl_extend/hub/.venv/bin/python
+platform linux -- Python 3.13.7, pytest-9.1.1, pluggy-1.6.0 -- /home/m/amdl_extend/hub/.venv/bin/python
 cachedir: .pytest_cache
-rootdir: /home/m/apple-dl_extend/hub
+rootdir: /home/m/amdl_extend/hub
 configfile: pyproject.toml
 plugins: asyncio-1.4.0, anyio-4.15.1
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
@@ -862,7 +862,7 @@ fast end and the 18.7 s slow end, by a factor of three.
 own wrapper on 127.0.0.1:12340 was still answering HTTP 200 afterwards.
 
 ```
-  | spawning /home/m/apple-dl_extend/wrapper/wrapper-lite-rootless on 127.0.0.1:57185
+  | spawning /home/m/amdl_extend/wrapper/wrapper-lite-rootless on 127.0.0.1:57185
   | 2026-09-26 17:44:31.274 [INFO ] initializing...
   | 2026-09-26 17:44:32.896 [WARN ] missing music/dev token, run --login first
   | 2026-09-26 17:44:32.896 [INFO ] wrapper-lite listening on 127.0.0.1:57185

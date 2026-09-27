@@ -73,7 +73,7 @@ non-`privileged`, gains no capabilities, and publishes only 8080. The reduced su
 ## 2. Build
 
 ```bash
-cd /home/m/apple-dl_extend/wrapper
+cd /home/m/amdl_extend/wrapper
 aria2c -o android-ndk-r23b-linux.zip -x16 -s16 https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
 unzip -q android-ndk-r23b-linux.zip
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_HOST_LAUNCHERS=ON \
@@ -128,7 +128,7 @@ The first build therefore recorded `NEEDED libcurl.so.4` and died at exec time:
 
 ```
 CANNOT LINK EXECUTABLE: could not load library "libcurl.so.4" needed by
-  "/home/m/apple-dl_extend/wrapper/wrapper-lite-rootless";
+  "/home/m/amdl_extend/wrapper/wrapper-lite-rootless";
   caused by library "libcurl.so.4" not found
 ```
 
@@ -237,8 +237,8 @@ fixed port — the second with a `TIME_WAIT` remnant present — both reaching `
 ```
 python           : 3.13.7  (/home/m/.local/share/uv/python/cpython-3.13.7-linux-x86_64-gnu/bin/python3.13)
 probe pid/ppid   : 163670 / 163665
-binary           : /home/m/apple-dl_extend/wrapper/wrapper-lite-rootless
-cwd for launcher : /home/m/apple-dl_extend/wrapper
+binary           : /home/m/amdl_extend/wrapper/wrapper-lite-rootless
+cwd for launcher : /home/m/amdl_extend/wrapper
 --base-dir       : spike-probe-163670  ->  .../wrapper/rootfs/spike-probe-163670 (inside the chroot)
 --host/--port    : 127.0.0.1:33137
 Seccomp          : 0 (0 = unconfined)
@@ -248,7 +248,7 @@ uid_map          : '0          0 4294967295'
 pid 1 is         : 'systemd'
 
 $ .../wrapper-lite-rootless --base-dir spike-probe-163670 --host 127.0.0.1 --port 33137
-  (cwd=/home/m/apple-dl_extend/wrapper)
+  (cwd=/home/m/amdl_extend/wrapper)
 ```
 
 Captured launcher output:
@@ -668,10 +668,10 @@ The verification harness is committed, so nothing load-bearing lives in `/tmp` a
 
 ```bash
 # 0. build prerequisites (once) -- see section 2
-cd /home/m/apple-dl_extend/wrapper && cmake --build build -j"$(nproc)"
+cd /home/m/amdl_extend/wrapper && cmake --build build -j"$(nproc)"
 
 # 1. build the spike image from the workspace root, so the root .dockerignore applies
-cd /home/m/apple-dl_extend
+cd /home/m/amdl_extend
 docker build -f hub/spike/Dockerfile.probe -t amd-hub-spike:probe .
 
 # 2. host (row H)
@@ -700,7 +700,7 @@ each in its own directory:
 
 ```bash
 mkdir -p /tmp/spike/{a,b}/rootfs/system/bin
-cd /home/m/apple-dl_extend/hub
+cd /home/m/amdl_extend/hub
 
 # stub A: reaches the banner, then exits 0 on its own -- no signal is ever sent
 cat > /tmp/spike/a/stub.sh <<'EOF'
