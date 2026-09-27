@@ -44,7 +44,7 @@ jobs:
       # lockfile records, so a second tool also choosing a Python version would be a second
       # source of truth for a fact `requires-python` and `uv.lock` already own -- and the
       # two would disagree the day `requires-python` moves.
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
           # Keyed on the one file that can invalidate this environment. A repo-wide glob
