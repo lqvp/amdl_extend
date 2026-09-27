@@ -186,7 +186,7 @@ def test_normalize_returns_empty_for_unusable_titles():
 
 
 def test_audio_exts_cover_the_real_library():
-    # measured on /run/media/m/1A5E05A75E057D2F/Music
+    # measured on this operator's external library
     assert {".m4a", ".flac", ".mp4"} <= AUDIO_EXTS
     assert ".jpg" not in AUDIO_EXTS and ".lrc" not in AUDIO_EXTS and ".part" not in AUDIO_EXTS
 

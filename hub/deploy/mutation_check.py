@@ -76,11 +76,16 @@ MUTATIONS = {
     "resolved given a default so a caller can omit it": (
         DEDUP, lambda t: t.replace(
             "    resolved: tuple[str, ...]\n", "    resolved: tuple[str, ...] = ()\n")),
-    "the /library/a containment TODO removed from .env.example": (
+    "the containment TODO removed from .env.example": (
         ENV, lambda t: t.replace("TODO(spec \u00a78.1, Phase 2)", "later")),
-    "the false 'KEEP /library/a FIRST' rationale reinstated": (
+    "a host-specific library default reinstated in compose.yaml": (
+        C, lambda t: t.replace(
+            "source: ${AMD_LIBRARY_HOST:?set AMD_LIBRARY_HOST in .env to the host directory that holds your music library}",
+            "source: ${AMD_LIBRARY_HOST:-/home/m/Music/HDD_Music}")),
+    "the drive-is-required wording back in .env.example": (
         ENV, lambda t: t.replace(
-            "*** /library/a MUST BE IN THE LIST. ***", "*** KEEP /library/a FIRST. ***")),
+            "it does not have to be a separate drive",
+            "it must be a separate drive")),
     "the album table's path column back to a bare relpath": (
         TMPL, lambda t: t.replace("<code>{{ album.path }}</code>", "<code>{{ album.relpath }}</code>")),
     "the crash-restart test's poll back to 'pid changed'": (

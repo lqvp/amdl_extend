@@ -12,8 +12,8 @@ what is deliberately out of scope.
 ## Run it
 
 ```bash
-git clone --recurse-submodules <this repo> apple-dl_extend
-cd apple-dl_extend
+git clone --recurse-submodules <this repo> amdl_extend
+cd amdl_extend
 
 cp .env.example .env
 $EDITOR .env                      # AMD_PASSWORD is the only required value
@@ -33,10 +33,12 @@ part. Later builds reuse the layer and do not.
 Then open <http://localhost:8080/>. The first boot takes about a minute and a half before the
 port answers — see [Why the first boot is slow](#why-the-first-boot-is-slow).
 
-With the external 341 GB drive attached:
+Before the first start, put the absolute path of the directory holding your music in
+`AMD_LIBRARY_HOST` in `.env` — any directory, and it does not need to be a separate drive.
+Then:
 
 ```bash
-ls -L /home/m/Music/HDD_Music >/dev/null && echo mounted   # check first; see below
+ls -d "$AMD_LIBRARY_HOST" >/dev/null && echo "library found"   # check first; see below
 docker compose up -d --build
 ```
 
@@ -91,30 +93,34 @@ launcher mounts its own `procfs` in its user namespace, and the kernel refuses w
 control experiment, and it failed the same way. See spec §14.1 and the spike findings for the
 measurements.
 
-## The two library roots
+## The library root
 
-Downloads go to `/library/a`, which is `AppleMusicDecrypt/downloads/` on the host. The hub scans
-it before every download, so a track it already holds is skipped and `skip_reason` names the
-exact paths that matched.
+There is one root, and it is the same tree for both halves of the job: the client downloads into
+it and the hub scans it before every download, so a track already on disk is skipped and
+`skip_reason` names the exact paths that matched. It is mounted at `/library` inside the
+container, and `AMD_LIBRARY_HOST` in `.env` says which host directory that is.
 
-The second root is the external NTFS drive, off by default so the stack starts without it. Turn
-it on with the overlay file above rather than by editing `compose.yaml`, because the mount and
-`AMD_LIBRARY_ROOTS` have to move together and a mount that is attached but not in the roots is a
-directory nothing ever scans.
-
-**Check the drive is mounted before starting.** A root that cannot be *read* is reported as
-degraded; a root that is a silently empty mount point is not, and the symptom would be a quiet
-re-download of everything that lived on the drive.
+Those two are the same mount, so they cannot be set apart — `AMD_LIBRARY_HOST` on the host,
+`AMD_LIBRARY_ROOTS` in the container — and compose refuses to create the host path, so a
+directory that does not exist is a failed start naming the variable rather than an empty library.
+Check it exists before the first start: a root that cannot be *read* is reported as degraded, but
+a root that is a silently empty mount point is not, and the symptom would be a quiet
+re-download of everything that lived there.
 
 ## Configuration
 
-All of it is in `.env`; see `.env.example` for the annotated list. The two worth knowing about:
+All of it is in `.env`; see `.env.example` for the annotated list. The ones worth knowing about:
 
 | Variable | Default | |
 |---|---|---|
 | `AMD_PASSWORD` | — | **Required.** The web UI's single shared password. |
+| `AMD_LIBRARY_HOST` | — | **Required.** The host directory holding your music. Any directory; no default, because a wrong guess is an empty library that reads as healthy. |
 | `AMD_SESSION_SECRET` | generated per process | Set it (32+ chars) to stay logged in across restarts. |
 | `AMD_RIP_CONCURRENCY` | `4` | How many tracks to rip at once. `1` restores one-at-a-time. |
+
+Running the hub outside compose needs both required variables in the environment —
+`AMD_PASSWORD` and `AMD_LIBRARY_ROOTS`; the app does not read `.env`, which compose alone
+consumes.
 
 Everything else — the wrapper binary, its base directory, the database path, the bind address —
 is an `ENV` in the `Dockerfile`, on purpose: those values have to agree with the config file

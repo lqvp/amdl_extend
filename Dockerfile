@@ -193,9 +193,9 @@ RUN set -eu; \
 #     Relative,
 #     they resolve against the vendor root the seam chdirs into, so the client would write to
 #     /app/AppleMusicDecrypt/downloads/... while the library scan read the bind mount at
-#     /library/a: it would fill a tree the hub never scans, and every track would be
-#     re-downloaded forever, with no error anywhere. And /library/a is where compose mounts
-#     the operator's existing downloads/ tree, so downloads land in the tree the hub
+#     /library: it would fill a tree the hub never scans, and every track would be
+#     re-downloaded forever, with no error anywhere. And /library is where compose mounts
+#     the operator's library, so downloads land in the tree the hub
 #     deduplicates against, which is the entire reason for mounting it there at all.
 #   * region.language, because upstream's example ships zh-Hant-HK and the operator's own
 #     config.toml is ja. Metadata language is a per-account preference rather than a build

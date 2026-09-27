@@ -7,8 +7,8 @@ test can, because both are about *the mounts* rather than about the code:
 * the numbers the hub reports are the real library's numbers, and
 * a dedup decision over a real library shape comes out the way spec §7.6 says it should.
 
-It runs **inside** the container, against `/library/a` and `/library/b` as the hub sees
-them, because "as the hub sees them" is the entire claim. A host-side run of the same code
+It runs **inside** the container, against `/library` as the hub sees
+it, because "as the hub sees them" is the entire claim. A host-side run of the same code
 would prove the library and not the deployment.
 
     docker compose cp hub/deploy/acceptance_check.py amd-hub:/tmp/acceptance_check.py
@@ -83,11 +83,11 @@ def main() -> int:
     print(f"AMD_DEDUP_ARTIST_SCOPE = {settings.dedup_artist_scope}")
 
     # -- 1. the mounts are the library -------------------------------------
-    # Per-root counts, not just a total. A total of 4,739 is equally consistent with both
-    # mounts working and with /library/b being a silently empty directory that /library/a
-    # alone happened to fill -- and a bind mount that Docker autocreated over a dangling
-    # symlink looks exactly like the second case with no error anywhere. A root with zero
-    # album directories is the specific thing that must not pass unnoticed.
+    # Per-root counts, not just a total. A total is equally consistent with the mount
+    # working and with /library being a silently empty directory -- and a bind mount that
+    # Docker autocreated over a dangling symlink looks exactly like the second case with
+    # no error anywhere. A root with zero album directories is the specific thing that
+    # must not pass unnoticed.
     scan = scan_roots(roots)
     per_root: dict[int, int] = defaultdict(int)
     for album in scan.albums:

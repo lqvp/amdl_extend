@@ -146,27 +146,26 @@ services:
       # two-root library, both orders return identical `matched` and `resolved`, because
       # `library_roots[0]` is read only by the build gate and never at runtime.)
       #
-      # /library/a MUST BE IN THE LIST, and that is the real hazard. The image bakes
-      # `<vendor>/config.toml`'s `dirPathFormat` as /library/a/{album_artist}/{album} --
-      # upstream's example is relative, and a relative value resolves against
-      # AppleMusicDecrypt/ instead of the mount -- so the client always writes to /library/a.
-      # Drop it from this list and downloads land in a tree nothing ever scans: every track
-      # re-downloads, forever, with no error. No build can catch it, because this variable is
-      # read at runtime. TODO(spec §8.1, Phase 2): assert the containment at boot, in
-      # `create_app`'s lifespan, and refuse to start naming both values. See `.env.example` for
-      # where the check is meant to live and why it is not here.
+      # The write root MUST be in this list, and that is the real hazard. The image bakes
+      # `<vendor>/config.toml`'s `dirPathFormat` as ${AMD_DOWNLOAD_ROOT}/{album_artist}/{album}
+      # -- upstream's example is relative, and a relative value resolves against
+      # AppleMusicDecrypt/ instead of the mount -- so the client always writes to /library.
+      # Name a different root here and downloads land in a tree nothing ever scans: every
+      # track re-downloads, forever, with no error. No build can catch it, because this
+      # variable is read at runtime. TODO(spec §8.1, Phase 2): assert the containment at boot,
+      # in `create_app`'s lifespan, and refuse to start naming both values. See `.env.example`
+      # for where the check is meant to live and why it is not here.
       #
-      # The NTFS root is absent from the default on purpose: an unreadable root is reported as
-      # degraded, but a root that is a silently empty mount point is not, so a drive that is not
-      # plugged in must not be named here by accident. (The library page shows a per-root album
-      # count for exactly that case, so a root that is mounted and empty is visible rather than
-      # silent.)
+      # There is only one root, so nothing about a drive being absent applies. An unreadable
+      # root is reported as degraded, but a root that is a silently empty mount point is
+      # not -- which is why the bind above sets `create_host_path: false` and fails the start
+      # instead, and why the library page carries a per-root album count.
       # Not an interpolation on purpose. It looked right and was not: a default only
       # applies when the variable is unset, and compose reads `.env` for interpolation --
-      # where an operator's `AMD_LIBRARY_ROOTS=/library/a` would win, the scan would read a
-      # tree the client never writes into, and every track would re-download for ever. That
-      # is the failure the whole two-root design is most careful about, and it shipped once
-      # already. Stated here, matching `AMD_DOWNLOAD_ROOT` above.
+      # where an operator's `AMD_LIBRARY_ROOTS` would win, the scan would read a tree the
+      # client never writes into, and every track would re-download for ever. That is the
+      # failure this design is most careful about, and it shipped once already. Stated here,
+      # matching `AMD_DOWNLOAD_ROOT` above.
       AMD_LIBRARY_ROOTS: /library
 
       # Optional. Unset means "generate one per process", which is safe -- a missing secret

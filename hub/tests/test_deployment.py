@@ -177,8 +177,8 @@ def _split_outside_braces(entry: str) -> list[str]:
 
     Both halves of a compose mapping can be interpolated, and `${VAR:-default}` contains a
     colon of its own. `str.split(":")` therefore reads
-    `${AMD_LIBRARY_HOST:-/home/m/Music/HDD_Music}:/library/b` as three fields and hands back
-    `-/home/m/Music/HDD_Music}` as the target -- which is how this file's first draft ended
+    `${AMD_LIBRARY_HOST:-/some/host/path}:/library` as three fields and hands back
+    `-/some/host/path}` as the target -- which is how this file's first draft ended
     up reporting that a correct overlay "had not attached the drive", and how an earlier
     draft read the published port as `${AMD_HTTP_PORT`.
     """
@@ -664,6 +664,11 @@ _DEPLOYMENT_LEVEL_NAMES = {
     # image's config. It has to be a build input, not an environment variable, because
     # upstream's config loader has no environment variable for anything.
     "AMD_VENDOR_LANGUAGE",
+    # A compose variable: the host directory behind the library bind. Compose consumes it to
+    # build the bind's `source` and it never reaches the container, which is told `/library`
+    # instead. The same shape as AMD_HTTP_PORT -- a host-side half of a container-side
+    # constant -- and `load_settings` has no business reading either.
+    "AMD_LIBRARY_HOST",
 }
 
 

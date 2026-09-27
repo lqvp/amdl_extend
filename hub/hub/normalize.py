@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 import unicodedata
 
-# Measured on /run/media/m/1A5E05A75E057D2F/Music (§7.2.1), plus the siblings the Apple
+# Measured on this operator's external library (§7.2.1), plus the siblings the Apple
 # Music catalog can deliver. Deliberately excludes ".jpg" (a cover-art-only directory must
 # not count as an album, §7.3 step 1b), ".lrc", and ".part" -- the library has 160 of the
 # latter from interrupted downloads, and counting them as existing tracks would wrongly

@@ -142,7 +142,7 @@ def scan_roots(roots: Sequence[Path] | Path | str) -> LibraryScan:
             if album.relpath == _ROOT_SCOPE:
                 # The root is a container that happens to hold audio, not an album, and
                 # `by_name` is keyed by album *name*. Indexing it would put a mount-point
-                # basename -- "Music", "HDD_Music", "1A5E05A75E057D2F" -- into that index,
+                # basename -- "Music", "my-music", a volume UUID -- into that index,
                 # where it would silently join the group of a real album with that name and
                 # be matched against as one. It is worse than a latent collision: the same
                 # drive reached by two different spellings would produce two different
@@ -152,7 +152,7 @@ def scan_roots(roots: Sequence[Path] | Path | str) -> LibraryScan:
                 # Nothing is lost by leaving the scope out of the index. It keeps its
                 # place in `albums`, and the only route to it before this exclusion ran
                 # was a lookup by the mount point's own basename -- "Music",
-                # "HDD_Music" -- which is never the album name of a download, so no
+                # "my-music" -- which is never the album name of a download, so no
                 # re-request could have matched it. Those loose files were already
                 # invisible to dedup; what the exclusion removes is a false-positive
                 # route, not a working one.
@@ -190,7 +190,7 @@ def _walk_root(root_index: int, root: Path) -> Iterator[AlbumDir]:
     """Yield the album scopes under one root, in a stable order.
 
     **`root` is used as given and is never resolved** (Review Focus #1). The user's own
-    path is the symlink `/home/m/Music/HDD_Music -> /run/media/m/.../Music`, so `relpath`
+    path is typically a user-managed symlink into `/run/media/<volume-UUID>/`, so `relpath`
     has to be cut against the string that was passed in. Resolving the root but not the
     paths `os.walk` yields (or the reverse) makes every entry look like it lives outside
     the root, and the whole scan then quietly finds nothing -- no exception, no album
@@ -241,7 +241,7 @@ def _walk_root(root_index: int, root: Path) -> Iterator[AlbumDir]:
         # Its name is "" rather than the root's own basename. No directory on any
         # filesystem can have an empty name, so "" cannot be the name of a real album; a
         # basename taken from the caller's spelling of the path can (the same drive is
-        # "Music" at one path and "HDD_Music" at another), which would make `scan.albums`
+        # "Music" at one path and "my-music" at another), which would make `scan.albums`
         # depend on how the root was configured. `scan_roots` keeps the root scope out of
         # `by_name` for the same reason.
         name = parts[-1] if parts else ""

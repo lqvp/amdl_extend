@@ -169,14 +169,15 @@ def main() -> int:
     if not upstream_config["download"]["dirPathFormat"].startswith(
         settings.library_roots[0].as_posix()
     ):
-        # This compares against the *image's* fallback root, /library/a, which is the right
+        # This compares against the *image's* root, AMD_DOWNLOAD_ROOT, which is the right
         # comparison at build time and is NOT the same thing as a check on the operator's
-        # configuration. `AMD_LIBRARY_ROOTS` is read at runtime, so an operator who reorders
-        # it in `.env` -- putting /library/b first, say -- is outside what this can see, and
-        # the result is the one failure this whole design is most careful about: the client
-        # writes to /library/a while dedup reads /library/b, and every track re-downloads
-        # forever with nothing red. The build gate cannot catch that; a test on the compose
-        # defaults is the place it is worth guarding.
+        # configuration. `AMD_LIBRARY_ROOTS` is read at runtime, so an operator who edits it
+        # in `.env` -- naming a root the client does not write into, say -- is outside what
+        # this can see, and the result is the one failure this whole design is most careful
+        # about: the client writes to one tree while dedup reads another, and every track
+        # re-downloads forever with nothing red. The build gate cannot catch that; the TODO
+        # in `.env.example` names where it should be caught, and a test on the compose file
+        # is what guards the default in the meantime.
         fail(
             f"[download].dirPathFormat writes to "
             f"{upstream_config['download']['dirPathFormat'].split('/')[1]!r} but the first "

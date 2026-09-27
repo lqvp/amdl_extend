@@ -237,7 +237,7 @@ def test_a_root_that_is_itself_an_album_dir_is_still_a_scope(tmp_path):
 def test_the_root_scope_is_not_indexed_as_an_album_name(tmp_path):
     # A mount point is not an album. `by_name` is keyed by album name, so the root's
     # basename in it would join the group of any real album with that name -- and one
-    # drive has more than one basename ("Music", "HDD_Music"), so the key would depend on
+    # library has more than one basename ("Music", "my-music"), so the key would depend on
     # how the path happened to be spelled. "" is not a name any directory can have.
     root = tmp_path / "lib"
     root.mkdir()
@@ -255,17 +255,17 @@ def test_the_root_scope_is_not_indexed_as_an_album_name(tmp_path):
 
 
 def test_by_name_is_the_same_however_the_root_is_spelled(tmp_path):
-    # The user's own configuration is the symlink /home/m/Music/HDD_Music ->
-    # /run/media/.../Music, and §8.1 probes reachability from more than one call site, so
-    # two spellings of one drive must produce one index. With the root's basename in
+    # An operator's own configuration is a symlink into /run/media/<volume-UUID>/, and
+    # §8.1 probes reachability from more than one call site, so two spellings of one
+    # library must produce one index. With the root's basename in
     # `by_name` this failed: the drive's own scope was keyed "music" one way and
     # "hdd_music" the other, and the two scans compared unequal.
-    real = tmp_path / "1A5E05A75E057D2F" / "Music"
+    real = tmp_path / "3f9a2c1e-0b4d-4e6f-8a1b-2c3d4e5f6a7b" / "Music"
     (real / "Artist" / "Album").mkdir(parents=True)
     (real / "Artist" / "Album" / "01 t.m4a").write_bytes(b"")
     # makes the root a scope, as the real drive is
     (real / "loose.m4a").write_bytes(b"")
-    link = tmp_path / "HDD_Music"
+    link = tmp_path / "library-link"
     link.symlink_to(real)
 
     direct = scan_roots([real])
@@ -344,8 +344,9 @@ def test_every_root_appears_in_order_with_its_own_index(make_library, tmp_path):
 
 
 def test_root_that_is_a_symlink_is_accepted(tmp_path, make_library):
-    # Review Focus #1: the real path is /home/m/Music/HDD_Music -> /run/media/...
-    link = tmp_path / "HDD_Music"
+    # Review Focus #1: operators point this at a symlink of their own into a volume's
+    # automount point, so the root the caller passes is the symlink, not the target.
+    link = tmp_path / "library-link"
     link.symlink_to(make_library / "a")
     scan = scan_roots([link])
     assert scan.reachable == (True,)
@@ -367,7 +368,7 @@ def test_a_walked_path_outside_the_root_raises_instead_of_finding_nothing():
 
 def test_a_symlinked_directory_inside_a_root_is_not_followed(tmp_path, make_library):
     # A symlinked *root* is followed (Review Focus #1 -- that is the user's own
-    # HDD_Music). A symlinked directory *inside* a root is not: os.walk is called
+    # a named symlink). A symlinked directory *inside* a root is not: os.walk is called
     # without followlinks, so `Linked` is listed but never visited. That keeps a
     # per-request scan bounded -- a link back up to an ancestor would otherwise recurse
     # forever on every download request -- and it keeps every reported path inside the
