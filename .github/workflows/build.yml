@@ -1,0 +1,137 @@
+# Build the image, and publish it to GHCR for every push that is not a pull request.
+#
+# **The build definition is compose.yaml and only compose.yaml.** `files: ./compose.yaml`
+# below makes bake translate each service into a bake target named after the service
+# (`amd-hub`), so `build.args` -- AMD_VENDOR_LANGUAGE, AMD_DOWNLOAD_ROOT, NDK_VERSION --
+# are read from the same file an operator's `docker compose up --build` reads. Not one of
+# them is restated in this file, and `test_the_ci_build_takes_its_args_from_compose_and_not_
+# from_the_workflow` is what keeps it that way.
+#
+# Restating them here would give the build two sources of truth. A compose.yaml edited
+# without a matching edit here would publish an image nobody can reproduce locally, and
+# both builds would be green -- neither one wrong on its own terms. That is the same shape
+# of bug as the four clone ARGs that were declared globally and never re-declared in the
+# stages that used them: nothing failed until the image was actually built.
+#
+# bake rather than `docker build` for a second reason: `--set` can inject tags and cache
+# configuration without editing compose.yaml at all, which `docker compose build` cannot
+# do -- it would need `docker tag` and `docker push` afterwards, against an image name
+# derived from the checkout directory's basename.
+
+name: build
+
+on:
+  pull_request:
+    branches: [master] # build to prove it builds; nothing is pushed
+  push:
+    branches: [master]
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  # Never cancel a publish. A cancelled push can leave a tag half-written, and unlike a
+  # test run there is no re-reading it -- the artifact is the point. Superseded PR runs,
+  # which are the common case and have pushed nothing, are safe to cancel.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read # checkout
+  packages: write # push to ghcr.io
+
+env:
+  # Two placeholders, and **neither of them is read by the build.**
+  #
+  # compose.yaml requires both -- `${AMD_LIBRARY_HOST:?...}` on the library bind and
+  # `${AMD_PASSWORD:?...}` on the hub's login password -- and compose interpolates the
+  # entire file at load time, before it ever reaches the `build:` block. So a runner with
+  # no `.env` cannot parse this file at all, even though the variables belong to `up` time
+  # and not to the build: neither is a build arg, neither is an `ENV` in the Dockerfile,
+  # and `.dockerignore` excludes `**/.env` from the context.
+  #
+  # Both values are visibly throwaways rather than plausible-looking ones, for the same
+  # reason the build gate's own password is spelled `build-time-check-only`: a constant
+  # that could be mistaken for a real one is how a placeholder becomes a credential.
+  AMD_LIBRARY_HOST: /library
+  AMD_PASSWORD: ci-placeholder
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          # The action lowercases this itself, so a mixed-case `github.repository` is safe.
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+          # `type=sha` is in the list above and always fires, so the output of the step
+          # below is never empty. That matters: an empty `set:` entry would be one more
+          # thing for bake to reject, and the guard for it would be untestable here.
+
+      # `bake --set` accepts exactly one `pattern.key=value` per line, while
+      # metadata-action hands its tags back as a bare newline-separated list, so every
+      # line has to be prefixed before it can travel through `set:`. This cannot be
+      # written inline: a multi-line expression inside `set:` expands into a single entry
+      # containing newlines, not into several entries.
+      - name: Turn the tag list into bake set-entries
+        id: tagset
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "set<<EOF"
+            printf '%s\n' "$TAGS" | sed 's|^|*.tags+=|'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # Skipped on pull requests, and not only because a PR pushes nothing. The token in a
+      # pull request from a forked repository is read-only and carries no secrets, so a
+      # login there fails with a 403 on a build that was never going to push -- turning a
+      # verification build into a red X that says nothing about the image.
+      - name: Log in to the Container registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build, and push outside pull requests
+        uses: docker/bake-action@v7
+        with:
+          # bake-action defaults to a Git context, i.e. it fetches the bake definition from
+          # the remote repository instead of reading the checkout in front of it.
+          # `source: .` is what makes this build the commit that was checked out -- and the
+          # difference is exactly what matters on the first pull request that changes
+          # compose.yaml itself.
+          source: .
+          files: ./compose.yaml
+          # The compose service name is the bake target name. Stated rather than left to the
+          # default group so that renaming the service fails here with a list of targets,
+          # instead of quietly building whatever else the default group picked up.
+          targets: amd-hub
+          push: ${{ github.event_name != 'pull_request' }}
+          set: |
+            ${{ steps.tagset.outputs.set }}
+            *.cache-from=type=gha
+            *.cache-to=type=gha,mode=max
+        # The cache is the difference between a build that starts from a warm image and one
+        # that re-downloads a 691 MB NDK on every run. `mode=max` rather than the default
+        # `min` because the expensive layers here are *intermediate* -- the NDK download
+        # and the wrapper compile are not in the final image's last layers, and `min` would
+        # not export them. The cost is repo cache budget (10 GB, evicted least-recently
+        # used first): `mode=max` on a multi-stage image grows toward that ceiling, so a
+        # build that suddenly runs slow is worth checking for cache thrash before anything
+        # else.

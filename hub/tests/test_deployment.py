@@ -50,6 +50,11 @@ ENV_EXAMPLE = REPO_ROOT / ".env.example"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 BUILD_GATE = REPO_ROOT / "hub" / "deploy" / "build_gate.py"
 ACCEPTANCE = REPO_ROOT / "hub" / "deploy" / "acceptance_check.py"
+# The workflow that publishes the image. Named as a path rather than assembled inside a
+# test because it is read as plain text, not parsed: what is being asserted is which
+# words appear in it, and a YAML parse of somebody else's schema would only add a second
+# thing that can be right for the wrong reason.
+CI_BUILD_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build.yml"
 
 
 # --------------------------------------------------------------------------- #
@@ -1429,6 +1434,169 @@ def test_the_image_builds_the_wrapper_instead_of_copying_prebuilt_artifacts():
     assert "test -x ./wrapper-lite-rootless" in runs, (
         "the builder stage does not check that it produced the launcher, so a green build can "
         "still yield an image with a rootfs and no program to exec"
+    )
+
+
+def test_the_upstream_pins_are_full_hashes_and_not_abbreviations():
+    """A pin that is a prefix is a pin until upstream adds an object that shares it.
+
+    Both pins were 7 characters. An abbreviated SHA resolves only while it is unambiguous,
+    so a pin written that way can silently stop being one when upstream creates an object
+    that collides on the prefix -- and `git checkout` then refuses, at build time, on a
+    machine that has nothing wrong with it. A full 40-character hash has a second property the
+    abbreviation never had: it is **checkable**. `git rev-parse` in a clone of the same repo
+    either produces this value or it does not, so a wrong pin is a one-command contradiction
+    rather than something nobody can evaluate.
+
+    The clone itself is what makes the length matter here. `wrapper/rootfs/` is 101 tracked
+    `.so` files, so a re-pin genuinely changes the payload and is worth being able to argue
+    about; and the builder stage does a full clone (see the comment on its RUN) precisely so
+    that the pin does not have to be a branch tip to be reachable.
+    """
+    args_text = " ".join(a for verb, a in _dockerfile_instructions() if verb == "ARG")
+    for arg in ("VENDOR_COMMIT", "WRAPPER_COMMIT"):
+        pinned = re.search(rf"\b{arg}=([0-9a-f]*)", args_text)
+        assert pinned is not None, f"no {arg} ARG, so the clone is not pinned at all"
+        assert re.fullmatch(r"[0-9a-f]{40}", pinned.group(1)), (
+            f"{arg} is {pinned.group(1)!r}, which is not a full 40-character hash. An "
+            f"abbreviated SHA is a prefix that only resolves while nothing else shares it, so "
+            f"a pin written that way can stop being a pin the moment upstream adds an object, "
+            f"and it cannot be checked against a clone the way a full hash can."
+        )
+
+
+def test_the_ci_build_takes_its_args_from_compose_and_not_from_the_workflow():
+    """The build has one definition, and CI is where a second one would do the most damage.
+
+    `build.yml` points `docker/bake-action` at `compose.yaml`, so the `build.args` an
+    operator's `docker compose up --build` uses are the ones CI publishes. The failure this
+    guards against has a precise shape: somebody changes `NDK_VERSION` (or the download
+    root, or the language) in compose.yaml, the workflow is not part of their diff because
+    nothing reminds them it exists, and the published image quietly differs from the one
+    everyone else builds -- **with both builds green**, because neither file is wrong on
+    its own terms.
+
+    That is not a hypothetical form of bug in this repository. It is the same one the clone
+    ARGs turned out to have: four variables declared globally, used inside stages, never
+    re-declared where they were read, and 33 tests green right up to the moment a build was
+    actually attempted. Nothing in a static suite reads a *second copy* of a value unless
+    something is written to look for it.
+
+    Restating an argument here would look like redundancy and would really be an independent
+    variable -- the same mistake as a config mounted at a path nothing reads.
+    """
+    assert CI_BUILD_WORKFLOW.exists(), (
+        "there is no build workflow, so the image is published by hand or not at all, and "
+        "the question of which compose.yaml produced a given tag has no answer"
+    )
+    workflow = CI_BUILD_WORKFLOW.read_text(encoding="utf-8")
+
+    # **Comments stripped before any assertion reads the file, and in both directions.**
+    #
+    # This file already records the half of the lesson that goes one way: a test that
+    # grepped raw text passed on four mutations that removed the real flag, the real
+    # checksum and the real assertion, because the recipe's *prose* above them still
+    # spelled all of it out -- "a test that reads the comment cannot tell a build from a
+    # description of a build". This test is that bug mirrored. The header comment below
+    # names NDK_VERSION, AMD_DOWNLOAD_ROOT and AMD_VENDOR_LANGUAGE precisely in order to
+    # explain that this file must never *set* them, so a raw search failed a workflow that
+    # obeys the rule it was written to enforce.
+    #
+    # Stripping comment lines makes prose neutral in both directions: it can neither
+    # satisfy an assertion that a setting exists nor violate one that says it must not.
+    active = "\n".join(
+        line for line in workflow.splitlines() if not line.strip().startswith("#")
+    )
+
+    # The mechanism, not merely the presence of a build step: compose.yaml has to be the
+    # file bake reads. `source: .` is paired with it deliberately -- without it bake would
+    # take its definition from the remote repository instead of the checkout, which is
+    # precisely wrong on the pull request that changes compose.yaml.
+    assert "files: ./compose.yaml" in active, (
+        "the build workflow does not point bake at compose.yaml, so its build arguments "
+        "come from somewhere else -- and that somewhere else is now a second source of "
+        "truth for NDK_VERSION, AMD_DOWNLOAD_ROOT and AMD_VENDOR_LANGUAGE"
+    )
+    assert "source: ." in active, (
+        "bake has no `source: .`, so it takes its definition from the Git context (the "
+        "remote repository) rather than the checked-out commit -- meaning a pull request "
+        "that edits compose.yaml is built with the *old* compose.yaml and reports success"
+    )
+
+    # The other direction, and the one that catches the drift rather than its mechanism:
+    # the three build args must not be written out here at all. Each name below is a value
+    # an operator changes, so each is a value CI could contradict while staying green.
+    #
+    # `AMD_PASSWORD` and `AMD_LIBRARY_HOST` are absent from this list on purpose. They are
+    # in the workflow's `env:` block as placeholders for compose's `${VAR:?}` interpolation
+    # -- runtime-only values the build never reads -- and asserting "no AMD_ names at all"
+    # would fail on a file that is correct.
+    for arg in ("NDK_VERSION", "AMD_DOWNLOAD_ROOT", "AMD_VENDOR_LANGUAGE"):
+        assert arg not in active, (
+            f"the build workflow sets {arg}, which compose.yaml already states. Restating "
+            f"it here means two places to change and one that will be missed; delete it "
+            f"from the workflow and let `files: ./compose.yaml` carry the value."
+        )
+    assert "--build-arg" not in active, (
+        "the build workflow passes --build-arg, so it is supplying build arguments itself "
+        "instead of taking them from compose.yaml"
+    )
+
+
+def test_every_arg_a_stage_uses_is_declared_in_that_stage():
+    """A global `ARG` is in scope for `FROM` lines only, so a stage must re-declare its own.
+
+    **This is the test that would have caught the image not building at all.** `VENDOR_URL`,
+    `VENDOR_COMMIT`, `WRAPPER_URL` and `WRAPPER_COMMIT` were all declared above the first
+    `FROM` and used by clone steps inside two stages, with no re-declaration in either. The
+    image had therefore never been built: `sh` reported `WRAPPER_URL: parameter not set` and
+    the stage exited 2 -- *after* the 692 MB NDK had already been downloaded, so the failure
+    arrives minutes in and looks like a network or a `git` problem.
+
+    Every other test in this file was green the whole time, which is the point. Nothing else
+    here reads a stage's variable scope, and a Docker build is not one of these tests
+    (`acceptance_check.py` and a `docker compose up` are), so the gap between "the static
+    contract holds" and "the image exists" had nothing watching it.
+    """
+    # Walk the raw file rather than `_dockerfile_instructions()`, which flattens stages and
+    # drops the distinction this test *is* about.
+    #
+    # Docker's rule, stated exactly because getting it backwards produces a test that passes
+    # on a broken file: a global `ARG` (above the first `FROM`) is in scope **for `FROM`
+    # lines only**. Inside a stage it is invisible to every other instruction, and a stage
+    # only sees the `ARG`s it declares itself -- where a bare `ARG NAME` picks up the global
+    # *value*. So a stage starts with nothing declared, not with the globals.
+    lines = _dockerfile().splitlines()
+    stage: str | None = None
+    declared: set[str] = set()  # this stage's own ARGs; empty at every FROM
+    undeclared: list[str] = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        verb, _, rest = line.partition(" ")
+        if verb == "FROM":
+            # `FROM image AS name`, case-insensitively, because the stage name is what a
+            # reader needs in the failure message.
+            parts = rest.split()
+            stage = parts[-1] if len(parts) > 1 and parts[-2].upper() == "AS" else "<final>"
+            declared = set()
+            continue
+        if verb == "ARG":
+            declared.add(rest.split()[0].split("=")[0])
+            continue
+        # `$(nproc)` is a shell substitution, not a variable, and the pattern does not match
+        # it: `$(` is not `$IDENT` and not `${IDENT}`.
+        for name in re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", rest):
+            if name not in declared:
+                undeclared.append(f"stage {stage}: `{verb}` uses ${name}, which it never declares")
+
+    assert not undeclared, (
+        "these instructions use a variable their stage never declares, so `sh` substitutes "
+        "nothing and the build fails at that line: "
+        + "; ".join(undeclared)
+        + ". A global ARG (declared above the first FROM) is in scope for FROM lines only -- "
+        "re-declare it inside the stage that uses it, bare, so it inherits the value."
     )
 
 

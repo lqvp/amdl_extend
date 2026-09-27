@@ -1,0 +1,66 @@
+# pytest for `hub/`.
+#
+# Deliberately its own workflow rather than a job inside build.yml, because the two answer
+# different questions at very different costs: this one asks "is the code correct?" and
+# answers in about 70 seconds, while build.yml asks "does the image exist?" and pays for a
+# 691 MB NDK download to find out. One workflow would put an image build between a
+# contributor and a red X on a one-line logic bug.
+#
+# Nothing here reads compose.yaml, and that is a requirement rather than an omission.
+# compose.yaml carries `${AMD_LIBRARY_HOST:?...}` on the library bind and
+# `${AMD_PASSWORD:?...}` on the login password, and compose interpolates the *whole* file
+# at load time -- before it looks at what the build block needs -- so a runner with no
+# `.env` cannot even parse it. This workflow needs nothing from the deployment and should
+# not pay for it. build.yml does need the file and therefore defines the two placeholders
+# itself, with a comment saying why they are harmless.
+
+name: test
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# A run superseded by a newer push to the same PR is work nobody will read. Cancel it --
+# and only that: there is no publish here to protect, so cancelling is free.
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only, stated even though it is close to the default. This workflow writes nothing,
+# and `contents: read` is the whole token a compromised dependency in the test run gets.
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `actions/setup-python`, and that is deliberate. uv installs the interpreter the
+      # lockfile records, so a second tool also choosing a Python version would be a second
+      # source of truth for a fact `requires-python` and `uv.lock` already own -- and the
+      # two would disagree the day `requires-python` moves.
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          # Keyed on the one file that can invalidate this environment. A repo-wide glob
+          # would also fire on a comment edit anywhere, which is a cache miss nobody asked
+          # for on a job whose whole purpose is being fast.
+          cache-dependency-glob: hub/uv.lock
+
+      # `--locked` rather than a bare `uv run`. `uv run` on its own re-resolves when
+      # `pyproject.toml` and `uv.lock` disagree, which turns an uncommitted dependency bump
+      # into a green run against versions nobody reviewed; `--locked` fails instead, and
+      # names the lockfile, which is the actionable half of the message. The difference is
+      # between "the tests ran" and "the tests ran against what is committed".
+      #
+      # `working-directory: hub` because that is the uv project root -- the same `cd hub`
+      # the README and AGENTS.md tell a human to run, so CI and a laptop agree on where the
+      # suite lives.
+      - name: pytest
+        working-directory: hub
+        run: uv run --locked pytest -q
