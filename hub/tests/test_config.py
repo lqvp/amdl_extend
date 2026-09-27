@@ -39,7 +39,7 @@ def test_requires_library_roots():
 def test_the_missing_library_roots_message_says_how_to_set_it():
     # A message that only names the variable leaves the operator to guess the format, and
     # the format is a comma-separated list of *container* paths -- not the host path they
-    # put in LIBRARY_B. Both halves are asserted because the point of this change is that
+    # put in AMD_LIBRARY_HOST. Both halves are asserted because the point of this change is that
     # a new user can get it right without reading the source.
     with pytest.raises(RuntimeError) as excinfo:
         load_settings({"AMD_PASSWORD": "x"})

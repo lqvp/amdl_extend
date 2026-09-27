@@ -177,7 +177,7 @@ def _split_outside_braces(entry: str) -> list[str]:
 
     Both halves of a compose mapping can be interpolated, and `${VAR:-default}` contains a
     colon of its own. `str.split(":")` therefore reads
-    `${LIBRARY_B:-/home/m/Music/HDD_Music}:/library/b` as three fields and hands back
+    `${AMD_LIBRARY_HOST:-/home/m/Music/HDD_Music}:/library/b` as three fields and hands back
     `-/home/m/Music/HDD_Music}` as the target -- which is how this file's first draft ended
     up reporting that a correct overlay "had not attached the drive", and how an earlier
     draft read the published port as `${AMD_HTTP_PORT`.
@@ -1086,31 +1086,43 @@ def test_the_drive_is_required_and_the_whole_stack_survives_its_loss():
     )
 
 
-def test_the_library_root_is_mounted_through_the_symlink_and_not_resolved():
-    """`scan_roots` computes relpaths against the root exactly as the caller passed it.
+def test_the_library_directory_is_required_and_nothing_defaults_to_this_host():
+    """No host path may ship in the compose file, and no default may stand in for one.
 
-    That is load-bearing: a relpath is stored, quoted into `skip_reason` and joined back onto
-    a root at read time, so a relpath is only meaningful relative to the same string. Nothing
-    resolves the root, and nothing may rewrite the host path either -- `/run/media/<UUID>/`
-    is udev's automount point, it disappears on unmount and changes if the volume is ever
-    reformatted, so a compose file naming it is a file that silently rots.
+    The test this replaces read the default straight out of the compose file and asked
+    whether it was a symlink *on the machine running the suite*, skipping when it was not
+    -- so on any other machine it inspected nothing and passed. That is a weaker test than
+    this one for the same property, because it can pass without having checked anything.
+
+    The property is now a property of the file rather than of the host: the operator's
+    library path lives in `.env`, so the file must carry no host-specific value to fall
+    back on. That is also what makes the deployment portable to a machine that has no
+    external drive at all, where the directory named in `.env` is an ordinary one.
     """
     raw = COMPOSE.read_text(encoding="utf-8")
     code = "\n".join(
         line for line in raw.splitlines() if not line.strip().startswith("#")
     )
     assert "/run/media/" not in code, (
-        "the mount source is the resolved automount target, not the symlink; use the "
-        "user-managed symlink so the file does not rot when the UUID changes or the drive "
-        "is absent"
+        "the mount source is udev's automount target, which disappears on unmount and "
+        "changes when the volume is reformatted, so a file naming it silently rots; the "
+        "operator should point AMD_LIBRARY_HOST at a path they manage instead"
     )
-    match = re.search(r"LIBRARY_B:-([^}]+)\}", code)
-    assert match, f"no LIBRARY_B source in {COMPOSE.name}:\n{code}"
-    source = Path(match.group(1))
-    if not source.is_symlink():
-        pytest.skip(f"{source} is not a symlink on this machine, so there is nothing to check")
-    assert source != Path(source).resolve(), (
-        f"{source} is not a symlink here, so the compose file cannot be relying on one"
+    for personal in ("/home/m/", "HDD_Music"):
+        assert personal not in code, (
+            f"{personal!r} is a path from the machine this was written on; the operator's "
+            "library directory belongs in .env, and a default here is wrong on every other "
+            "machine"
+        )
+    binds = [m for m in _mounts(_service(_compose(COMPOSE))) if m["target"] == "/library"]
+    assert binds, "the library must be mounted, whatever host directory it comes from"
+    assert binds[0]["create_host_path"] is False, (
+        "without create_host_path: false, a directory that does not exist yet becomes one "
+        "Docker creates on the host, and an empty root reads as healthy"
+    )
+    assert ":?" in binds[0]["source"], (
+        f"AMD_LIBRARY_HOST must be required (:?) rather than defaulted, or this file names one "
+        f"machine's filesystem. got {binds[0]['source']!r}"
     )
     # The mount point stays container-side, and it is what the scan is told.
     assert _service(_compose(COMPOSE))["environment"]["AMD_LIBRARY_ROOTS"] == "/library"
@@ -1549,30 +1561,6 @@ def test_the_write_root_and_the_scan_roots_come_from_one_build_argument():
         )
     assert '{AMD_DOWNLOAD_ROOT}/{album_artist}/{album}' in dockerfile
     assert '{AMD_DOWNLOAD_ROOT}/playlists/{playlistName}' in dockerfile
-
-
-def test_the_external_drive_is_mounted_by_the_base_compose_and_cannot_be_invented():
-    """Required, and required *loudly*.
-
-    Compose's short bind syntax creates the host path when it is missing. With the
-    symlink `/home/m/Music/HDD_Music -> /run/media/m/1A5E05A75E057D2F/Music`, Docker
-    resolves it first, so an absent drive meant the stack started happily against a
-    directory Docker had just created inside `/run/media/` -- an empty root that reads
-    as healthy, and a silent re-download of 3,670 albums. `create_host_path: false`
-    turns that into a failed start.
-    """
-    binds = [m for m in _mounts(_service(_compose(COMPOSE))) if m["target"] == "/library"]
-    assert binds, "the NTFS drive is the only library root now, so the base compose must mount it"
-    assert binds[0]["create_host_path"] is False, (
-        "without create_host_path: false, an absent drive becomes a directory Docker creates "
-        "on the host, and an empty root reads as healthy"
-    )
-    match = re.search(r"LIBRARY_B:-([^}]+)\}", binds[0]["source"])
-    assert match, f"the source should be an overridable host path, got {binds[0]['source']!r}"
-    assert match.group(1).endswith("HDD_Music"), (
-        "the host path is the symlink, not the /run/media/<UUID> target it points at: the UUID "
-        "path is udev's automount point and rots on reformat or unplug"
-    )
 
 
 def test_the_library_is_the_external_drive_and_nothing_else():

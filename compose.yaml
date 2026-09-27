@@ -108,7 +108,7 @@ services:
       # symlink is the stable, user-managed name, and Docker resolves it on the host before
       # the mount exists inside the container, so the two are equivalent while it is up.
       - type: bind
-        source: ${LIBRARY_B:-/home/m/Music/HDD_Music}
+        source: ${AMD_LIBRARY_HOST:?set AMD_LIBRARY_HOST in .env to the host directory that holds your music library}
         target: /library
         bind:
           create_host_path: false
