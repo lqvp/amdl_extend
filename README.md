@@ -8,7 +8,7 @@ instead of a terminal.
 ## Run it
 
 ```bash
-git clone --recurse-submodules <this repo> amdl_extend
+git clone <this repo> amdl_extend
 cd amdl_extend
 
 cp .env.example .env
@@ -25,14 +25,14 @@ is missing:
 | `AMD_PASSWORD` | The web UI's single shared password. Any string. |
 | `AMD_LIBRARY_HOST` | The absolute path of a directory holding your music. Any directory — it does not have to be a separate drive, and it does not have to be NTFS. |
 
-`--recurse-submodules` is not optional. `AppleMusicDecrypt/` and `wrapper/` are submodules
-pinned to a commit, and the image is built from both — the Dockerfile has a stage that compiles
-the wrapper's launcher and payload with the Android NDK, so there is no host build to do and no
-prebuilt binary to go looking for. A clone without the submodules fails at the first `COPY`.
+`AppleMusicDecrypt/` and `wrapper/` are not in this repository at all. The Dockerfile clones both
+upstream repos at build time, each pinned to a commit hash, so a plain clone is all you need and
+there is nothing to update by hand. One stage compiles the wrapper's launcher and Android payload
+with the NDK, which means there is no host build to do and no prebuilt binary to go looking for.
 
-The first build downloads the NDK (692 MB, one layer, cached afterwards) and fetches cJSON and
-Dobby for CMake, so allow a few minutes on a cold cache and expect the network to be the slow
-part. Later builds reuse the layer and do not.
+The first build downloads the NDK (692 MB, one layer, cached afterwards), clones those two repos,
+and fetches cJSON and Dobby for CMake, so allow a few minutes on a cold cache and expect the
+network to be the slow part. Later builds reuse the layers and do not.
 
 Then open <http://localhost:8080/>. The first boot takes about a minute and a half before the
 port answers — see [Why the first boot is slow](#why-the-first-boot-is-slow).
@@ -151,11 +151,11 @@ crash loop.
 ## Development
 
 ```bash
-cd hub && uv run pytest -v          # 648 tests
+cd hub && uv run pytest -v          # 644 tests
 ```
 
-`hub/` is the only code here we own. `AppleMusicDecrypt/` and `wrapper/` are separate upstream
-clones, left untouched.
+`hub/` is the only code here we own. `AppleMusicDecrypt/` and `wrapper/` are upstream projects
+that the build clones at a pinned commit and does not track here.
 
 `hub/tests/test_deployment.py` holds the deployment's invariants — the vendor-path derivation,
 `PYTHONPATH`, the config pin, the security posture, the mounts. `hub/deploy/build_gate.py` runs
@@ -179,4 +179,6 @@ makes a zero visible.
 ## Licence and provenance
 
 `hub/` is the work of this repository. `AppleMusicDecrypt/` and `wrapper/` are upstream projects
-with their own licences, cloned unmodified.
+with their own licences, cloned from their own remotes at pinned commits. Their sources are used
+as-is; the image builds its own `config.toml` from upstream's `config.example.toml` and compiles
+the wrapper's launcher and Android payload.

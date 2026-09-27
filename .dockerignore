@@ -15,24 +15,12 @@
 # reads only this file. So every exclusion below is load-bearing on its own account, and
 # moving a rule into a submodule would silently un-exclude it from the context.
 
-# --- Never ship these ---------------------------------------------------
-AppleMusicDecrypt/downloads/
-AppleMusicDecrypt/.venv/
-AppleMusicDecrypt/.idea/
-AppleMusicDecrypt/.git/
-# The operator's real config. It is gitignored, it is host-specific, and the image builds
-# its own at <vendor>/config.toml from config.example.toml instead -- see the Dockerfile.
-AppleMusicDecrypt/config.toml
-AppleMusicDecrypt/config.toml.bak
-
-wrapper/.git/
-wrapper/build/
-wrapper/android-ndk-r23b/
-wrapper/android-ndk-r23b-linux.zip
-# rootfs/data is excluded in the secrets section below, next to the other account material
-# and with the reason spelled out where the `**/data/` pattern it would otherwise rely on is
-# visible. It is a real mpl_db from the host's logged-in wrapper, and the launcher mkdirs its
-# own --base-dir at startup, so the image needs none of it.
+# --- Upstream trees: cloned at build time, not shipped --------------------
+# The Dockerfile clones both upstream repos at build time (pinned by commit hash),
+# so the local copies must never enter the build context. This replaces the old
+# submodule arrangement where the trees were COPYed directly.
+AppleMusicDecrypt/
+wrapper/
 
 # --- hub: not runtime ---------------------------------------------------
 # A host venv would land in the image and its pyvenv.cfg points at the host interpreter.

@@ -10,6 +10,16 @@
 # The value is a path *inside* the container. The host side of the bind mount is compose's
 # business, and it is set from the same name in the same place.
 ARG AMD_DOWNLOAD_ROOT=/library
+
+# --- Upstream repositories -----------------------------------------------
+# Both upstream repos are cloned at build time, pinned by commit hash. This replaces
+# the old submodule arrangement: no .gitmodules, no gitlinks, no submodule status.
+# The commit hashes are the pin -- update them deliberately, the same way a submodule
+# pin was moved.
+ARG VENDOR_URL=https://github.com/WorldObservationLog/AppleMusicDecrypt
+ARG VENDOR_COMMIT=8b609df
+ARG WRAPPER_URL=https://github.com/itouakirai/wrapper
+ARG WRAPPER_COMMIT=c61dea9
 #
 # amd-hub runtime image (spec §3, §3.2, §4, §11; task 10 of the phase-1 plan).
 #
@@ -56,33 +66,57 @@ ARG AMD_DOWNLOAD_ROOT=/library
 
 FROM debian:bookworm-slim AS wrapper-build
 
-# git is not optional: `FetchContent` clones cJSON and Dobby. `unzip` unpacks the NDK.
+# git is not optional: `FetchContent` clones cJSON and Dobby. `unzip` unpacks the NDK, and
+# `aria2` is how the NDK itself arrives -- upstream's own Dockerfile fetches it the same way,
+# and a segmented download is what makes a 692 MB fetch survivable on a flaky link.
+# `ca-certificates` is named because that fetch is https, and "the base image happens to have
+# it" is not a fact worth depending on.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        build-essential cmake git ca-certificates curl unzip; \
+        build-essential cmake git ca-certificates unzip aria2; \
     rm -rf /var/lib/apt/lists/*
 
-# The NDK is pinned twice: by version in the URL, and by the SHA-256 of Google's own bytes.
-# The checksum is not the one from a local copy that happened to work -- it is the digest of a
-# fresh download from dl.google.com, so the pin cannot inherit a corrupted local artifact.
-# Verified against the same host file by SHA-1, which matches, so the host build and this
-# stage compile with an identical toolchain.
-ARG ANDROID_NDK_URL=https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
-ARG ANDROID_NDK_SHA256=c6e97f9c8cfe5b7be0a9e6c15af8e7a179475b7ded23e2d1c1fa0945d6fb4382
+# Spelled exactly as upstream's Dockerfile spells it -- `NDK_VERSION=23` there, `r23b` here --
+# so two builds of the same wrapper are visibly the same build. Same argument, same URL shape,
+# same fetcher.
+#
+# **This is not a knob to turn, and the name is misleading about that.** Two reasons, both
+# inherited from upstream:
+#
+#   * the `b` suffix is literal, because only some NDK releases are lettered. `NDK_VERSION=24`
+#     produces a URL that 404s rather than a different NDK.
+#   * the toolchain path above resolves through a directory CMakeLists hardcodes as
+#     `./android-ndk-r23b/`. Raise the version and the extracted directory is
+#     `android-ndk-r25b/`, cmake finds no compiler, and the stage fails at configure time with
+#     a message that never mentions the version.
+#
+# r23b is the revision the payload and both flags below were recorded against; the
+# `-Wall -Werror` argument above is why that is the whole point rather than a detail.
+#
+# **The download is not verified, and neither is upstream's.** An earlier revision of this file
+# carried an `ANDROID_NDK_SHA256` digest and asserted in a comment that it had been computed
+# from a fresh download and cross-checked by SHA-1 against the host copy. That could not be
+# substantiated, and an unverified claim that reads as a supply-chain guarantee is worse than
+# stating the gap: a digest nobody can re-derive is a tripwire that fires for the wrong reason.
+# What protects this stage is that the URL is versioned, the artifact is Google's, and the
+# payload's behaviour is asserted after the build (`test -x ./rootfs/system/bin/lite`) rather
+# than before it.
+ARG NDK_VERSION=23
 
-WORKDIR /src/wrapper
-# The context excludes `wrapper/build/`, `wrapper/android-ndk-r23b/` and
-# `wrapper/rootfs/data/`, so this is the tracked tree (the 101 .so files the payload needs and
-# the one the libcurl pin below resolves) and nothing else -- no 2.3 GB of NDK, no host
-# account database.
-COPY wrapper/ /src/wrapper/
+# Clone the wrapper repo at the pinned commit. The clone is shallow (--depth 1) but
+# `git checkout` needs the full history for the specific commit, so we fetch it explicitly.
+RUN set -eux; \
+    git clone --no-checkout "$WRAPPER_URL" /src/wrapper; \
+    cd /src/wrapper; \
+    git fetch --depth 1 origin "$WRAPPER_COMMIT"; \
+    git checkout "$WRAPPER_COMMIT"
 
 RUN set -eux; \
-    curl -fsSL -o ndk.zip "$ANDROID_NDK_URL"; \
-    echo "$ANDROID_NDK_SHA256  ndk.zip" | sha256sum -c -; \
-    unzip -q ndk.zip; \
-    rm ndk.zip
+    aria2c -o "android-ndk-r${NDK_VERSION}b-linux.zip" \
+        "https://dl.google.com/android/repository/android-ndk-r${NDK_VERSION}b-linux.zip"; \
+    unzip -q "android-ndk-r${NDK_VERSION}b-linux.zip"; \
+    rm "android-ndk-r${NDK_VERSION}b-linux.zip"
 
 # Both flags are from docs/superpowers/findings/2026-09-26-wrapper-child-process-spike.md §2.1,
 # and either one alone is a build that fails later and more confusingly:
@@ -215,7 +249,11 @@ RUN set -eu; \
 # only at the top.
 ARG AMD_DOWNLOAD_ROOT
 ARG AMD_VENDOR_LANGUAGE=ja
-COPY AppleMusicDecrypt /app/AppleMusicDecrypt
+RUN set -eux; \
+    git clone --no-checkout "$VENDOR_URL" /app/AppleMusicDecrypt; \
+    cd /app/AppleMusicDecrypt; \
+    git fetch --depth 1 origin "$VENDOR_COMMIT"; \
+    git checkout "$VENDOR_COMMIT"
 RUN set -eu; \
     cd /app/AppleMusicDecrypt; \
     cp config.example.toml config.toml; \

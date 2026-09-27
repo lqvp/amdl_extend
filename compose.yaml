@@ -27,6 +27,13 @@ services:
         # this is stated rather than defaulted -- a default loses to `.env`, and that is how
         # 3,670 albums ended up mounted and unscanned once already.
         AMD_DOWNLOAD_ROOT: /library
+        # Spelled as upstream's Dockerfile and compose.yaml spell it, so the two builds of the
+        # same wrapper read the same. Stated here rather than left to the Dockerfile default
+        # for the same reason as the other two args: the value that decides what gets compiled
+        # should be visible in the one place an operator already looks. It is not a knob to
+        # turn -- the `b` suffix and the wrapper's hardcoded `./android-ndk-r23b/` both stop
+        # anything but 23. See the ARG in the Dockerfile.
+        NDK_VERSION: 23
 
     # 8080 only. The wrapper's 12340 is deliberately NOT published: it is an unauthenticated
     # HTTP API that serves decrypted audio, so reaching it from the LAN would be a data leak

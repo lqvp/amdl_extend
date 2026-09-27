@@ -4,55 +4,51 @@ Workspace notes for agents. General engineering rules come from the global
 `~/.config/opencode/AGENTS.md` and still apply. This file records repo-specific
 facts that are hard to infer from the code.
 
-## Layout: one repo, two pinned submodules
+## Layout: this repo, plus two upstream trees the build clones
 
-| Path | Gitlink | Upstream | Branch |
-|------|---------|----------|--------|
-| `AppleMusicDecrypt/` | `8b609df` | `WorldObservationLog/AppleMusicDecrypt` | `v3` |
-| `wrapper/` | `c61dea9` | `itouakirai/wrapper` | `lite` |
+| Upstream | Pin | Branch |
+|---|---|---|
+| `WorldObservationLog/AppleMusicDecrypt` | `8b609df` | `v3` |
+| `itouakirai/wrapper` | `c61dea9` | `lite` |
 
-**Cloning needs `--recurse-submodules`.** Moving a pin is a deliberate act:
-`wrapper`'s `rootfs/` is 101 tracked `.so` files, so a re-pin changes the payload.
+**Neither tree is in this repository.** No `.gitmodules`, no gitlink, no
+`git submodule status`: the Dockerfile clones both at build time, pinned by the
+`VENDOR_COMMIT` and `WRAPPER_COMMIT` args. A plain `git clone` of this repo is
+therefore enough to build the image, and `.gitignore` and `.dockerignore` both
+exclude `AppleMusicDecrypt/` and `wrapper/` as whole trees so a local checkout
+cannot enter the build context.
 
-Their own `.gitignore` files still apply inside them, and the root's does not.
+Moving a pin is still deliberate: `wrapper`'s `rootfs/` is 101 tracked `.so`
+files, so a re-pin changes the payload.
 
-## Always `cd AppleMusicDecrypt` before running anything
+## The vendor tree: where it is, and what is CWD-relative
 
-Three paths are resolved **relative to the current working directory**, and
-`main.py` never chdirs:
+The client is cloned to `/app/AppleMusicDecrypt` — derived, not configured, by
+`parents[2]` of the installed package. So three paths are resolved **relative to
+the current working directory**, and `main.py` never chdirs:
 
 - `config.toml` — `Config.load_from_config()` default arg
 - `assets/prefetch_template.json` — `EMBEDDED_TEMPLATE_PATH`
 - `downloads/` — default `dirPathFormat`
 
-Launching from the workspace root silently skips the embedded FairPlay prefetch
-template and starts making `/key` RPCs it doesn't need to.
+`RipperHost` holds the process CWD at the vendor root for its whole life, which
+is the only reason the image's layout is load-bearing. Two consequences:
 
-## Commands
+- `config.toml` must be built *at* the vendor root, and the image builds it there
+  from upstream's `config.example.toml`. A config anywhere else is not a
+  different config — it is one that is silently ignored while the image's own is
+  used instead.
+- Launching the client from anywhere else silently skips the embedded FairPlay
+  prefetch template and starts making `/key` RPCs it doesn't need to.
 
-```bash
-cd AppleMusicDecrypt
-uv sync                          # setup
-uv run python main.py            # full-screen TUI (default)
-uv run python main.py --legacy-ui   # v2-style plain REPL
-```
+There is no host checkout to run the client against, so upstream's own
+`uv sync` / `uv run python main.py` are not part of this repository's workflow.
+The image is the only supported way to run it.
 
-No Python test suite. The only automated check is:
-
-```bash
-.venv/bin/python -m compileall -q src main.py
-```
-
-## The two repos are not wired together
-
-The client needs a wrapper HTTP API at `[instance] url` (default `127.0.0.1:12340`).
-**Login happens wrapper-side, not in this client.**
-
-- `[localInstance] wrapperType` defaults to `"manager"` → expects `wrapper-manager-qemu`
-  from a repo that is *not* cloned here.
-- The local `wrapper/` clone builds **`wrapper-lite-qemu`**, i.e. the `"lite"` backend.
-- To run the local clone: set `wrapperType = "lite"`, build `wrapper-lite-qemu`,
-  and point `launcherBin` at the resulting binary.
+**Login happens wrapper-side, not in this client.** The client only ever talks
+to a wrapper HTTP API at `[instance] url`. The image's `AMD_WRAPPER_BINARY` names
+`wrapper-lite-rootless`, not `wrapper-lite-qemu`, because the QEMU build has no
+host rootfs and cannot serve the 2FA code the hub writes.
 
 ## Stale `__pycache__` will silently lie
 
@@ -98,42 +94,28 @@ or renaming those lines silently breaks the Windows artifact.
 
 ## Building `wrapper/`
 
-**For the amd-hub image, do not build on the host.** The Dockerfile has a
-`wrapper-build` stage. `docker compose up -d --build` is the whole procedure.
+**Do not build the wrapper on the host.** The Dockerfile has a `wrapper-build`
+stage and `docker compose up -d --build` is the whole procedure.
 
-The CMake build hardcodes the NDK toolchain path to `./android-ndk-r23b/`.
-Canonical sequence (mirrored from `.github/workflows/build-lite.yml`):
-
-```bash
-cd wrapper
-sudo apt-get install -y build-essential cmake unzip git aria2 qemu-system-x86 seabios ipxe-qemu
-aria2c -o android-ndk-r23b-linux.zip https://dl.google.com/android/repository/android-ndk-r23b-linux.zip
-unzip -q android-ndk-r23b-linux.zip
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-c++ -std=c++11 -O2 -o wrapper-lite-qemu wrapper-lite-qemu.cpp
-apt-get download busybox-static
-chmod +x qemu/*.sh && ./qemu/mkdata.sh && ./qemu/build.sh
-```
-
-Gotchas:
-- `-Wall -Werror` for both Debug and Release. Any new warning breaks the build.
-- Two flags required: `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` and
-  `-DDCURL_SHARED_LIB=<path to rootfs/system/lib64/libcurl.so>`.
-- The build writes into the *source* tree (`rootfs/system/bin`).
-- `lite` links with `-Wl,--unresolved-symbols=ignore-in-object-files` against
-  the checked-in `rootfs/system/lib64/*.so`. Never `git clean -xfd` this repo.
+The two CMake flags and the NDK pin are documented at the instructions that use
+them, and `hub/tests/test_deployment.py` asserts all three — the flags because
+each alone is a build that fails later and more confusingly, the pin because a
+version that moved would rebuild the payload with a different clang under
+`-Wall -Werror`. `NDK_VERSION` is spelled as upstream's Dockerfile spells it and
+is deliberately **not** a value to raise; the test asserts 23 and says why.
 
 ## `amd-hub`: the deployment
 
-`hub/` is the only code this repository owns. **Never modify anything under
-the submodules** — a local edit is invisible to `git status` at the root.
+`hub/` is the only code this repository owns. The two upstream trees are not
+here at all: a local `AppleMusicDecrypt/` or `wrapper/` is an untracked working
+copy that the build ignores, so an edit made there cannot reach the image and
+`git status` will not report it.
 
 ```bash
 cp .env.example .env && $EDITOR .env        # AMD_PASSWORD is required
 docker compose up -d --build
 docker compose logs -f amd-hub
-cd hub && uv run pytest -v                   # 648 tests
+cd hub && uv run pytest -v                   # 644 tests
 ```
 
 ### Key invariants
@@ -174,9 +156,8 @@ pass-through to a single `AppleMusicURL.parse_url`.
 
 ## Environment facts
 
-- `AppleMusicDecrypt/.venv` is Python **3.13.7**; system `python3` is 3.14.7.
-  Use `uv run` or `.venv/bin/python` — never bare `python3`.
-- `AppleMusicDecrypt/downloads/` is **69 GB** and gitignored. Don't walk, grep, or commit it.
+- `hub/` is a `uv` project and the image pins `python:3.13-slim`. Use `uv run pytest`
+  — never bare `python3`, whose interpreter is a different minor version.
 - `ffmpeg` and `cmake` are on PATH; `/dev/kvm` exists. Go 1.27 is installed.
-- `AppleMusicDecrypt/requirements.txt` is generated — edit `pyproject.toml` /
-  `uv.lock` and re-export; never hand-edit it.
+- A local `AppleMusicDecrypt/downloads/` is tens of GB and gitignored. Don't walk it,
+  grep it, or be surprised when `du` is slow.

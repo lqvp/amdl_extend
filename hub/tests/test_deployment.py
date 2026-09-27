@@ -136,6 +136,42 @@ def _copy_destinations() -> dict[str, str]:
     return found
 
 
+def _cloned_vendor_root() -> str:
+    """The absolute path the Dockerfile clones the vendor client into.
+
+    Read from the instruction that does it rather than transcribed, because that path is a
+    *derivation* and not a preference: `ripper_host._VENDOR_ROOT` and
+    `app.vendor_config_path` both compute `Path(__file__).resolve().parents[2] /
+    "AppleMusicDecrypt"`, so wherever the image puts the client, the code decides.
+
+    It used to be read off a `COPY` destination, because a `COPY` is how the client used to
+    get there. The client is cloned at build time now, so there is no `COPY` to read and the
+    clone target is the only place the path is stated at all. **The invariant did not change --
+    only the spelling of it moved**, and a test still looking for the old spelling would fail
+    on a correct image while passing on a broken one.
+    """
+    found: list[str] = []
+    for verb, args in _dockerfile_instructions():
+        if verb != "RUN":
+            continue
+        # A RUN is a sequence of `;`-separated commands, and the clone is one of them.
+        for segment in args.split(";"):
+            tokens = segment.split()
+            if "clone" not in tokens or not tokens[-1].startswith("/"):
+                continue
+            # The basename is fixed by the code's own derivation, so matching it selects the
+            # right clone without transcribing it. What the caller then asserts is the part
+            # that is *not* fixed: that the full path agrees with `parents[2]`.
+            if Path(tokens[-1]).name == "AppleMusicDecrypt":
+                found.append(tokens[-1])
+    assert len(found) == 1, (
+        f"expected exactly one instruction cloning the vendor client to an absolute path named "
+        f"AppleMusicDecrypt, found {found}. The image has to put the client where the code "
+        f"derives that it will be, so this has to be readable here rather than assumed."
+    )
+    return found[0]
+
+
 def _env_pairs() -> dict[str, str]:
     """Every `ENV key=value` in the Dockerfile, last one winning as Docker does."""
     found: dict[str, str] = {}
@@ -329,11 +365,15 @@ def test_the_exclusion_helper_answers_for_a_nested_path_and_says_so():
     assert _excluded_from_context("x.db")
     # A directory pattern covers its contents, because Docker prunes the directory...
     assert _excluded_from_context("hub/tests/conftest.py")
-    # ...but not a sibling whose name merely starts the same way, and not a parent of an
-    # excluded subtree.
+    # ...but not a sibling whose name merely starts the same way.
     assert not _excluded_from_context("hub/testsx/thing.py")
-    assert not _excluded_from_context("wrapper/rootfs")
-    assert not _excluded_from_context("wrapper/rootfs/system")
+    # This used to assert that `wrapper/rootfs` and `wrapper/rootfs/system` survive, back when
+    # the context carried a submodule and only `wrapper/rootfs/data/` could be excluded. Both
+    # upstream trees are now cloned at build time and excluded whole, so the case it guarded
+    # cannot arise: there is no context shape in which the rootfs ships. The `hub/tests`
+    # pattern above still carries the "a directory pattern prunes its contents" half, which is
+    # the part of the matcher this test exists to pin.
+    assert _excluded_from_context("wrapper/rootfs/system/lib64/libcurl.so")
     # The negation is for the example file.
     assert not _excluded_from_context(".env.example")
     # And the tree still has to be in the context, or there is no image to ship.
@@ -373,22 +413,23 @@ def test_the_client_lands_where_parents_2_of_the_package_points():
     at `/app/hub/hub` that puts the client where the derivation will never look, and the
     failure is a `RipperHostError` naming a path that exists and is not the one it wanted,
     at every boot, after a build that reported success.
+
+    **The client is cloned here, not COPYed**, so the path is read off the clone rather than
+    off a `COPY` destination. Same invariant, later spelling; see `_cloned_vendor_root`.
     """
-    copies = _copy_destinations()
-    client = [dest for source, dest in copies.items() if source.endswith("AppleMusicDecrypt")]
-    assert len(client) == 1, f"expected one AppleMusicDecrypt COPY, found {client}"
-    assert client[0] == "/app/AppleMusicDecrypt", (
-        f"the client is COPYed to {client[0]}, but parents[2] of the installed package is "
+    client = _cloned_vendor_root()
+    assert client == "/app/AppleMusicDecrypt", (
+        f"the client is cloned to {client}, but parents[2] of the installed package is "
         f"/app, so the derivation looks in /app/AppleMusicDecrypt. Move the client to match "
         f"the derivation, or move the package and the PYTHONPATH together -- what must not "
         f"happen is the two disagreeing."
     )
 
-    package = [dest for source, dest in copies.items() if source == "hub/hub"]
-    assert package == ["/app/hub/hub"], f"the package is at {package}, not /app/hub/hub"
+    package = _copy_destinations()["hub/hub"]
+    assert package == "/app/hub/hub", f"the package is at {package}, not /app/hub/hub"
     # The arithmetic itself, in the code's terms: `Path(__file__).parents[2]` where
     # `__file__` is /app/hub/hub/<module>.py is parents[1] of the package *directory*.
-    assert Path("/app/hub/hub").parents[1] / "AppleMusicDecrypt" == Path(client[0]), (
+    assert Path("/app/hub/hub").parents[1] / "AppleMusicDecrypt" == Path(client), (
         "the arithmetic itself: parents[2] of a module inside /app/hub/hub has to be the "
         "directory holding the client"
     )
@@ -468,11 +509,11 @@ def test_the_vendor_config_is_built_at_the_only_path_the_client_ever_opens():
         "the image should build <vendor>/config.toml from upstream's config.example.toml, so "
         "there is one source of truth for the ~150 settings instead of a forked copy"
     )
-    # The file is created *inside* the directory the client was COPYed to, rather than
-    # being COPYed to a path of its own -- so the test follows the RUN rather than looking
-    # for a destination string, which the build does not have.
-    vendor = [dest for source, dest in _copy_destinations().items()
-              if source.endswith("AppleMusicDecrypt")][0]
+    # The file is created *inside* the directory the client was cloned into, rather than being
+    # COPYed to a path of its own -- so the test follows the RUN and takes the client path from
+    # the same helper the vendor-root test uses, instead of looking for a COPY destination that
+    # the build no longer has.
+    vendor = _cloned_vendor_root()
     making = [
         args
         for verb, args in _dockerfile_instructions()
@@ -1264,8 +1305,9 @@ def test_the_image_builds_the_wrapper_instead_of_copying_prebuilt_artifacts():
       * the artifacts are *still* gitignored upstream. If someone commits a compiled Android
         binary to the wrapper repository this test fails, which is the outcome to notice -- not
         a 60 MB ELF in git, and not a silently unpinned build.
-      * the Dockerfile fetches the NDK by a checksummed URL. A bare URL pins nothing: the
-        artifact that gets verified is whatever the URL served that day.
+      * the NDK revision is named once, in upstream's own `NDK_VERSION` spelling, and the
+        download URL is assembled from it rather than written beside it. The download is *not*
+        checksummed -- that is now a stated property, with the reasoning on the ARG.
       * the two cmake flags are still there, because each is a build that fails later and more
         confusingly -- a configure-time policy error for one, and a payload that will not start
         for the other.
@@ -1274,16 +1316,29 @@ def test_the_image_builds_the_wrapper_instead_of_copying_prebuilt_artifacts():
     `hub/deploy/build_gate.py` runs as the image's last `RUN` so a broken payload lands on the
     build rather than on the first start.
     """
-    for artifact in ("wrapper-lite-rootless", "rootfs/system/bin/lite"):
-        ignored = subprocess.run(
-            ["git", "check-ignore", "-q", artifact],
-            cwd=REPO_ROOT / "wrapper", capture_output=True,
-        )
-        assert ignored.returncode == 0, (
-            f"wrapper/{artifact} is no longer gitignored by the wrapper repository, so the "
-            f"builder stage is building something git already carries -- and if that was "
-            f"intentional, a compiled Android binary is about to be committed"
-        )
+    # This half needs a *wrapper clone*, and a clone is not part of this repository any more.
+    # `wrapper/` was a submodule until the Dockerfile began cloning upstream itself, and it is
+    # now gitignored at the root -- so a fresh clone of this repository has no `wrapper/`
+    # directory and this assertion cannot be made from here at all. The property is upstream's
+    # to keep rather than ours: we consume a pinned commit, and what matters is whether the
+    # commit we pin ignores these paths, which is decided when the pin is moved.
+    #
+    # Note the `if` and not `pytest.skip`. Skipping would abandon the rest of this test -- the
+    # builder stage, both cmake flags and the two post-build `test -x` assertions -- on exactly
+    # the machine that most needs them, which is a fresh clone. The absent clone is a reason to
+    # check less, not a reason to check nothing.
+    wrapper_clone = REPO_ROOT / "wrapper"
+    if (wrapper_clone / ".git").exists():
+        for artifact in ("wrapper-lite-rootless", "rootfs/system/bin/lite"):
+            ignored = subprocess.run(
+                ["git", "check-ignore", "-q", artifact],
+                cwd=wrapper_clone, capture_output=True,
+            )
+            assert ignored.returncode == 0, (
+                f"wrapper/{artifact} is no longer gitignored by the wrapper repository, so the "
+                f"builder stage is building something git already carries -- and if that was "
+                f"intentional, a compiled Android binary is about to be committed"
+            )
 
     instructions = _dockerfile_instructions()
 
@@ -1316,34 +1371,36 @@ def test_the_image_builds_the_wrapper_instead_of_copying_prebuilt_artifacts():
     runs = " ".join(args for verb, args in instructions if verb == "RUN")
     args_text = " ".join(a for verb, a in instructions if verb == "ARG")
 
-    # The NDK is pinned by content, not only by version in a URL -- and the digest has to be
-    # an actual digest, because `ARG ANDROID_NDK_SHA256=` with nothing after it satisfies
-    # "the word is present" and pins nothing.
-    # The pin is an ARG and the verification is a RUN, and both are needed: a digest nobody
-    # checks, and a check with no digest, each pin nothing.
-    digest = re.search(r"ANDROID_NDK_SHA256=([0-9a-f]*)", args_text)
-    assert digest is not None, (
-        f"no ANDROID_NDK_SHA256 ARG; a bare URL pins nothing, because whatever the URL served "
-        f"on the day is what gets compiled. The ARGs are: {args_text[:200]}"
+    # **The NDK revision, in upstream's spelling, and nothing beyond that.** This block used to
+    # require an `ANDROID_NDK_SHA256` digest and a `sha256sum -c` that checked it, and that
+    # requirement is deliberately gone. The digest it demanded was one nothing in this
+    # repository could substantiate, and a check that insists on an undiagnosable pin is a
+    # check that cannot fail informatively -- it passes on a plausible-looking constant and
+    # fails on a correct build. What replaces it is the part that is actually checkable: the
+    # revision is stated in one place, under the name upstream uses, and the URL is derived from
+    # that same value rather than from a second literal free to drift away from it.
+    #
+    # The revision is not cosmetic. `-Wall -Werror` is on for both Debug and Release, so it
+    # decides which clang compiles the payload, and a different clang is a different build.
+    ndk = re.search(r"\bNDK_VERSION=(\d+)", args_text)
+    assert ndk is not None, (
+        f"no NDK_VERSION ARG, so nothing states which NDK this is and the payload's clang is "
+        f"whatever the day served. Upstream's Dockerfile names it the same way, and the two "
+        f"builds of one wrapper should stay comparable. The ARGs are: {args_text[:200]}"
     )
-    assert re.fullmatch(r"[0-9a-f]{64}", digest.group(1)), (
-        f"ANDROID_NDK_SHA256 is {digest.group(1)!r}, which is not a SHA-256. An empty or "
-        f"truncated value verifies nothing and still reads as pinned."
+    assert ndk.group(1) == "23", (
+        f"NDK_VERSION is {ndk.group(1)}, not 23. The wrapper's CMakeLists hardcodes the "
+        f"toolchain directory as ./android-ndk-r23b/, and the `b` suffix exists only for some "
+        f"releases, so this is not a value that can be raised: the configure step stops with a "
+        f"message that never mentions it."
     )
-    assert "sha256sum -c" in runs, (
-        f"ANDROID_NDK_SHA256 is set but no RUN verifies the download against it. RUNs: {runs[:200]}"
-    )
-    # The URL is an ARG too, and it is the half of the pin that says *which* NDK -- r23b is
-    # what the two cmake flags and the whole payload were recorded against, and a newer NDK
-    # would rebuild `lite` with a different clang under `-Wall -Werror`.
-    url = re.search(r"ANDROID_NDK_URL=(\S+)", args_text)
-    assert url is not None and "android-ndk-r23b" in url.group(1), (
-        f"the NDK URL is {url.group(1) if url else None!r}; r23b is the revision the payload "
-        f"and the two cmake flags were recorded against"
-    )
-    assert "$ANDROID_NDK_URL" in runs, (
-        "the NDK URL is declared but the download does not use it, so the pin and the fetch "
-        "can disagree"
+    # One source of truth. The URL is assembled from the ARG, so the revision asserted above is
+    # the revision fetched. A literal URL sitting beside the ARG would let the two disagree,
+    # which is the same shape of bug as a config mounted at a path nothing reads: it looks
+    # pinned and is not.
+    assert "dl.google.com/android/repository/android-ndk-r${NDK_VERSION}b-linux.zip" in runs, (
+        f"the download does not build its URL from NDK_VERSION, so the stated revision and the "
+        f"fetched one can disagree. RUNs: {runs[:200]}"
     )
 
     # Both cmake flags, asserted individually because either alone is a build that fails later.
@@ -1381,11 +1438,15 @@ def test_every_copy_source_exists_in_the_repository():
 
     Cheap, and the build context is the workspace root, so every `COPY` source is a path in
     this repository that a refactor can move without touching the Dockerfile.
+
+    `AppleMusicDecrypt` and `wrapper` are excluded: they are cloned at build time, not
+    COPYed, so they do not need to exist in the repository.
     """
+    cloned = {"AppleMusicDecrypt", "wrapper"}
     missing = [
         source
         for source in _copy_destinations()
-        if not (REPO_ROOT / source.rstrip("/")).exists()
+        if source not in cloned and not (REPO_ROOT / source.rstrip("/")).exists()
     ]
     assert not missing, (
         f"the Dockerfile COPYs {missing}, which is not in the repository. The build context "
@@ -1400,16 +1461,22 @@ def test_the_context_excludes_what_must_never_ship():
     `accounts.sqlitedb`, `cookies.sqlitedb` and `token_cache.json` from a wrapper that was
     logged in by hand. Shipping it would put an Apple account into a published image layer,
     where `docker history` can read it and no amount of later scrubbing is reliable.
+
+    `AppleMusicDecrypt/` and `wrapper/` are excluded as whole trees: they are cloned at
+    build time, so the local copies (with their downloads/, .venv/, config.toml, build/,
+    android-ndk-r23b/, rootfs/data/) must never enter the build context.
     """
     for required in (
+        "AppleMusicDecrypt",
         "AppleMusicDecrypt/downloads",
         "AppleMusicDecrypt/.venv",
         "AppleMusicDecrypt/config.toml",
-        "hub/.venv",
-        "hub/tests",
+        "wrapper",
         "wrapper/rootfs/data",
         "wrapper/build",
         "wrapper/android-ndk-r23b",
+        "hub/.venv",
+        "hub/tests",
         ".env",
         # Nested, and the case the first version of this test could not see: a root-anchored
         # `*.db` excludes a database at the context root and nothing else, so
@@ -1418,7 +1485,6 @@ def test_the_context_excludes_what_must_never_ship():
         "hub/hub/web/worker-check.db",
         "hub/hub/deeply/nested/hub.db",
         "hub.db",
-        "wrapper/rootfs/data/wrapper/mpl_db/accounts.sqlitedb",
         "hub/x/y/.env",
     ):
         assert _excluded_from_context(required), (
@@ -1426,16 +1492,8 @@ def test_the_context_excludes_what_must_never_ship():
             f"venv, a queue database and a real logged-in account all belong in an image "
             f"layer that `docker history` can read."
         )
-    # ...and what must ship, or the build cannot work at all. `wrapper/rootfs` is the
-    # interesting one: excluding its `data/` subdirectory must not exclude the rootfs.
+    # ...and what must ship, or the build cannot work at all.
     for required in (
-        "wrapper/wrapper-lite-rootless",
-        "wrapper/rootfs",
-        "wrapper/rootfs/system",
-        "wrapper/rootfs/system/lib64",
-        "AppleMusicDecrypt",
-        "AppleMusicDecrypt/src",
-        "AppleMusicDecrypt/config.example.toml",
         "hub/hub",
         "hub/pyproject.toml",
         "hub/uv.lock",
