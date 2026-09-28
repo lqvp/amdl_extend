@@ -1,10 +1,18 @@
-# pytest for `hub/`.
+# "Is the code correct?": `pytest` for `hub/`, `go test` for `hub-go/`.
 #
 # Deliberately its own workflow rather than a job inside build.yml, because the two answer
 # different questions at very different costs: this one asks "is the code correct?" and
 # answers in about 70 seconds, while build.yml asks "does the image exist?" and pays for a
 # 691 MB NDK download to find out. One workflow would put an image build between a
 # contributor and a red X on a one-line logic bug.
+#
+# Two jobs in the one workflow rather than two workflows: both ask that same question at
+# about the same cost -- each is well under two minutes -- and one concurrency group below
+# cancels the pair together when a newer push lands. What they do *not* share is setup. The
+# Python suite cannot run without the uv environment and the vendor tree, and the first
+# step below spends most of its lines fetching the latter. The Go suite needs neither: the
+# goldens it compares against are committed and its whole dependency list is the standard
+# library.
 #
 # Nothing here reads compose.yaml, and that is a requirement rather than an omission.
 # compose.yaml carries `${AMD_LIBRARY_HOST:?...}` on the library bind and
@@ -117,3 +125,82 @@ jobs:
       - name: pytest
         working-directory: hub
         run: uv run --locked pytest -q
+
+  # The Go hub, `hub-go/`: normalize, the library scan, dedup, the job store, the
+  # scheduler, the HTTP surface and the pages. Same question as the job above -- is the
+  # code correct -- for the half of the program that is no longer Python.
+  hub-go:
+    name: hub-go (${{ matrix.go-version }})
+    runs-on: ubuntu-latest
+    # The suite is seconds on a laptop -- the whole tree is this repository's own files and
+    # `go test` caches aggressively -- so 15 minutes is not a speed budget, it is the same
+    # bound the pytest job sets for the same reason: a run that reaches it is stuck, not
+    # slow, and "stuck" needs a goroutine dump from `go test`'s own timeout (below) rather
+    # than six hours of a runner doing nothing.
+    timeout-minutes: 15
+    strategy:
+      # Both toolchains report even when one fails: "1.20 broke" and "1.22 broke" are
+      # different diagnoses and the second half of the matrix is wasted if it is cancelled
+      # before it can say which.
+      fail-fast: false
+      matrix:
+        # Two toolchains, and the pair is the point. `1.22.x` is the one the image compiles
+        # with -- the Dockerfile's `hub-build` stage is `FROM golang:1.22-bookworm` -- and
+        # being green on some other version would be green about a binary nobody ships.
+        # `1.20.x` is the floor `go.mod` states, and keeping it green is what stops a newer
+        # stdlib function or builtin from creeping in: `min` made it into one of these tests
+        # once, and this is the matrix entry that would have caught it.
+        go-version: ["1.20.x", "1.22.x"]
+    # The environment AGENTS.md documents for working on this tree, so CI and a laptop
+    # cannot disagree about how it builds. `GOPROXY: off` is the strictest of the four: the
+    # module has zero third-party dependencies and that is a property, not an accident --
+    # the image builds the same way -- so a future accidental import fails here instead of
+    # quietly resolving from the network.
+    env:
+      CGO_ENABLED: "1"
+      GOFLAGS: -mod=mod
+      GOPROXY: "off"
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go-version }}
+          # No dependency cache, because there are no dependencies: `go.mod` has no
+          # `require` block and nothing is fetched to key one on. The build is this
+          # repository's own thirty-odd files and recompiles from scratch in seconds.
+          cache: false
+
+      # `internal/sqlite` links the runtime library by its exact soname -- the binding's
+      # `#cgo LDFLAGS: -l:libsqlite3.so.0` -- and carries its own minimal `sqlite3_min.h`,
+      # so `libsqlite3-0` is the whole requirement and the `-dev` package is never needed.
+      # Installed rather than assumed from the runner image: what ubuntu-latest ships
+      # changes under us, and a missing `libsqlite3.so.0` fails as a link error naming a
+      # file nothing in the repository mentions.
+      - name: libsqlite3
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends libsqlite3-0
+
+      - name: vet
+        working-directory: hub-go
+        run: go vet ./...
+
+      # The same command AGENTS.md gives a human. It runs the golden comparison against
+      # `testdata/golden` -- generated once from the Python sources by `tools/gen_golden.py`
+      # and committed, which is why this job needs neither the uv environment nor the vendor
+      # tree the pytest job above has to fetch -- the job store's semantics against a real
+      # SQLite database, and the HTTP contract, the scheduler and the rendered pages against
+      # `httptest`. No benchmarks: `go test` will not run them without `-bench`, and a
+      # timing number on a shared runner is noise.
+      - name: test
+        working-directory: hub-go
+        run: go test ./... -timeout 5m
+
+      # The entry point the image's `CMD` runs. `go test` compiles every package but links
+      # them as a test binary; what the container needs is `amdhub`, and the cgo link
+      # through `main` is not the same link.
+      - name: build the binary the image ships
+        working-directory: hub-go
+        run: go build -trimpath -o /tmp/amdhub ./cmd/amdhub

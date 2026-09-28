@@ -123,6 +123,11 @@ cd hub-go && go build ./... && go test ./...  # the hub itself
 - **The hub is Go; the client is Python.** `hub-go/` owns everything except the Apple
   client, which is reached across a line-delimited JSON pipe by
   `hub-go/tools/pyworker.py`; do not reimplement the client or the vendor seam.
+- **`go.mod` states `go 1.20` and CI enforces the floor.** `.github/workflows/test.yml`
+  runs the Go suite on 1.20 and on 1.22 -- the image's `golang:1.22-bookworm` -- so a
+  1.21+ builtin like `min` cannot reach the tree unnoticed. The module keeps **zero
+  third-party dependencies**; the image and CI both build with `GOPROXY=off`, so an
+  accidental import fails the build instead of quietly resolving.
 - **Both `security_opt` values are mandatory** and `cap_add` must stay absent.
 - **No inline `style` or `<script>` in the Go hub's pages.** The CSP is
   `default-src 'self'` with no `unsafe-inline`, so the browser drops both -- a
