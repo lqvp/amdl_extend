@@ -46,7 +46,8 @@ func (s *State) handleLogin(w http.ResponseWriter, r *http.Request) {
 // logged-in user can get back to it.
 func (s *State) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	view := loginView{
-		baseView:  s.baseView(r, "Sign in · amd-hub"),
+		baseView:  s.baseView(r, "Sign in · amd-hub", ""),
+		BodyAttrs: `class="login"`,
 		Failed:    r.URL.Query().Get("error") != "",
 		Message:   auth.LoginFailed,
 		WrapperOK: fileExists(s.Settings.WrapperBinary),
@@ -159,9 +160,12 @@ func (s *State) handleStatic(w http.ResponseWriter, r *http.Request, params map[
 		fail(w, http.StatusNotFound, "no such asset.")
 		return
 	}
-	if strings.HasSuffix(served, ".css") {
+	switch {
+	case strings.HasSuffix(served, ".css"):
 		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	} else {
+	case strings.HasSuffix(served, ".svg"):
+		w.Header().Set("Content-Type", "image/svg+xml")
+	default:
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	}
 	_, _ = w.Write([]byte(asset))

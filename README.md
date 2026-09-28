@@ -171,6 +171,13 @@ object per line in each direction. Starting the client is what costs seconds -- 
 the HTTP client, `creart`'s process-global caches -- so the worker is started once and reused
 rather than per request.
 
+The UI is one stylesheet and about four hundred lines of JavaScript, both embedded in the binary
+alongside the templates. No framework, no build step, no webfont and no CDN: the CSP is
+`default-src 'self'` with no `unsafe-inline`, so everything a page needs has to come from the
+binary, and every action is a plain form post that works with scripting off. The live queue is the
+platform's own `EventSource`. Dark by default with a real light theme, status badges that carry the
+word as well as the colour, and an empty state for every list that can be empty.
+
 What the port buys is the hub's own hot paths, measured against the Python implementation doing
 the same work (`hub-go/tools/bench_compare.sh`, on a synthetic 3,315-album / 21,400-file library):
 

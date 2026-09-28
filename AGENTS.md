@@ -124,6 +124,16 @@ cd hub-go && go build ./... && go test ./...  # the hub itself
   client, which is reached across a line-delimited JSON pipe by
   `hub-go/tools/pyworker.py`; do not reimplement the client or the vendor seam.
 - **Both `security_opt` values are mandatory** and `cap_add` must stay absent.
+- **No inline `style` or `<script>` in the Go hub's pages.** The CSP is
+  `default-src 'self'` with no `unsafe-inline`, so the browser drops both -- a
+  rule written as a `style` attribute looks right in the template and does
+  nothing on the page. Styles live in `hub-go/internal/app/static/app.css`,
+  behaviour in `app.js`, and inline *SVG* is fine (it is markup, not script).
+  `TestThePagesCarryNoInlineStyleOrScript` holds it.
+- **`job_row.html` and `buildRow` in app.js are one row written twice.** The first
+  stream frame replaces every server-rendered row with one the browser built, so
+  the two have to stay in step; `TestTheScriptsRowBuilderAndTheRowTemplateUseTheSameNames`
+  checks the names they share.
 - **The Apple token DB is not on `/data`.** The launcher chroots *before*
   resolving `--base-dir`, so it needs the `wrapper-data` volume at
   `/opt/wrapper/rootfs/data`.

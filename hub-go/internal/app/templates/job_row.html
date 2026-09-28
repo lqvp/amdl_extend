@@ -1,56 +1,74 @@
 {{/*
   job_row.html -- one queue row.
 
-  The `detail` cell is the part that matters. For a skipped job it holds
-  `duplicate:` followed by root-qualified absolute paths joined with `|`, so that each
-  one opens -- a bare relpath does not resolve once more than one library root is
-  configured. The paths are rendered **verbatim and individually** rather than as the
-  raw `skip_reason` string: they are the only thing that makes a `loose` match
-  adjudicable by a human, since `loose` deliberately treats two same-named albums as
-  one release (that is what catches a collab fanned out across every credited artist's
-  folder -- 164 of the 223 duplicate album names in the real library -- and it is the
-  only thing that can also produce a false positive).
+  **The field names are the Go view's, not the JSON's.** `html/template` resolves
+  exported struct fields, so `.ID` and `.SkipPaths`; `.id` and `.skip_paths` parse and then
+  fail at execute -- and because an empty queue renders this template zero times, that
+  failure only appears once something is queued. `TestEveryPageRendersWithEveryKindOfRowInTheQueue`
+  is what holds it.
 
-  They come off the filesystem, so they are untrusted text: `html/template` escapes
-  them, and the `join("|")` is added back for display only, never taken apart.
+  **This row and `app.js`'s `buildRow` are the same row twice**, and they have to stay
+  that way: the browser rebuilds every row from JSON on the first stream frame, so a row
+  rendered here is replaced by one the script built moments later. The structure below is
+  therefore the structure `buildRow` appends, in the same order, with the same classes.
+
+  The `detail` cell is the part that matters. For a skipped job it holds `duplicate:`
+  followed by root-qualified absolute paths joined with `|`, so that each one opens -- a
+  bare relpath does not resolve once more than one library root is configured. The paths
+  are rendered **verbatim and individually** rather than as the raw `skip_reason` string:
+  they are the only thing that makes a `loose` match adjudicable by a human, since `loose`
+  deliberately treats two same-named albums as one release.
+
+  They come off the filesystem, so they are untrusted text: `html/template` escapes them,
+  the `|` split is display-only, and the copy button carries the path in a `data-`
+  attribute rather than in a script.
+
+  Colour is never the only signal: the badge says the status in words, and a failure is
+  underlined as well as red.
 */}}{{ define "job_row" }}
 <tr id="job-{{ .ID }}" data-job-id="{{ .ID }}"
-    class="status-{{ .Status }}"
+    class="status-{{ .Status }}{{ if eq .Status "running" }} is-running{{ end }}"
     data-finished="{{ if .Finished }}1{{ else }}0{{ end }}">
-  <td class="title">{{ if .Title }}{{ .Title }}{{ else }}(no title){{ end }}</td>
-  <td class="status-cell"><span class="status status-{{ .Status }}">{{ .Status }}</span></td>
-  <td class="num">{{ .Codec }}</td>
+  <td class="title">
+    <span class="name">{{ if .Title }}{{ .Title }}{{ else }}<span class="faint">(no title)</span>{{ end }}</span>
+  </td>
+  <td class="status-cell">
+    <span class="badge badge-{{ .Status }}">{{ .Status }}</span>
+  </td>
+  <td class="col-codec"><span class="chip">{{ .Codec }}</span></td>
   <td class="progress">
     {{ if .Progress }}
       <progress max="1" value="{{ .Progress }}"
-                title="{{ percent .Progress }}%"></progress>
+                aria-label="download progress"></progress><span class="percent">{{ percent .Progress }}%</span>
     {{ else if eq .Status "running" }}
-      <progress title="Working, but the total size is not known -- so no percentage. This is
-                   also what a music video looks like: that path reports no byte count."></progress>
+      <progress aria-label="working"></progress>
     {{ else }}
-      <span class="muted">&mdash;</span>
+      <span class="faint">&mdash;</span>
     {{ end }}
   </td>
   <td class="detail">
     {{ if and (eq .Status "skipped") .SkipPaths }}
-      <span class="muted">already on disk at</span>
+      <span class="muted small">already on disk at</span>
       <ul class="paths">
         {{ range .SkipPaths }}
-          <li><code>{{ . }}</code></li>
+          <li><code>{{ . }}</code><button type="button" class="copy" data-copy="{{ . }}"
+                aria-label="Copy this path">copy</button></li>
         {{ end }}
       </ul>
     {{ else if .Error }}
       <span class="error-text">{{ .Error }}</span>
     {{ else if .ParentURL }}
-      <a class="muted small" href="{{ .ParentURL }}" rel="noreferrer noopener">source</a>
+      <a class="source" href="{{ .ParentURL }}" rel="noreferrer noopener">source</a>
     {{ end }}
   </td>
-  <td class="num muted">{{ .ID }}</td>
+  <td class="num col-id id-cell">{{ .ID }}</td>
   <td class="actions">
     {{ if .Finished }}
-      <button type="button" data-action="job-retry" data-job-id="{{ .ID }}">Retry</button>
+      <button type="button" class="ghost small" data-action="job-retry"
+              data-job-id="{{ .ID }}">Retry</button>
     {{ else if eq .Status "queued" }}
-      <button type="button" data-action="job-cancel" data-job-id="{{ .ID }}">Cancel</button>
+      <button type="button" class="ghost small" data-action="job-cancel"
+              data-job-id="{{ .ID }}">Cancel</button>
     {{ end }}
   </td>
 </tr>

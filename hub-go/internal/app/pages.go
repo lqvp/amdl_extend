@@ -15,13 +15,23 @@ import (
 	"amdhub/internal/library"
 )
 
-// The templates and the two assets, embedded.
+// The templates and the three assets, embedded.
 //
 // **Embedded rather than read from disk**, which is a deployment decision: the binary
 // is the whole hub, so there is no "the templates are in the image but not next to the
 // binary" failure, and no working directory for a page to depend on. `app.js` in
 // particular is the client contract -- it reads the JSON shapes the API produces -- so
 // the two travel together.
+//
+// **These are the Go tree's own copies, and they are no longer the Python hub's files.**
+// They started as a port of `hub/hub/web/` and have since been redesigned here: a header
+// with a section nav and a stream indicator, status badges that carry the word as well as
+// the colour, a stat strip that shows every status (zeros included), per-root cards, empty
+// states, a library filter, and system-font typography. The Python tree keeps its copies,
+// which is right because the Python hub is no longer the entry point -- nothing serves
+// both, so nothing has to agree. What *does* have to agree is the row: `job_row.html` and
+// `app.js`'s `buildRow` are two renderings of one row, and
+// `TestTheScriptsRowBuilderAndTheRowTemplateUseTheSameNames` holds the shared names.
 //
 //go:embed templates/*.html static/*
 var assets embed.FS
@@ -30,7 +40,7 @@ var assets embed.FS
 var staticAssets = map[string]string{}
 
 func init() {
-	for _, name := range []string{"app.css", "app.js"} {
+	for _, name := range []string{"app.css", "app.js", "favicon.svg"} {
 		content, err := assets.ReadFile("static/" + name)
 		if err != nil {
 			panic(err)
@@ -78,16 +88,27 @@ var templates = func() map[string]*template.Template {
 	return sets
 }()
 
+// percent is the number under the progress bar, as a whole percent.
+//
+// **No decimal place, and it has to match `app.js` digit for digit.** The server renders the
+// bar and the first stream frame replaces that row with one the browser built: `42.0%`
+// becoming `42%` a moment after the page settles is a visible flicker for no information.
 func percent(fraction *float64) string {
 	if fraction == nil {
 		return ""
 	}
-	return strconv.FormatFloat(*fraction*100, 'f', 1, 64)
+	return strconv.FormatFloat(*fraction*100, 'f', 0, 64)
 }
 
 // baseView is what every page is given.
 type baseView struct {
-	Title         string
+	Title string
+	// Active is the section the page belongs to: "queue", "library", or "" for the pages
+	// that are in neither nav. It is what the header marks with `aria-current` -- and on
+	// the queue it is also what decides whether the stream indicator is rendered at all,
+	// since a "live" dot on the library page would be about a stream that page does not
+	// open.
+	Active        string
 	BodyAttrs     template.HTMLAttr
 	Authenticated bool
 }
@@ -98,6 +119,10 @@ type loginView struct {
 	Message   string
 	WrapperOK bool
 	Binary    string
+	// BodyAttrs shadows the promoted one and is always `class="login"`: the login page is
+	// the one page that styles `body` -- it centres the card and drops the page padding,
+	// because the header there carries no controls.
+	BodyAttrs template.HTMLAttr
 }
 
 // jobRowView is one row of the queue table, which is a *rendering* of a job rather
@@ -153,17 +178,27 @@ func isFinished(status string) bool {
 	return false
 }
 
+// countView is one stat in the strip above the queue.
 type countView struct {
 	Status string
 	Count  int
 }
 
-// rootView is one row of the library's per-root table, which is the shape that
-// answers the question a total cannot: *is each root actually contributing?*
-type rootView struct {
-	Path     string
-	Count    int
-	Degraded bool
+// queueCounts is every status in the store's own vocabulary, in a fixed order, and the
+// total last.
+//
+// **Every status, including the zeros, and in `jobs.AllStatuses`' order.** The first
+// version iterated the map `Counts` returns, which is two bugs at once: Go's map order is
+// randomised, so the strip reordered itself on every page load, and a status with no rows
+// was absent entirely -- so the strip reflowed as the queue moved, and "nothing has failed"
+// looked the same as "failed is not a thing this page shows". A zero is an answer.
+func queueCounts(counts map[string]int) []countView {
+	views := make([]countView, 0, len(jobs.AllStatuses)+1)
+	for _, status := range jobs.AllStatuses {
+		views = append(views, countView{Status: status, Count: counts[status]})
+	}
+	views = append(views, countView{Status: "total", Count: counts["total"]})
+	return views
 }
 
 // albumView is one album scope, with its absolute path.
@@ -181,16 +216,37 @@ type albumView struct {
 	Tracks  int    `json:"tracks"`
 }
 
-// rootRowView is one row of the library page's per-root table.
+// rootRowView is one root, as both pages show it: a count, and whether it could be read.
 //
 // Derived, because the API's shape is three *parallel* lists (`roots`, `per_root`, and
-// the subset in `degraded_roots`) and a template that walks them by index is where a
-// page silently shows one root's count against another root's path. The JSON keeps the
-// parallel shape -- it is the API's contract -- and this is what the table iterates.
+// the subset in `degraded_roots`) and a template that walks them by index is where a page
+// silently shows one root's count against another root's path. The JSON keeps the parallel
+// shape -- it is the API's contract -- and this is what both tables iterate.
+//
+// `Count == 0` is the state `Degraded` does not cover and the reason the count is on the
+// page at all: a drive that is not plugged in can be mounted and *empty*, which reads as a
+// healthy root with nothing in it.
 type rootRowView struct {
 	Path     string
 	Count    int
 	Degraded bool
+}
+
+// rootRows joins the three parallel lists into one row per root.
+func rootRows(summary LibrarySummary) []rootRowView {
+	rows := make([]rootRowView, 0, len(summary.Roots))
+	for index, root := range summary.Roots {
+		count := 0
+		if index < len(summary.PerRoot) {
+			count = summary.PerRoot[index]
+		}
+		rows = append(rows, rootRowView{
+			Path:     root,
+			Count:    count,
+			Degraded: containsString(summary.DegradedRoots, root),
+		})
+	}
+	return rows
 }
 
 // listingView is the library page and `/api/library/albums`, from one walk.
@@ -220,22 +276,11 @@ func listingFor(scan *library.Scan) listingView {
 	if view.DegradedRoots == nil {
 		view.DegradedRoots = []string{}
 	}
-	degraded := map[string]bool{}
-	for _, root := range view.DegradedRoots {
-		degraded[root] = true
-	}
-	for index, root := range view.Roots {
-		count := 0
-		if index < len(view.PerRoot) {
-			count = view.PerRoot[index]
-		}
-		view.RootRows = append(view.RootRows, rootRowView{
-			Path: root, Count: count, Degraded: degraded[root],
-		})
-	}
-	if view.RootRows == nil {
-		view.RootRows = []rootRowView{}
-	}
+	view.RootRows = rootRows(LibrarySummary{
+		Roots:         view.Roots,
+		DegradedRoots: view.DegradedRoots,
+		PerRoot:       view.PerRoot,
+	})
 
 	artists := map[string]bool{}
 	for _, album := range scan.Albums {
@@ -285,7 +330,7 @@ type queueView struct {
 	baseView
 	Wrapper wrapperView
 	Library LibrarySummary
-	Roots   []rootView
+	Roots   []rootRowView
 	Jobs    []jobRowView
 	Counts  []countView
 	Codecs  []string
@@ -320,8 +365,8 @@ func (s *State) render(w http.ResponseWriter, name string, view any) {
 	_, _ = w.Write(buffer.Bytes())
 }
 
-func (s *State) baseView(r *http.Request, title string) baseView {
-	return baseView{Title: title, Authenticated: s.authenticated(r)}
+func (s *State) baseView(r *http.Request, title, active string) baseView {
+	return baseView{Title: title, Active: active, Authenticated: s.authenticated(r)}
 }
 
 // handleQueuePage is the queue, with the wrapper's state and the library's
@@ -338,7 +383,7 @@ func (s *State) handleQueuePage(w http.ResponseWriter, r *http.Request) {
 	}
 	counts, _ := s.Counts()
 	view := queueView{
-		baseView: s.baseView(r, "Queue · amd-hub"),
+		baseView: s.baseView(r, "Queue · amd-hub", "queue"),
 		Wrapper:  s.WrapperState(r.Context()),
 		Library:  s.LibrarySummary(),
 		Codecs:   sortedKeys(Codecs),
@@ -347,20 +392,8 @@ func (s *State) handleQueuePage(w http.ResponseWriter, r *http.Request) {
 	for _, job := range all {
 		view.Jobs = append(view.Jobs, newJobRow(job))
 	}
-	for index, root := range view.Library.Roots {
-		view.Roots = append(view.Roots, rootView{
-			Path:     root,
-			Count:    view.Library.PerRoot[index],
-			Degraded: containsString(view.Library.DegradedRoots, root),
-		})
-	}
-	for status, count := range counts {
-		if status == "total" {
-			continue
-		}
-		view.Counts = append(view.Counts, countView{Status: status, Count: count})
-	}
-	view.Counts = append(view.Counts, countView{Status: "total", Count: counts["total"]})
+	view.Roots = rootRows(view.Library)
+	view.Counts = queueCounts(counts)
 	s.render(w, "queue", view)
 }
 
@@ -369,7 +402,7 @@ func (s *State) handleLibraryPage(w http.ResponseWriter, r *http.Request) {
 	scan := library.ScanRoots(s.Settings.LibraryRoots)
 	s.warnDegraded(scan)
 	s.render(w, "library", libraryPageView{
-		baseView: s.baseView(r, "Library · amd-hub"),
+		baseView: s.baseView(r, "Library · amd-hub", "library"),
 		Listing:  listingFor(scan),
 	})
 }

@@ -240,7 +240,14 @@ const LoginPath = "/login"
 // PublicStatic is the whole exception list for `/static`, and it is two files: the
 // login page has to be able to render without a session, and a login form with no
 // stylesheet and no script is a worse answer than a styled one.
-var PublicStatic = map[string]bool{"/static/app.css": true, "/static/app.js": true}
+var PublicStatic = map[string]bool{
+	"/static/app.css": true,
+	"/static/app.js":  true,
+	// The favicon is fetched by the browser before anyone has logged in -- on the login
+	// page itself, which is the one page a stranger can reach. A guarded favicon is a 401
+	// in the devtools console on every visit and a blank tab icon for ever.
+	"/static/favicon.svg": true,
+}
 
 // writeJSON writes one JSON body.
 func writeJSON(w http.ResponseWriter, status int, body any) {

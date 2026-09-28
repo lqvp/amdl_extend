@@ -1,76 +1,269 @@
 /* amd-hub
  *
- * No framework and no build step. The queue's live updates are the platform's
- * `EventSource`, and every other action is a plain form post, so the hub works with
- * scripting disabled -- which is the right default for something that runs on one person's
- * LAN behind whatever their router does to it.
+ * No framework, no build step, no webfont, no CDN. The CSP is
+ * `default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'` with no
+ * `unsafe-inline`, so every rule here has to arrive from this file and every glyph has to be
+ * something the platform can draw -- which is why the icons are inline SVG in the templates
+ * and shapes in CSS, and why the type stack is the system's.
  *
- * Dark by default with `prefers-color-scheme: light` as the alternative, because a page
- * that is white in a dark room at 2am is a page about a download that has been running for
- * two hours. Both are checked for contrast on the text colours used against the surfaces.
+ * **Dark by default, light on request.** A page that is white in a dark room at 2am is a
+ * page about a download that has been running for two hours; `prefers-color-scheme: light`
+ * is the alternative and it is a real theme rather than an inversion. `color-scheme` is set
+ * so the browser's own widgets -- the checkbox, the scrollbars, the progress bar -- follow.
+ *
+ * The palette is one hue family for the surfaces (a cool near-black to a slate), one accent,
+ * and three semantic colours. Status never depends on hue alone: every badge carries its
+ * name, and failure is underlined as well as red.
+ *
+ * Changes from the Python hub's stylesheet, which this was forked from: a header with a
+ * live indicator and an active nav; a stat strip instead of count pills; status badges
+ * rather than coloured text; a sticky table head in a scroll container; path chips with a
+ * copy button; a root card per library root; empty states; a filter on the library; a
+ * printable log; and mobile rules that drop columns instead of scrolling the page sideways.
  */
 
 :root {
-  --bg: #14161a;
-  --surface: #1c1f26;
-  --surface-2: #23262f;
-  --line: #31353f;
-  --text: #e6e8ec;
-  --muted: #9aa1ad;
+  color-scheme: dark light;
+
+  /* Surfaces, darkest to lightest. Three steps is enough for this page: the page, a card,
+   * and a control inside a card. */
+  --bg: #0f1216;
+  --surface: #171b21;
+  --surface-2: #1f242c;
+  --surface-3: #262c36;
+  --line: #2b323d;
+  --line-strong: #3a4350;
+
+  --text: #e7eaf0;
+  --muted: #9aa4b2;
+  --faint: #6b7484;
+
   --accent: #7aa2f7;
+  --accent-soft: #7aa2f71a;
+  --accent-ink: #0b0d12;
+
   --ok: #86c06c;
+  --ok-soft: #86c06c1a;
   --warn: #e0af68;
+  --warn-soft: #e0af681a;
   --bad: #f7768e;
-  --radius: 8px;
+  --bad-soft: #f7768e1a;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-pill: 999px;
+
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -16px rgb(0 0 0 / 0.6);
+  --ring: 0 0 0 3px var(--accent-soft);
+
+  --sans: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg: #f6f7f9;
+    --bg: #f4f6f9;
     --surface: #ffffff;
-    --surface-2: #eef0f4;
-    --line: #d8dce3;
-    --text: #1a1d23;
-    --muted: #5b6472;
+    --surface-2: #f1f3f7;
+    --surface-3: #e7eaf0;
+    --line: #dfe3ea;
+    --line-strong: #c6cdd8;
+
+    --text: #16191f;
+    --muted: #5a6473;
+    --faint: #838d9c;
+
     --accent: #2f5fd0;
+    --accent-soft: #2f5fd014;
+    --accent-ink: #ffffff;
+
     --ok: #2f7a1f;
+    --ok-soft: #2f7a1f12;
     --warn: #8a5a00;
+    --warn-soft: #8a5a0012;
     --bad: #b02a3f;
+    --bad-soft: #b02a3f12;
+
+    --shadow: 0 1px 2px rgb(16 22 32 / 0.06), 0 8px 24px -20px rgb(16 22 32 / 0.3);
   }
 }
 
-* { box-sizing: border-box; }
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
 
 body {
   margin: 0;
+  min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP",
-        sans-serif;
+  font: 15px/1.55 var(--sans);
+  text-rendering: optimizeLegibility;
 }
+
+/* The one decorative flourish, and it has to be faint: a barely-there wash at the top of
+ * the page so the header does not float on a flat rectangle. `background-attachment: fixed`
+ * would cost a repaint on every scroll, so it is a plain gradient on a fixed-height
+ * pseudo-element instead. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 340px;
+  pointer-events: none;
+  background: radial-gradient(120% 100% at 50% 0%, var(--accent-soft), transparent 70%);
+  z-index: 0;
+}
+
+a { color: var(--accent); text-underline-offset: 2px; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 0.05rem 0.3rem;
+}
+
+/* -- the bar ---------------------------------------------------------------- */
 
 .bar {
-  display: flex;
-  align-items: center;
-  gap: 1.25rem;
-  padding: 0.75rem 1.25rem;
-  background: var(--surface);
-  border-bottom: 1px solid var(--line);
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 1.25rem;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
 }
 
-.bar .brand { font-weight: 700; letter-spacing: 0.02em; text-decoration: none; color: var(--text); }
-.bar nav { display: flex; gap: 1rem; }
-.bar nav a { color: var(--muted); text-decoration: none; }
-.bar nav a:hover { color: var(--text); }
-.bar .logout { margin-left: auto; }
+/* Older browsers without `color-mix` get the solid bar rather than a transparent one. */
+@supports not (background: color-mix(in srgb, red 50%, blue)) {
+  .bar { background: var(--surface); }
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-decoration: none;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.brand .mark {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(160deg, var(--accent), color-mix(in srgb, var(--accent) 55%, var(--bad)));
+  color: var(--accent-ink);
+}
+
+@supports not (background: color-mix(in srgb, red 50%, blue)) {
+  .brand .mark { background: var(--accent); }
+}
+
+.brand .mark svg { width: 15px; height: 15px; display: block; }
+.brand .sub { color: var(--faint); font-weight: 400; font-size: 0.8rem; }
+
+.bar nav { display: flex; gap: 0.25rem; margin-left: 0.5rem; }
+
+.bar nav a {
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.bar nav a:hover { color: var(--text); background: var(--surface-2); }
+
+.bar nav a[aria-current="page"] {
+  color: var(--text);
+  background: var(--surface-3);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+
+/* Pushes everything after it to the end of a flex row, in the header, in a card head and
+ * in a toolbar alike -- one rule, so the four call sites cannot disagree. */
+.spacer { margin-left: auto; }
+
+/* The stream state, in the header rather than at the bottom of the queue card: it is the
+ * one thing on the page that can be *wrong* without anything looking wrong. */
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.live::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  box-shadow: 0 0 0 0 transparent;
+}
+
+.live[data-state="live"] { color: var(--ok); }
+.live[data-state="live"]::before {
+  background: var(--ok);
+  animation: pulse 2.4s ease-out infinite;
+}
+.live[data-state="reconnecting"] { color: var(--warn); }
+.live[data-state="reconnecting"]::before { background: var(--warn); }
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 var(--ok-soft); }
+  70% { box-shadow: 0 0 0 7px transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+.bar .logout { margin: 0; }
+button.link {
+  background: none;
+  border: 0;
+  padding: 0.3rem 0.5rem;
+  margin: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+button.link:hover { color: var(--text); background: var(--surface-2); }
+
+/* -- the page --------------------------------------------------------------- */
 
 main {
+  position: relative;
+  z-index: 1;
   max-width: 68rem;
   margin: 0 auto;
-  padding: 1.25rem;
+  padding: 1.25rem 1.25rem 4rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -80,188 +273,607 @@ main {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 1rem 1.25rem;
+  padding: 1.1rem 1.25rem 1.25rem;
+  box-shadow: var(--shadow);
 }
 
-.card.narrow { max-width: 26rem; margin: 3rem auto; }
-.card h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
-.card h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+.card > :first-child { margin-top: 0; }
+.card > :last-child { margin-bottom: 0; }
 
-label { display: block; margin: 0.6rem 0 0.2rem; font-size: 0.85rem; color: var(--muted); }
-label.inline { display: inline-flex; align-items: center; gap: 0.35rem; margin: 0; }
+.card h1 { font-size: 1.3rem; margin: 0 0 0.35rem; letter-spacing: -0.01em; }
+.card h2 { font-size: 1.05rem; margin: 0 0 0.6rem; letter-spacing: -0.01em; }
 
-input, select, textarea {
-  width: 100%;
-  padding: 0.45rem 0.6rem;
-  background: var(--surface-2);
-  color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  font: inherit;
+/* A card heading with something on its right -- a badge, a button, a count. */
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
 }
+.card-head > h1,
+.card-head > h2 { margin: 0; }
 
-input[type="checkbox"] { width: auto; }
+.card.narrow { max-width: 25rem; margin: 4rem auto; }
+.card.plain { box-shadow: none; }
 
-button {
-  margin-top: 0.75rem;
-  padding: 0.45rem 0.9rem;
-  background: var(--accent);
-  color: #0b0d12;
-  border: 0;
-  border-radius: 6px;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-button:hover { filter: brightness(1.08); }
-button.link { background: none; color: var(--muted); margin: 0; font-weight: 400; padding: 0; }
-button.link:hover { color: var(--text); }
-
-.row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
-.row > label { margin: 0; }
-.row input, .row select { width: auto; min-width: 8rem; }
+/* Coloured cards carry a tinted top edge rather than a tinted background: a tint over a
+ * whole card fights the badge colours inside it. */
+.card.tinted { border-top: 2px solid var(--line-strong); }
+.card.tinted-ok { border-top-color: var(--ok); }
+.card.tinted-warn { border-top-color: var(--warn); }
+.card.tinted-bad { border-top-color: var(--bad); }
 
 .muted { color: var(--muted); }
+.faint { color: var(--faint); }
 .small { font-size: 0.82rem; }
+.mono { font-family: var(--mono); }
 .error, .error-text { color: var(--bad); }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
+.hint {
+  margin: 0.6rem 0 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+  max-width: 60ch;
+}
+.stack { display: flex; flex-direction: column; gap: 0.5rem; }
+.inline { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.right { margin-left: auto; }
 
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; }
+/* -- badges ----------------------------------------------------------------- */
 
-pre#log {
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.1rem 0.55rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.badge::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.badge.plain::before { display: none; }
+
+.badge-queued { color: var(--muted); }
+.badge-waiting { color: var(--warn); border-color: var(--warn-soft); }
+.badge-running { color: var(--accent); border-color: var(--accent-soft); }
+.badge-done { color: var(--ok); border-color: var(--ok-soft); }
+.badge-skipped { color: var(--warn); border-color: var(--warn-soft); }
+.badge-failed,
+.badge-cancelled { color: var(--bad); border-color: var(--bad-soft); }
+
+.badge-ok { color: var(--ok); border-color: var(--ok-soft); }
+.badge-warn { color: var(--warn); border-color: var(--warn-soft); }
+.badge-bad { color: var(--bad); border-color: var(--bad-soft); }
+
+/* -- controls --------------------------------------------------------------- */
+
+label {
+  display: block;
+  margin: 0.7rem 0 0.25rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+
+label.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
   margin: 0;
-  max-height: 16rem;
-  overflow: auto;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+input:hover,
+select:hover,
+textarea:hover { border-color: var(--line-strong); }
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--ring);
+}
+
+::placeholder { color: var(--faint); }
+
+textarea {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  line-height: 1.6;
+  resize: vertical;
+  min-height: 5.5rem;
+}
+
+input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+select { cursor: pointer; }
+
+button {
+  margin: 0;
+  padding: 0.5rem 1rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+button:hover { filter: brightness(1.08); }
+button:active { filter: brightness(0.95); }
+button[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+button.ghost {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--line-strong);
+  font-weight: 500;
+}
+button.ghost:hover { background: var(--surface-3); filter: none; }
+
+button.danger {
+  background: var(--bad);
+  color: var(--accent-ink);
+}
+
+button.small { padding: 0.25rem 0.6rem; font-size: 0.82rem; border-radius: 6px; }
+
+/* A row of controls that wraps rather than overflowing, and whose inputs do not try to be
+ * full width just because a lone input does. */
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+.controls .field { display: flex; flex-direction: column; min-width: 8rem; }
+.controls .field > label { margin: 0 0 0.25rem; }
+.controls .field input,
+.controls .field select { width: auto; min-width: 8rem; }
+.controls .grow { flex: 1 1 12rem; }
+.controls .grow input { width: 100%; }
+.controls .check { padding-bottom: 0.55rem; }
+.controls button { padding-bottom: 0.55rem; }
+.controls.spaced { margin-bottom: 0.75rem; }
+.row.spaced { margin-top: 0.75rem; }
+
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; }
+
+/* -- stat strip -------------------------------------------------------------- */
+
+.stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 0.9rem;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.05rem;
+  min-width: 4.5rem;
+  padding: 0.4rem 0.6rem;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.6rem;
-  font-size: 0.8rem;
-  white-space: pre-wrap;
-  word-break: break-word;
+  border-radius: var(--radius-sm);
+}
+
+.stat-n {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.stat-l {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The colour of a count is the colour of the rows it counts, which is one fewer thing to
+ * learn -- and the label says which one it is, so the colour is never load-bearing. */
+.stat[data-status="failed"] .stat-n,
+.stat[data-status="cancelled"] .stat-n { color: var(--bad); }
+.stat[data-status="running"] .stat-n { color: var(--accent); }
+.stat[data-status="queued"] .stat-n,
+.stat[data-status="waiting"] .stat-n { color: var(--text); }
+.stat[data-status="done"] .stat-n { color: var(--ok); }
+.stat[data-status="skipped"] .stat-n { color: var(--warn); }
+.stat[data-status="albums"] .stat-n { color: var(--text); }
+.stat[data-status="artists"] .stat-n { color: var(--text); }
+.stat[data-status="roots"] .stat-n { color: var(--text); }
+.stat[data-status="total"] .stat-n { color: var(--muted); }
+
+/* A zero is an answer -- which is why every status is on the page -- but a red zero is
+ * noise. An empty count is dimmed whatever its status says. */
+.stat[data-zero] .stat-n { color: var(--faint); font-weight: 600; }
+
+/* -- the queue table -------------------------------------------------------- */
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
 }
 
 table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
-td.actions { white-space: nowrap; }
-td.actions button { margin: 0; padding: 0.2rem 0.5rem; font-size: 0.8rem; }
 
-.status { font-weight: 600; }
-.status-queued .status { color: var(--muted); }
-.status-waiting .status { color: var(--warn); }
-.status-running .status { color: var(--accent); }
-.status-done .status { color: var(--ok); }
-.status-skipped .status { color: var(--warn); }
-.status-failed .status, .status-cancelled .status { color: var(--bad); }
+th,
+td {
+  text-align: left;
+  padding: 0.55rem 0.7rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
 
-progress { width: 8rem; height: 0.5rem; }
-
-.paths { margin: 0.25rem 0 0; padding-left: 1.1rem; }
-.paths li { word-break: break-all; }
-
-.roots { margin: 0.4rem 0; padding-left: 1.1rem; }
-.roots li.bad { color: var(--bad); }
-
-.pill {
-  display: inline-block;
-  margin-right: 0.35rem;
-  padding: 0.05rem 0.45rem;
+th {
   background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+tbody tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: var(--surface-2); }
+
+td.num,
+th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+td.title { min-width: 12rem; }
+td.title .name { font-weight: 500; }
+td.detail { min-width: 20rem; }
+td.actions { white-space: nowrap; text-align: right; }
+td.actions button { margin: 0; }
+
+/* The id is a handle for the log, not something anyone reads down the column. */
+td.id-cell { color: var(--faint); font-family: var(--mono); font-size: 0.8rem; }
+
+tr.is-running td { background: var(--accent-soft); }
+tr.is-running td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+
+/* -- progress ---------------------------------------------------------------- */
+
+progress {
+  width: 7.5rem;
+  height: 0.45rem;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-3);
+  overflow: hidden;
+  vertical-align: middle;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+progress::-webkit-progress-bar { background: var(--surface-3); border-radius: var(--radius-pill); }
+progress::-webkit-progress-value { background: var(--accent); border-radius: var(--radius-pill); }
+progress::-moz-progress-bar { background: var(--accent); border-radius: var(--radius-pill); }
+
+/* No `value`, so the platform cannot tell how far along it is: a music video reports no
+ * byte count at all. A striped, animated bar says "working" without claiming a fraction. */
+progress:not([value]) {
+  background: repeating-linear-gradient(
+    90deg, var(--surface-3) 0 10px, var(--surface-2) 10px 20px);
+}
+progress:not([value])::-webkit-progress-bar {
+  background: repeating-linear-gradient(
+    90deg, var(--surface-3) 0 10px, var(--surface-2) 10px 20px);
+}
+
+.percent {
+  margin-left: 0.4rem;
   font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
   color: var(--muted);
 }
 
-/* -- the queue, read at a glance ------------------------------------------------
- *
- * A queue that only grows is a queue you scroll. Three things keep it readable: the
- * counts above the table, so the state is knowable without reading it; the two bulk
- * controls, because there is otherwise no way to remove a row at all; and collapsing
- * the finished ones, which on a busy library are almost all of them.
- *
- * `status-*` colours are on the cell rather than the row because the row background is
- * how a selection would read, and this table has no selection.
- */
+/* -- paths and details ------------------------------------------------------- */
 
-.summary {
+.paths {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 0 0 0.75rem;
+  flex-direction: column;
+  gap: 0.2rem;
 }
 
-.count {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.3rem;
-  padding: 0.15rem 0.5rem;
+.paths li {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  word-break: break-all;
+}
+
+.paths code { background: none; border: 0; padding: 0; color: var(--muted); }
+
+.copy {
+  flex: none;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.7rem;
+  font-weight: 500;
+  background: var(--surface-2);
+  color: var(--muted);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 5px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+tr:hover .copy,
+.copy:focus-visible { opacity: 1; }
+.copy[data-copied="1"] { color: var(--ok); border-color: var(--ok); opacity: 1; }
+
+.source {
   font-size: 0.8rem;
   color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--line-strong);
+}
+.source:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+.chip {
+  display: inline-block;
+  padding: 0.02rem 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: 5px;
   background: var(--surface-2);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.76rem;
 }
 
-.count-n { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+/* -- empty states ------------------------------------------------------------ */
 
-/* The counts are ordered by status name, so the eye cannot rely on position. A count
- * worth noticing gets the colour its rows use, which is one fewer thing to learn. */
-.count[data-count="failed"] .count-n,
-.count[data-count="cancelled"] .count-n { color: var(--bad); }
-.count[data-count="running"] .count-n { color: var(--accent); }
-.count[data-count="queued"] .count-n,
-.count[data-count="waiting"] .count-n { color: var(--muted); }
-.count[data-count="done"] .count-n,
-.count[data-count="skipped"] .count-n { color: var(--ok); }
+.empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.empty strong { display: block; color: var(--text); font-size: 1rem; margin-bottom: 0.15rem; }
 
-.row.bulk { margin: 0 0 0.4rem; }
-.row.bulk .inline-form { display: inline-flex; align-items: center; gap: 0.4rem; }
-.row.bulk .inline-form label { margin: 0; }
+/* -- the log ----------------------------------------------------------------- */
 
-/* Both of these set a `background` of their own rather than only a `color`. The base
- * `button` is a filled `var(--accent)`, so a rule that recoloured the label alone painted it
- * onto that fill -- and at `var(--accent)` on `var(--accent)` the label disappeared, which is
- * what the first screenshot of this page showed. The pressed state is an *inset* button
- * rather than a tint, because a tint of a filled button is the same colour as the button. */
-button.danger { background: var(--bad); color: #0b0d12; }
-button.danger:hover { filter: brightness(1.08); }
-
-[data-action="queue-toggle-finished"][aria-pressed="true"] {
+pre#log {
+  margin: 0;
+  max-height: 18rem;
+  overflow: auto;
   background: var(--surface-2);
-  color: var(--text);
-  border: 1px solid var(--accent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.8rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
 }
 
-/* The status cell carries the weight as well as the colour, so the state is legible
- * without relying on hue -- which is the one thing a colour-only signal gets wrong. */
-.status { font-weight: 600; }
-.status-running { font-weight: 700; }
-.status-failed, .status-cancelled { text-decoration: underline; text-decoration-thickness: 1px; }
+pre#log:empty::before { content: "nothing yet"; color: var(--faint); }
 
-/* The two status cards are <details>, so they are closed when there is nothing to say.
- * A closed card is one line; the marker is styled rather than removed so it still reads
- * as expandable. */
+/* -- details cards ----------------------------------------------------------- */
+
 details.card > summary {
   cursor: pointer;
   list-style: none;
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
+
 details.card > summary::-webkit-details-marker { display: none; }
+
 details.card > summary::before {
-  content: "▸";
-  color: var(--muted);
-  font-size: 0.8rem;
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid var(--muted);
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 120ms ease;
 }
-details.card[open] > summary::before { content: "▾"; }
-details.card > summary h1, details.card > summary h2 { margin: 0; }
-details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--accent); }
+
+details.card[open] > summary::before { transform: rotate(90deg) translateX(1px); }
+details.card > summary h1,
+details.card > summary h2 { margin: 0; }
+details.card > summary:hover h1,
+details.card > summary:hover h2 { color: var(--accent); }
+details.card[open] > summary { margin-bottom: 0.6rem; }
+
+/* -- roots ------------------------------------------------------------------- */
+
+.roots {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+}
+
+.root {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.root .root-n {
+  font-size: 1.2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 2.2rem;
+}
+
+.root .root-body { min-width: 0; }
+.root .root-path {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--text);
+  word-break: break-all;
+}
+.root .root-note { font-size: 0.78rem; color: var(--muted); }
+.root.bad { border-color: var(--bad); background: var(--bad-soft); }
+.root.bad .root-n { color: var(--bad); }
+.root.empty-root .root-n { color: var(--warn); }
+
+/* -- tables of albums -------------------------------------------------------- */
+
+.filter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+}
+.filter input { max-width: 22rem; }
+
+.filter-empty { display: none; }
+.filter-empty[data-shown="1"] { display: block; }
+
+/* -- the login page ---------------------------------------------------------- */
+
+body.login main { padding-top: 0; }
+
+body.login .card { padding: 1.6rem 1.5rem; }
+body.login h1 { font-size: 1.4rem; }
+
+.lockup {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.9rem;
+}
+
+.lockup .mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: linear-gradient(160deg, var(--accent), color-mix(in srgb, var(--accent) 55%, var(--bad)));
+  color: var(--accent-ink);
+}
+
+@supports not (background: color-mix(in srgb, red 50%, blue)) {
+  .lockup .mark { background: var(--accent); }
+}
+
+.lockup .mark svg { width: 19px; height: 19px; display: block; }
+
+body.login button[type="submit"] { width: 100%; margin-top: 1rem; padding: 0.6rem 1rem; }
+
+.notice {
+  margin: 1rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--warn-soft);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--radius-sm);
+  background: var(--warn-soft);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.notice.error { border-color: var(--bad-soft); border-left-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+
+/* -- responsive -------------------------------------------------------------- */
+
+@media (max-width: 760px) {
+  main { padding: 1rem 0.85rem 3rem; }
+  .bar { padding: 0.55rem 0.85rem; gap: 0.6rem; flex-wrap: wrap; }
+  .bar nav { margin-left: 0; }
+  .brand .sub { display: none; }
+  .card { padding: 1rem; }
+
+  /* Columns go rather than the page scrolling sideways. The codec is in the detail cell's
+   * chip on these widths, and the id is a handle for the log. */
+  th.col-codec, td.col-codec,
+  th.col-id, td.col-id { display: none; }
+
+  td.detail { min-width: 12rem; }
+  progress { width: 5rem; }
+  .controls .field { min-width: 6.5rem; }
+  .controls .field input,
+  .controls .field select { min-width: 6.5rem; }
+}
+
+@media (hover: none) {
+  .copy { opacity: 1; }
+}
+
+@media (max-width: 520px) {
+  td.title { min-width: 8rem; }
+  .stats .stat { min-width: 4.25rem; flex: 1 1 auto; }
+}
+
+/* -- print ------------------------------------------------------------------- */
+
+@media print {
+  body::before, .bar, .copy, td.actions, .controls button { display: none; }
+  body { background: #fff; color: #000; }
+  .card { box-shadow: none; border-color: #ccc; break-inside: avoid; }
+  pre#log { max-height: none; }
+}
+
+/* -- motion ------------------------------------------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
 
 /* `row.hidden = true` relies on the UA's `[hidden] { display: none }`, and a `<tr>` is
  * exactly the element where that is unreliable: a single author rule giving `tr` a display

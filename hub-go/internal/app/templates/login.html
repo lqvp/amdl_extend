@@ -8,14 +8,26 @@
 
   The failure message is `Wrong password.` and nothing else. It is the same string for
   an empty field, a wrong password and a body that was not a form at all, because the
-  hub has one secret and there is nothing to narrow down. See hub/auth.py.
+  hub has one secret and there is nothing to narrow down. See hub/auth.go.
+
+  The card is centred and the header is empty on purpose: this is the whole page, and it
+  is the one page where the user has nothing else to look at. `autofocus` is on the
+  password field because there is exactly one thing to type.
 */}}{{ define "content" }}
 <section class="card narrow">
-  <h1>Sign in</h1>
-  <p class="muted">This hub has one shared password. There are no accounts.</p>
+  <div class="lockup">
+    <span class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+           stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/>
+      </svg>
+    </span>
+    <h1>Sign in</h1>
+  </div>
+  <p class="muted small">This hub has one shared password. There are no accounts.</p>
 
   {{ if .Failed }}
-    <p class="error" role="alert">{{ .Message }}</p>
+    <p class="notice error" role="alert">{{ .Message }}</p>
   {{ end }}
 
   <form method="post" action="/login">
@@ -26,9 +38,9 @@
   </form>
 
   {{ if not .WrapperOK }}
-    <p class="warn">
-      The wrapper launcher is not at <code>{{ .Binary }}</code>, so downloads cannot
-      start until it is. The login page still works.
+    <p class="notice">
+      The wrapper launcher is not at <code>{{ .Binary }}</code>, so downloads cannot start
+      until it is. The login page still works.
     </p>
   {{ end }}
 </section>

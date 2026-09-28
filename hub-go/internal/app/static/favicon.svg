@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
+     role="img" aria-label="amd-hub">
+  <rect width="64" height="64" rx="16" fill="#7aa2f7"/>
+  <g fill="none" stroke="#0f1216" stroke-width="6" stroke-linecap="round"
+     stroke-linejoin="round">
+    <path d="M32 14v26"/>
+    <path d="m21 30 11 11 11-11"/>
+    <path d="M18 51h28"/>
+  </g>
+</svg>

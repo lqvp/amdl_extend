@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -409,24 +411,208 @@ func TestEveryPageRendersWithEveryKindOfRowInTheQueue(t *testing.T) {
 	_, body := get(t, server, "/queue", cookies)
 	for _, marker := range []string{
 		`<tr id="job-` + strconv.FormatInt(result.Created[0], 10) + `"`,
-		`class="status status-skipped"`,
-		`class="status status-failed"`,
-		`class="status status-running"`,
-		`class="status status-done"`,
-		`/library/Artist/Album/01 x.m4a`, // the matched path, individually
-		`/library/Artist/Album/02 y.m4a`, // ...and the second one
-		"ResolveError",                   // the failure's own text
-		"a line for the log pane",        // the log pane's backlog
-		`value="0.42"`,                   // a known fraction, not a pointer address
+		// A status is a badge that carries the word as well as the colour: colour alone is
+		// the one signal a reader who cannot separate red from green does not get.
+		`class="badge badge-skipped">skipped</span>`,
+		`class="badge badge-failed">failed</span>`,
+		`class="badge badge-running">running</span>`,
+		`class="badge badge-done">done</span>`,
+		`class="badge badge-queued">queued</span>`,
+		`/library/Artist/Album/01 x.m4a`,             // the matched path, individually
+		`/library/Artist/Album/02 y.m4a`,             // ...and the second one
+		`data-copy="/library/Artist/Album/01 x.m4a"`, // ...with the path as an attribute
+		"ResolveError",            // the failure's own text
+		"a line for the log pane", // the log pane's backlog
+		`value="0.42"`,            // a known fraction, not a pointer address
+		`aria-current="page"`,     // the section nav marks where we are
+		`id="queue-empty" hidden`, // a full queue does not claim to be empty
 	} {
 		if !strings.Contains(body, marker) {
 			t.Errorf("the queue page is missing %q", marker)
 		}
 	}
-	// The count pills come from the store, so the summary has to agree with the rows.
-	for _, status := range []string{"queued", "running", "skipped", "failed", "done"} {
-		if !strings.Contains(body, `data-count="`+status+`"`) {
+
+	// The stat strip is every status in the store's vocabulary, zeros included, so it cannot
+	// disagree with the rows and cannot reorder itself between two loads.
+	for _, status := range jobs.AllStatuses {
+		if !strings.Contains(body, `data-status="`+status+`"`) {
 			t.Errorf("the summary has no count for %q", status)
+		}
+	}
+	if !strings.Contains(body, `data-status="total"`) {
+		t.Error("the summary has no total")
+	}
+}
+
+func TestAnEmptyQueueSaysSoRatherThanRenderingNothing(t *testing.T) {
+	_, server := testServer(t)
+	_, cookies := login(t, server, "hunter2")
+
+	_, body := get(t, server, "/queue", cookies)
+	if strings.Contains(body, `id="queue-empty" hidden`) {
+		t.Error("an empty queue must not hide its empty state")
+	}
+	if !strings.Contains(body, "Nothing queued") {
+		t.Errorf("the empty queue state is missing: %s", body)
+	}
+}
+
+func TestThePagesCarryNoInlineStyleOrScript(t *testing.T) {
+	// **The CSP is `default-src 'self'` with no `unsafe-inline`.** An inline `style`
+	// attribute is not merely untidy here: it is silently dropped by the browser, so a rule
+	// written that way looks right in the template and does nothing on the page. An inline
+	// `<script>` is dropped the same way, which would take the live queue with it.
+	state, server := testServer(t)
+	_, cookies := login(t, server, "hunter2")
+	if _, err := state.Store.CreateBatch("https://music.apple.com/jp/album/1", "album",
+		[]jobs.Leaf{{AdamID: "1", Title: "T", Codec: "alac", Language: "jp",
+			URL: "https://music.apple.com/jp/album/1", Storefront: "jp"}}, false); err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+
+	for _, path := range []string{"/queue", "/library", "/login"} {
+		_, body := get(t, server, path, cookies)
+		if strings.Contains(body, " style=") || strings.Contains(body, "<style") {
+			t.Errorf("%s carries an inline style, which the CSP drops", path)
+		}
+		if strings.Contains(body, "<script>") || strings.Contains(body, "onclick=") {
+			t.Errorf("%s carries inline script, which the CSP drops", path)
+		}
+	}
+}
+
+func TestTheShellMarksTheSectionAndHidesItsControlsOnTheLoginPage(t *testing.T) {
+	_, server := testServer(t)
+	_, cookies := login(t, server, "hunter2")
+
+	_, queue := get(t, server, "/queue", cookies)
+	if !strings.Contains(queue, `<a href="/queue" aria-current="page">Queue</a>`) {
+		t.Error("the queue page does not mark Queue as the current section")
+	}
+	if !strings.Contains(queue, `id="stream-state"`) {
+		t.Error("the queue page has no stream indicator: a stream that died looks like a queue " +
+			"where nothing is happening")
+	}
+
+	_, library := get(t, server, "/library", cookies)
+	if !strings.Contains(library, `<a href="/library" aria-current="page">Library</a>`) {
+		t.Error("the library page does not mark Library as the current section")
+	}
+	if strings.Contains(library, `id="stream-state"`) {
+		t.Error("the library page renders a stream indicator for a stream it does not open")
+	}
+
+	// Not signed in: no nav and no logout, because neither can work for someone who is not
+	// in yet -- and the login page is the one page a stranger reaches.
+	_, login := get(t, server, "/login", nil)
+	if !strings.Contains(login, `<body class="login">`) {
+		t.Error("the login page does not carry its body class")
+	}
+	if strings.Contains(login, "Log out") || strings.Contains(login, `<a href="/queue"`) {
+		t.Error("the login page shows controls that cannot work without a session")
+	}
+	if !strings.Contains(login, `rel="icon"`) {
+		t.Error("the login page is missing the favicon, which the browser asks for first")
+	}
+}
+
+func TestFaviconIsPublicAndTypedAsAnImage(t *testing.T) {
+	_, server := testServer(t)
+	resp, body := get(t, server, "/static/favicon.svg", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the favicon must load without a session: %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
+		t.Errorf("favicon content type: %q", got)
+	}
+	if !strings.HasPrefix(body, "<svg") {
+		t.Errorf("the favicon is not an svg: %q", firstFew(body, 40))
+	}
+}
+
+func TestTheLibraryPageCountsEveryRootAndWarnsAboutAnEmptyOne(t *testing.T) {
+	// **The count is the point.** A drive that is not plugged in can be mounted and empty,
+	// which reads as a perfectly healthy root with nothing in it -- so the page has to show
+	// the number and let a human notice a zero, and a root that cannot be read at all has to
+	// look different from one that is merely empty.
+	root := t.TempDir()
+	for _, album := range []string{"Artist/Album A", "Album B"} {
+		dir := filepath.Join(root, album)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "01 track.flac"), []byte("x"), 0o644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	empty := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "not-mounted")
+
+	t.Setenv("AMD_PASSWORD", "hunter2")
+	t.Setenv("AMD_LIBRARY_ROOTS", root+","+empty+","+missing)
+	t.Setenv("AMD_DB_PATH", t.TempDir()+"/hub.db")
+	t.Setenv("AMD_WRAPPER_BINARY", t.TempDir()+"/no-such-wrapper")
+	settings, err := config.Load(nil)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	state, err := New(settings)
+	if err != nil {
+		t.Fatalf("app.New: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		state.Close(ctx)
+	})
+	server := httptest.NewServer(NewRouter(state))
+	t.Cleanup(server.Close)
+	_, cookies := login(t, server, "hunter2")
+
+	resp, body := get(t, server, "/library", cookies)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("library: %d %s", resp.StatusCode, body)
+	}
+	for _, marker := range []string{
+		`<span class="stat-n">2</span>`, // two albums found
+		`<span class="stat-n">3</span>`, // three roots configured
+		`<span class="root-path">` + root + `</span>`,
+		`<span class="root-n">2</span>`, // the readable root's count
+		`class="root bad"`,              // the root that is not there
+		`not readable`,
+		`class="root empty-root"`, // the root that is there and empty
+		`empty &mdash; is this mounted?`,
+		`data-filter="albums"`, // the filter, which is progressive
+		`<code>` + filepath.Join(root, "Album B") + `</code>`,
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("the library page is missing %q", marker)
+		}
+	}
+}
+
+func TestTheScriptsRowBuilderAndTheRowTemplateUseTheSameNames(t *testing.T) {
+	// The browser rebuilds every row from JSON on the first stream frame, so the row the
+	// server rendered is replaced by one `buildRow` made moments later. Two renderings of one
+	// row means two places to change, and this is the check that they still agree --
+	// the same one the Python suite keeps for its own pair.
+	script, err := os.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read app.js: %v", err)
+	}
+	template, err := os.ReadFile("templates/job_row.html")
+	if err != nil {
+		t.Fatalf("read job_row.html: %v", err)
+	}
+	for _, shared := range []string{
+		"badge badge-", "chip", "paths", "copy", "is-running", "id-cell",
+		"data-finished", "job-retry", "job-cancel", "percent",
+	} {
+		if !strings.Contains(string(script), shared) {
+			t.Errorf("app.js no longer builds %q, which the row template renders", shared)
+		}
+		if !strings.Contains(string(template), shared) {
+			t.Errorf("job_row.html no longer renders %q, which buildRow builds", shared)
 		}
 	}
 }
@@ -555,4 +741,14 @@ func (f *frameReader) next(t *testing.T, timeout time.Duration) (string, error) 
 	case <-time.After(timeout):
 		return "", context.DeadlineExceeded
 	}
+}
+
+// firstFew is a prefix of `value` for an error message, because a whole svg (or a whole
+// page) in a failure line is unreadable. `min` is built in from Go 1.21 and this module
+// targets 1.20.
+func firstFew(value string, count int) string {
+	if len(value) <= count {
+		return value
+	}
+	return value[:count]
 }

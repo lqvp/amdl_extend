@@ -21,34 +21,64 @@
   A skipped row shows its matched paths verbatim: `loose` matching is deliberately
   willing to treat two same-named albums as one, and those paths are the only thing a
   human has to overrule it with.
+
+  The empty state is a permanent element toggled by `hidden`, not something the template
+  renders conditionally: the stream can empty a queue that arrived full, and a
+  server-rendered comment would be the one part of the page nothing updates.
 */}}{{ define "content" }}
 <section class="card">
-  <h2>Queue something</h2>
+  <div class="card-head">
+    <h2>Queue something</h2>
+    <span class="badge plain muted small">album · playlist · artist · song · music video</span>
+  </div>
   <form id="enqueue" method="post" action="/enqueue">
     <label for="urls">Apple Music links</label>
     <textarea id="urls" name="urls" rows="3" required
               placeholder="https://music.apple.com/jp/album/...&#10;https://music.apple.com/jp/song/..."></textarea>
-    <div class="row">
-      <label for="codec">Codec</label>
-      <select id="codec" name="codec">
-        {{ range .Codecs }}
-          <option value="{{ . }}"{{ if eq . "alac" }} selected{{ end }}>{{ . }}</option>
-        {{ end }}
-      </select>
-      <label for="language">Language</label>
-      <input id="language" name="language" placeholder="from the client's own config">
-      <label class="inline"><input type="checkbox" name="force" value="1"> force</label>
+    <div class="controls">
+      <span class="field">
+        <label for="codec">Codec</label>
+        <select id="codec" name="codec">
+          {{ range .Codecs }}
+            <option value="{{ . }}"{{ if eq . "alac" }} selected{{ end }}>{{ . }}</option>
+          {{ end }}
+        </select>
+      </span>
+      <span class="field grow">
+        <label for="language">Language</label>
+        <input id="language" name="language" placeholder="from the client's own config">
+      </span>
+      <span class="check">
+        <label class="inline" for="force">
+          <input type="checkbox" id="force" name="force" value="1">
+          Re-download even if it is on disk
+        </label>
+      </span>
+      <button type="submit">Queue</button>
     </div>
-    <button type="submit">Queue</button>
   </form>
-  <p class="error" id="enqueue-error" role="alert" hidden></p>
+  <p class="hint">
+    One link per line. Whether a track is already on disk is decided when it runs, against
+    the library as it is then -- the paths that matched are shown in the row.
+  </p>
+  <p class="notice error" id="enqueue-error" role="alert" hidden></p>
 </section>
 
-<details class="card" id="wrapper-state"
+<details class="card{{ if eq .Wrapper.Problem "unavailable" }} tinted tinted-bad{{ else if eq .Wrapper.Problem "no-account" }} tinted tinted-warn{{ end }}"
+         id="wrapper-state"
          data-problem="{{ .Wrapper.Problem }}"
          data-ready="{{ if .Wrapper.Ready }}1{{ else }}0{{ end }}"
          {{ if .Wrapper.Problem }}open{{ end }}>
-  <summary><h1>Wrapper</h1></summary>
+  <summary>
+    <h1>Wrapper</h1>
+    {{ if eq .Wrapper.Problem "no-account" }}
+      <span class="badge badge-warn">no account</span>
+    {{ else if eq .Wrapper.Problem "unavailable" }}
+      <span class="badge badge-bad">not serving</span>
+    {{ else }}
+      <span class="badge badge-ok">serving</span>
+    {{ end }}
+  </summary>
   {{ if eq .Wrapper.Problem "no-account" }}
     <p class="error" role="alert">{{ .Wrapper.Detail }}</p>
     <button type="button" data-action="wrapper-login">Log in to Apple Music</button>
@@ -58,16 +88,16 @@
   {{ else }}
     <p class="ok">
       Serving on port {{ .Wrapper.Port }}{{ if .Wrapper.Pid }} (pid {{ .Wrapper.Pid }}){{ end }},
-      regions: <code>{{ if .Wrapper.Regions }}{{ join .Wrapper.Regions ", " }}{{ else }}—{{ end }}</code>.
+      regions: <code>{{ if .Wrapper.Regions }}{{ join .Wrapper.Regions ", " }}{{ else }}&mdash;{{ end }}</code>.
       {{ if .Wrapper.Adopted }}<em>Adopted a wrapper this hub did not start, so it cannot be
       logged into from here.</em>{{ end }}
     </p>
   {{ end }}
-  <p class="muted small">
-    <button type="button" data-action="wrapper-start">Start</button>
-    <button type="button" data-action="wrapper-stop">Stop</button>
-    <button type="button" data-action="wrapper-restart">Restart</button>
-  </p>
+  <div class="row spaced">
+    <button type="button" class="ghost small" data-action="wrapper-start">Start</button>
+    <button type="button" class="ghost small" data-action="wrapper-stop">Stop</button>
+    <button type="button" class="ghost small" data-action="wrapper-restart">Restart</button>
+  </div>
 </details>
 
 <section class="card" id="login-card" hidden>
@@ -76,93 +106,127 @@
     <label for="apple-id">Apple ID</label>
     <input id="apple-id" name="username" type="email" autocomplete="username" required>
     <label for="apple-pw">Password</label>
-    <input id="apple-pw" name="password" type="password" autocomplete="current-password" required>
+    <input id="apple-pw" name="password" type="password" autocomplete="current-password"
+           required>
     <button type="submit">Log in</button>
   </form>
   <form id="twofa-form" hidden>
-    <p id="twofa-deadline"></p>
+    <p id="twofa-deadline" class="muted small"></p>
     <label for="code">2FA code</label>
     <input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" required>
     <button type="submit">Send the code</button>
   </form>
-  <p class="error" id="login-error" role="alert" hidden></p>
-  <p class="muted small">
+  <p class="notice error" id="login-error" role="alert" hidden></p>
+  <p class="hint">
     The password is sent to the wrapper launcher on its own command line and is not stored
     here. The launcher reads a 2FA code for 60 seconds after it asks for one.
   </p>
 </section>
 
-<details class="card" id="library-state" {{ if .Library.DegradedRoots }}open{{ end }}>
-  <summary><h2>Library</h2></summary>
-  <p class="muted small">{{ .Library.Albums }} album directories.</p>
+<details class="card{{ if .Library.DegradedRoots }} tinted tinted-bad{{ end }}" id="library-state"
+         {{ if .Library.DegradedRoots }}open{{ end }}>
+  <summary>
+    <h2>Library</h2>
+    <span class="badge plain muted">{{ .Library.Albums }} album
+      {{ if ne .Library.Albums 1 }}directories{{ else }}directory{{ end }}</span>
+    {{ if .Library.DegradedRoots }}<span class="badge badge-bad">unreadable root</span>{{ end }}
+  </summary>
   <ul class="roots">
     {{ range .Roots }}
-      <li{{ if .Degraded }} class="bad"{{ end }}>
-        <code>{{ .Path }}</code>
-        {{ if .Degraded }}<strong>not readable</strong>{{ end }}
+      <li class="root{{ if .Degraded }} bad{{ else if eq .Count 0 }} empty-root{{ end }}">
+        <span class="root-n">{{ .Count }}</span>
+        <span class="root-body">
+          <span class="root-path">{{ .Path }}</span>
+          <span class="root-note">
+            {{- if .Degraded -}}not readable
+            {{- else if eq .Count 0 -}}empty &mdash; is this mounted?
+            {{- else -}}albums{{ end -}}
+          </span>
+        </span>
       </li>
     {{ end }}
   </ul>
   {{ if .Library.DegradedRoots }}
-    <p class="error" role="alert">
-      Downloads continue and duplicates are still found against the roots that are there, but
-      a track that lived on a missing drive will be downloaded again.
+    <p class="error small" role="alert">
+      Downloads continue and duplicates are still found against the roots that are there,
+      but a track that lived on a missing drive will be downloaded again.
     </p>
   {{ end }}
 </details>
 
 <section class="card">
-  <h2>Queue</h2>
+  <div class="card-head">
+    <h2>Queue</h2>
+  </div>
 
-  <p id="queue-summary" class="summary">
+  {{/* Every status, including the zeros: see `queueCounts` in pages.go. The strip is the
+       same shape on every load, so the eye can learn where to look and a count moving from
+       1 to 0 does not move everything else. */}}
+  <p class="stats" id="queue-summary">
     {{ range .Counts }}
-      {{ if .Count }}
-        <span class="count" data-count="{{ .Status }}">
-          <span class="count-n">{{ .Count }}</span> {{ .Status }}
-        </span>
-      {{ end }}
+      <span class="stat" data-status="{{ .Status }}"{{ if not .Count }} data-zero="1"{{ end }}>
+        <span class="stat-n">{{ .Count }}</span>
+        <span class="stat-l">{{ .Status }}</span>
+      </span>
     {{ end }}
   </p>
 
-  <div class="row bulk">
-    <form data-action="queue-requeue" class="inline-form">
-      <label for="requeue-scope">Re-queue</label>
-      <select id="requeue-scope" name="scope">
-        <option value="failed">failed only</option>
-        <option value="unfinished">everything not done</option>
-      </select>
-      <button type="submit">Re-queue</button>
+  <div class="controls spaced">
+    <form data-action="queue-requeue" class="controls">
+      <span class="field">
+        <label for="requeue-scope">Re-queue</label>
+        <select id="requeue-scope" name="scope">
+          <option value="failed">failed only</option>
+          <option value="unfinished">everything not done</option>
+        </select>
+      </span>
+      <button type="submit" class="ghost">Re-queue</button>
     </form>
-    <button type="button" data-action="queue-delete-finished" class="danger">
+    <span class="spacer"></span>
+    <button type="button" class="ghost small" data-action="queue-toggle-finished"
+            aria-pressed="false">Show finished</button>
+    <button type="button" class="danger small" data-action="queue-delete-finished">
       Delete finished
     </button>
-    <button type="button" data-action="queue-toggle-finished" aria-pressed="false">
-      Show finished
-    </button>
   </div>
-  <p class="muted small">
+  <p class="hint">
     Deleting removes the rows and nothing else. The files stay, and duplicates are found
     against the library on disk rather than against this list.
   </p>
 
-  <table id="queue-table">
-    <thead>
-      <tr>
-        <th>title</th><th>status</th><th>codec</th><th>progress</th>
-        <th>detail</th><th class="num">id</th><th></th>
-      </tr>
-    </thead>
-    <tbody id="queue-body">
-      {{ range .Jobs }}
-        {{ template "job_row" . }}
-      {{ end }}
-    </tbody>
-  </table>
-  <p class="muted small" id="stream-state">connecting&hellip;</p>
+  <div class="table-wrap">
+    <table id="queue-table">
+      <thead>
+        <tr>
+          <th scope="col">title</th>
+          <th scope="col">status</th>
+          <th scope="col" class="col-codec">codec</th>
+          <th scope="col">progress</th>
+          <th scope="col">detail</th>
+          <th scope="col" class="num col-id">id</th>
+          <th scope="col" class="num"><span class="faint">actions</span></th>
+        </tr>
+      </thead>
+      <tbody id="queue-body">
+        {{ range .Jobs }}
+          {{ template "job_row" . }}
+        {{ end }}
+      </tbody>
+    </table>
+    {{/* Toggled by `hidden`, never removed: the stream can empty a queue that arrived
+         full, and this is the element that has to appear when it does. */}}
+    <p class="empty" id="queue-empty" {{ if .Jobs }}hidden{{ end }}>
+      <strong>Nothing queued</strong>
+      Paste an Apple Music link above and it will show up here.
+    </p>
+  </div>
 </section>
 
 <section class="card">
-  <h2>Log</h2>
+  <div class="card-head">
+    <h2>Log</h2>
+    <span class="badge plain muted small">wrapper &amp; scheduler</span>
+  </div>
   <pre id="log" aria-live="polite">{{ range .Log }}{{ . }}
 {{ end }}</pre>
 </section>

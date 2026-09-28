@@ -1,5 +1,5 @@
 {{/*
-  base.html -- the layout every page extends.
+  base.html -- the shell every page renders inside.
 
   No client framework. The queue's live updates use the platform's own `EventSource`
   (see app.js) and every other action is a plain form post, so the hub works with
@@ -16,25 +16,60 @@
   carries no `unsafe-inline` and no `unsafe-eval`. An inline `<script>` here would be
   refused by the browser, which is the correct outcome -- a page whose queue silently
   stops updating is a much better failure than a CSP weakened to permit an injected
-  script because one template wanted a convenience.
+  script because one template wanted a convenience. The icons below are inline *SVG*,
+  which is markup rather than script and is allowed.
+
+  The header carries three things and each has a reason: the section nav, because there
+  are two pages and the URL is not the label; the stream indicator, because a queue that
+  has silently stopped updating looks exactly like a queue where nothing is happening;
+  and logout, which is the only way out of a session.
+
+  It is hidden entirely on the login page -- `Authenticated` false means the nav and the
+  logout button would be two controls that cannot work for someone who is not in yet.
 */}}<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark light">
     <title>{{ .Title }}</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="/static/app.css">
   </head>
   <body{{ if .BodyAttrs }} {{ .BodyAttrs }}{{ end }}>
     <header class="bar">
-      <a class="brand" href="/">amd-hub</a>
-      <nav>
-        <a href="/queue">Queue</a>
-        <a href="/library">Library</a>
-      </nav>
-      <form class="logout" method="post" action="/logout">
-        <button type="submit" class="link">Log out</button>
-      </form>
+      <a class="brand" href="/">
+        <span class="mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"
+               stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/>
+          </svg>
+        </span>
+        amd-hub
+        <span class="sub">Apple Music downloads</span>
+      </a>
+      {{ if .Authenticated }}
+        <nav aria-label="Sections">
+          <a href="/queue"{{ if eq .Active "queue" }} aria-current="page"{{ end }}>Queue</a>
+          <a href="/library"{{ if eq .Active "library" }} aria-current="page"{{ end }}>Library</a>
+        </nav>
+        <span class="spacer"></span>
+        {{ if eq .Active "queue" }}
+          {{/* The live indicator, and it starts as `connecting` because that is true: the
+               page arrived from the server and the stream has not opened yet. app.js owns
+               this element's data-state and text from here. */}}
+          <span class="live" id="stream-state" data-state="connecting"
+                aria-live="polite">connecting&hellip;</span>
+          {{/* The stream is `EventSource`, so with scripting off there is nothing to connect
+               with and the indicator above would say "connecting" for ever. This says what is
+               actually true instead of leaving a lie on the page. */}}
+          <noscript><span class="live" data-state="static">not live &mdash; reload to
+            refresh</span></noscript>
+        {{ end }}
+        <form class="logout" method="post" action="/logout">
+          <button type="submit" class="link">Log out</button>
+        </form>
+      {{ end }}
     </header>
     <main>
       {{ template "content" . }}
