@@ -176,9 +176,14 @@ the same work (`hub-go/tools/bench_compare.sh`, on a synthetic 3,315-album / 21,
 
 | | Go | Python | |
 |---|---|---|---|
-| library scan (3,315 scopes) | 47.4 ms | 185.6 ms | 3.9x |
-| filename normalization | 1,335 ns | 2,438 ns | 1.8x |
-| duplicate lookup | 3,396 ns | 9,766 ns | 2.9x |
+| library scan (3,315 scopes) | 44 ms | 167 ms | 3.8x |
+| filename normalization | 1.3 µs | 1.9 µs | 1.5x |
+| duplicate lookup | 2.4 µs | 9.9 µs | 4.2x |
+
+Those are one run on a two-core container; the ratios move by a few tens of percent between runs
+and the absolute times are not the point. The scan is the hub's own hot path and it is now a
+twentieth of a second for a whole 3,315-album library -- which is what makes taking it on every
+request, rather than caching it, still the right call.
 
 Nothing about the behaviour changed with it: the scan is still taken on every request rather than
 cached, dedup is still the same `loose`/`strict` rule with the matched paths named in
