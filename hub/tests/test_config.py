@@ -149,3 +149,19 @@ def test_rejects_a_port_outside_the_bindable_range():
         load_settings(
             {"AMD_PASSWORD": "x", "AMD_WRAPPER_PORT": "99999", "AMD_LIBRARY_ROOTS": "/library"}
         )
+
+
+def test_the_notification_sink_is_opt_in():
+    # Silence is the default and the URL is the operator's, set nowhere but `.env`:
+    # an announcement nobody asked for is spam, and the hub waited to be looked at
+    # long before it could speak.
+    unset = load_settings({"AMD_PASSWORD": "x", "AMD_LIBRARY_ROOTS": "/library"})
+    assert unset.notify_webhook_url == ""
+    set_ = load_settings(
+        {
+            "AMD_PASSWORD": "x",
+            "AMD_LIBRARY_ROOTS": "/library",
+            "AMD_NOTIFY_WEBHOOK_URL": "http://notify.test/hook",
+        }
+    )
+    assert set_.notify_webhook_url == "http://notify.test/hook"

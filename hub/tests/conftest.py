@@ -42,6 +42,19 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from web_support import (
+    ALBUM2_URL,
+    ALBUM_URL,
+    PASSWORD,
+    SECRET,
+    FakeRipper,
+    FakeSupervisor,
+    FakeWebAPI,
+    _client,
+)
+
+from hub.app import create_app
+from hub.config import load_settings
 
 
 def _touch(path: Path) -> Path:
@@ -183,3 +196,99 @@ def make_library_extra(tmp_path: Path) -> Path:
     # album-identity fixture can answer `"" in by_name` on its own.
     _touch(root / "extra/・・・/t.m4a")
     return root
+
+
+# --------------------------------------------------------------------------- #
+# The web app fixtures, shared by `test_api_jobs.py` and `test_web_contract.py`.
+# They were `test_api_jobs.py`'s until the surface contracts moved to a module of
+# their own; the fakes they wire live in `web_support.py`.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def library(tmp_path: Path) -> Path:
+    """An empty library root, for the tests that only care about reachability."""
+    root = tmp_path / "lib"
+    root.mkdir()
+    return root
+
+
+@pytest.fixture
+def settings(tmp_path: Path, library: Path):
+    return load_settings(
+        {
+            "AMD_PASSWORD": PASSWORD,
+            "AMD_SESSION_SECRET": SECRET,
+            "AMD_LIBRARY_ROOTS": str(library),
+            "AMD_DB_PATH": str(tmp_path / "hub.db"),
+            "AMD_WRAPPER_BASE_DIR": str(tmp_path / "wrapper"),
+        }
+    )
+
+
+@pytest.fixture
+def web_api() -> FakeWebAPI:
+    api = FakeWebAPI()
+    api.add_album(
+        "1621491338",
+        "4pi",
+        "toe",
+        [("1", "1 a.m. (feat. shinoだす。)", f"{ALBUM_URL}?i=1")],
+    )
+    api.add_album(
+        "1621491339", "Other Album", "Someone", [("2", "second track", f"{ALBUM2_URL}?i=2")]
+    )
+    return api
+
+
+@pytest.fixture
+def supervisor() -> FakeSupervisor:
+    return FakeSupervisor()
+
+
+@pytest.fixture
+def ripper(web_api: FakeWebAPI) -> FakeRipper:
+    return FakeRipper(web_api)
+
+
+@pytest.fixture
+def progress_ripper(app, ripper: FakeRipper) -> FakeRipper:
+    """The fake, wired to the app's progress handler.
+
+    `create_app` does *not* attach a handler to an injected ripper -- wrapping it in a real
+    `RipperHost` to do that would defeat the injection -- so the seam between the two is
+    attached here instead, exactly as a real host would have it. The app's own handler is
+    read off `app.state`, so the test is not asserting against a re-implementation of it.
+    """
+    from hub import app as app_module
+
+    ripper.on_progress = app_module._on_progress(app.state)  # noqa: SLF001 - the seam
+    return ripper
+
+
+@pytest.fixture
+def app(settings, supervisor, ripper):
+    # `autostart=False`: the scheduler is exercised by calling `app.state.run_one()` so that
+    # no test has to race a background task, and no test's job is run by a loop it did not
+    # start. The lifespan is still entered, so shutdown ordering -- which is where
+    # `RipperHost.close()`'s in-flight refusal lives -- is real.
+    return create_app(settings, supervisor=supervisor, ripper=ripper, autostart=False)
+
+
+@pytest.fixture
+async def running(app):
+    async with app.router.lifespan_context(app):
+        yield app
+
+
+
+@pytest.fixture
+async def client(running):
+    async with await _client(running) as http:
+        yield http
+
+
+@pytest.fixture
+async def authed(client):
+    response = await client.post("/api/auth/login", json={"password": PASSWORD})
+    assert response.status_code == 200, response.text
+    return client

@@ -23,390 +23,31 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import re
 import sqlite3
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
-import httpx
 import pytest
+from web_support import (
+    ALBUM2_URL,
+    ALBUM_URL,
+    MV_URL,
+    PASSWORD,
+    SECRET,
+    FakeRipper,
+    FakeSupervisor,
+    FakeWebAPI,
+    _client,
+    _expansion_with_three_usable_leaves,
+    _store,
+)
 
 from hub import app as live_app_module
-from hub.api import PUBLIC_STATIC, STATIC_DIR, TEMPLATES_DIR, GuardedStatic
+from hub.api import TEMPLATES_DIR, GuardedStatic
 from hub.app import create_app
 from hub.config import load_settings
-from hub.jobs import JobStore, Leaf, Progress
-from hub.library_scan import scan_roots
+from hub.jobs import Leaf, Progress
 from hub.ripper_host import RipperHostError
-from hub.wrapper_supervisor import LoginChallenge
-
-PASSWORD = "correct horse battery staple"
-SECRET = "s" * 32
-BASE = "http://hub.test"
-
-# Real Apple Music URL shapes. Upstream's `AppleMusicURL.parse_url` takes `paths[-1]` as the
-# id, so the numeric id is the *last* segment and the human-readable slug comes first -- a
-# URL written the other way round parses, and then looks the album up by its slug, which is
-# why these are shaped like the links a user actually pastes.
-ALBUM_URL = "https://music.apple.com/jp/album/4pi/1621491338"
-ALBUM2_URL = "https://music.apple.com/jp/album/other-album/1621491339"
-MV_URL = "https://music.apple.com/jp/music-video/liar/1440935466"
-
-
-# --------------------------------------------------------------------------- #
-# Fakes
-# --------------------------------------------------------------------------- #
-class FakeWebAPI:
-    """The four catalogue methods an album and a song expansion reach.
-
-    `SimpleNamespace` rather than upstream's pydantic models, because `hub.resolver` reads
-    attributes defensively (`getattr(..., None) or ""`) and declares its `WebAPI` as a
-    `Protocol` returning `Any` precisely so the tests need not import `src.*` -- which the
-    boundary test forbids from any file but the two exempt ones.
-    """
-
-    def __init__(self) -> None:
-        self.songs: dict[str, tuple[str, str, str]] = {}
-        self.albums: dict[str, tuple[str, str, list[tuple[str, str]]]] = {}
-        self.calls: list[tuple] = []
-
-    def add_song(self, adam_id: str, title: str, album: str, artist: str) -> None:
-        self.songs[adam_id] = (title, album, artist)
-
-    def add_album(self, album_id: str, name: str, artist: str, tracks) -> None:
-        self.albums[album_id] = (name, artist, list(tracks))
-
-    async def get_song_info(self, song_id: str, storefront: str, lang: str):
-        self.calls.append(("song_info", song_id, storefront, lang))
-        title, album, artist = self.songs[song_id]
-        return SimpleNamespace(
-            data=[SimpleNamespace(id=song_id, attributes=SimpleNamespace(name=title, albumName=album, artistName=artist))]
-        )
-
-    async def get_album_info(self, album_id: str, storefront: str, lang: str):
-        self.calls.append(("album_info", album_id, storefront, lang))
-        name, artist, tracks = self.albums[album_id]
-        return SimpleNamespace(
-            data=[
-                SimpleNamespace(
-                    id=album_id,
-                    attributes=SimpleNamespace(name=name, artistName=artist, trackCount=len(tracks)),
-                    relationships=SimpleNamespace(
-                        tracks=SimpleNamespace(
-                            data=[
-                                SimpleNamespace(
-                                    id=track_id,
-                                    type="songs",
-                                    attributes=SimpleNamespace(name=title, url=track_url),
-                                )
-                                for track_id, title, track_url in tracks
-                            ]
-                        )
-                    ),
-                )
-            ]
-        )
-
-    async def get_album_tracks(self, album_id: str, storefront: str, lang: str, offset: int = 0):
-        self.calls.append(("album_tracks", album_id, storefront, lang, offset))
-        return SimpleNamespace(data=[])
-
-    async def get_playlist_info_and_tracks(self, playlist_id, storefront, lang):
-        self.calls.append(("playlist_info", playlist_id, storefront, lang))
-        return SimpleNamespace(data=[])
-
-    async def get_playlist_tracks(self, playlist_id, storefront, lang, offset: int = 0):
-        self.calls.append(("playlist_tracks", playlist_id, storefront, lang, offset))
-        return SimpleNamespace(data=[])
-
-    async def get_albums_from_artist(self, artist_id, storefront, lang, offset: int = 0):
-        self.calls.append(("artist_albums", artist_id, storefront, lang, offset))
-        return SimpleNamespace(data=[])
-
-    async def get_real_url(self, url: str) -> str:
-        self.calls.append(("real_url", url))
-        return url
-
-
-class FakeSupervisor:
-    """`WrapperSupervisor` without the child process.
-
-    `regions` is the field that matters: `[]` is the state a fresh install boots into, and
-    the two ways of being unready have to stay distinguishable all the way to the page.
-    """
-
-    def __init__(self, regions: list[str] | None = None) -> None:
-        self.regions = ["jp"] if regions is None else regions
-        self.started = False
-        self.adopted = False
-        self._running = False
-        self.pid = 4242
-        self.bound_port = 12340
-        self.start_error: Exception | None = None
-        self.challenge: LoginChallenge | None = None
-        self.login_error: Exception | None = None
-        #: Whether submitting a code puts the account on disk. False models a rejected
-        #: attempt: the child exits, the token cache stays as it was, and the restarted
-        #: wrapper still has no regions.
-        self.accepts_2fa = True
-        self.credentials: tuple[str, str] | None = None
-        self.submitted: list[tuple[str, str]] = []
-        self.log: list[str] = []
-        self.login_gate: object | None = None
-
-    async def start(self) -> None:
-        self.log.append("start")
-        if self.start_error is not None:
-            raise self.start_error
-        self._running = True
-        self.started = True
-
-    async def stop(self) -> None:
-        self.log.append("stop")
-        self._running = False
-
-    async def status(self) -> dict:
-        if not self._running:
-            raise RuntimeError("no wrapper is running to ask")
-        return {"regions": list(self.regions)}
-
-    async def login(self, username: str, password: str) -> LoginChallenge:
-        self.log.append("login")
-        self.credentials = (username, password)
-        if self.login_error is not None:
-            raise self.login_error
-        if self.login_gate is not None:
-            await self.login_gate
-        self.challenge = LoginChallenge(id="chal-1", expires_at=0.0)
-        return self.challenge
-
-    async def submit_2fa(self, challenge_id: str, code: str) -> None:
-        self.log.append("submit_2fa")
-        self.submitted.append((challenge_id, code))
-        # Submitting the code is what puts the account on disk, so the regions appear here
-        # and not in `login()`. The real payload is the same: the login child caches the
-        # token and returns, and the serving child reads it when it next starts.
-        if self.accepts_2fa:
-            self.regions = ["jp"]
-
-    @property
-    def running(self) -> bool:
-        return self._running
-
-
-class FakeRipper:
-    """`RipperHost` without the client, the creart registration or the chdir.
-
-    `render_song_filename` is the interesting one: the *real* method needs `it(Config)` and
-    `src.utils`, so a fake is the only way to keep this suite off the vendor tree. It
-    reproduces the one behaviour the tests depend on -- the default `songNameFormat` of
-    ``{disk}-{tracknum:02d} {title}`` plus `get_suffix` -- and the test that matters
-    (`test_the_dedup_check_is_given_the_rendered_file_name`) fails if the *caller* stops
-    asking for it, which is the direction the bug would come from.
-    """
-
-    def __init__(self, web_api: FakeWebAPI) -> None:
-        self._web_api = web_api
-        #: Stands for a *started* host, which is what the app normally has by the time a
-        #: request arrives. Set to `None` to model the 503-shaped case where the client never
-        #: came up and the API has to ask the caller for a language instead of inventing one.
-        self.language: str | None = "ja"
-        self.started = False
-        self.closed = False
-        self.songs: list[tuple] = []
-        self.videos: list[tuple] = []
-        self.rip_error: Exception | None = None
-        self.in_flight = 0
-        self.peak_in_flight = 0
-        #: Reported to whoever asked, as the real host's `on_progress` callback is. The real
-        #: seam *polls* upstream's `Task`; this fake is handed the numbers directly, so a test
-        #: says exactly which bytes arrived when -- which a poll could not, without sleeping.
-        self.reports: list[tuple[int, Progress]] = []
-        #: When set, `run_song` reports progress up to this many bytes before returning.
-        self.progress_up_to: int | None = None
-
-    @property
-    def web_api(self):
-        return self._web_api
-
-    @property
-    def region_language(self) -> str | None:
-        return self.language
-
-    async def start(self) -> None:
-        # creart's `WrapperClient` is process-global and cannot be evicted, so a `start()`
-        # after a `close()` would hand back an `aclose()`d client. Modelled here so that
-        # "the app does not start a second host" is observable rather than assumed.
-        if self.closed:
-            raise RuntimeError(
-                "this process already closed the client; creart cannot re-create it, so a "
-                "new host would hold a closed one"
-            )
-        self.started = True
-
-    async def close(self) -> None:
-        if self.in_flight:
-            # The real `RipperHost.close()` refuses here, and the reason is load-bearing:
-            # it holds the process working directory, which upstream resolves
-            # `EMBEDDED_TEMPLATE_PATH` and `download.dirPathFormat` against, so restoring
-            # it under a running rip loses the FairPlay template and writes to the wrong
-            # tree with no error. A fake that closed anyway would make the shutdown-ordering
-            # test pass without the ordering.
-            raise RuntimeError(
-                f"refusing to close: {self.in_flight} rip(s) still in flight"
-            )
-        self.closed = True
-
-    def render_song_filename(self, leaf, *, track_number: int = 1) -> str:
-        name = f"1-{track_number:02d} {leaf.title}"
-        return name + {}.get(leaf.codec, ".m4a")
-
-    async def run_song(self, leaf, *, force: bool) -> None:
-        self.in_flight += 1
-        self.peak_in_flight = max(self.peak_in_flight, self.in_flight)
-        self.songs.append((leaf, force))
-        try:
-            if self.progress_up_to:
-                for done in (0, self.progress_up_to // 2, self.progress_up_to):
-                    self._report(leaf, done, self.progress_up_to)
-                    # A yield *after* each reading, and it is load-bearing. The real seam's
-                    # poll runs on a worker every `PROGRESS_INTERVAL` (0.1 s) while a real rip
-                    # takes minutes, so readings *are* separated by real time, and the handler
-                    # defers its write to the loop with `call_soon_threadsafe`. Without this
-                    # the last reading's write is still queued when `run_song` returns, and the
-                    # frame order becomes `0, half, done` -- the final byte count never reaching
-                    # the stream, which is the one reading a user actually waits for.
-                    await asyncio.sleep(0)
-            if self.rip_error is not None:
-                raise self.rip_error
-        finally:
-            self.in_flight -= 1
-
-    async def run_music_video(self, leaf, *, force: bool) -> None:
-        self.videos.append((leaf, force))
-
-    def _report(self, leaf, done: int, total: int | None) -> None:
-        """One reading, the way the real seam would deliver it.
-
-        The real `RipperHost` polls upstream's `Task` and calls `on_progress` from a worker;
-        `hub.app`'s handler hops to the loop with `call_soon_threadsafe`. A fake cannot
-        reproduce the thread hop without being a fake of the hop, so it calls the handler
-        directly -- and `test_progress_reaches_the_store_and_the_stream` therefore covers the
-        handler, while the real poll is exercised by the acceptance run.
-        """
-        reading = Progress(
-            bytes_done=done,
-            bytes_total=total,
-            fraction=(done / total) if total else None,
-        )
-        self.reports.append((leaf.adam_id, reading))
-        handler = getattr(self, "on_progress", None)
-        if handler is not None:
-            handler(reading)
-
-    async def wrapper_status(self) -> dict:
-        return {"regions": ["jp"]}
-
-
-# --------------------------------------------------------------------------- #
-# Fixtures
-# --------------------------------------------------------------------------- #
-@pytest.fixture
-def library(tmp_path: Path) -> Path:
-    """An empty library root, for the tests that only care about reachability."""
-    root = tmp_path / "lib"
-    root.mkdir()
-    return root
-
-
-@pytest.fixture
-def settings(tmp_path: Path, library: Path):
-    return load_settings(
-        {
-            "AMD_PASSWORD": PASSWORD,
-            "AMD_SESSION_SECRET": SECRET,
-            "AMD_LIBRARY_ROOTS": str(library),
-            "AMD_DB_PATH": str(tmp_path / "hub.db"),
-            "AMD_WRAPPER_BASE_DIR": str(tmp_path / "wrapper"),
-        }
-    )
-
-
-@pytest.fixture
-def web_api() -> FakeWebAPI:
-    api = FakeWebAPI()
-    api.add_album(
-        "1621491338",
-        "4pi",
-        "toe",
-        [("1", "1 a.m. (feat. shinoだす。)", f"{ALBUM_URL}?i=1")],
-    )
-    api.add_album(
-        "1621491339", "Other Album", "Someone", [("2", "second track", f"{ALBUM2_URL}?i=2")]
-    )
-    return api
-
-
-@pytest.fixture
-def supervisor() -> FakeSupervisor:
-    return FakeSupervisor()
-
-
-@pytest.fixture
-def ripper(web_api: FakeWebAPI) -> FakeRipper:
-    return FakeRipper(web_api)
-
-
-@pytest.fixture
-def progress_ripper(app, ripper: FakeRipper) -> FakeRipper:
-    """The fake, wired to the app's progress handler.
-
-    `create_app` does *not* attach a handler to an injected ripper -- wrapping it in a real
-    `RipperHost` to do that would defeat the injection -- so the seam between the two is
-    attached here instead, exactly as a real host would have it. The app's own handler is
-    read off `app.state`, so the test is not asserting against a re-implementation of it.
-    """
-    from hub import app as app_module
-
-    ripper.on_progress = app_module._on_progress(app.state)  # noqa: SLF001 - the seam
-    return ripper
-
-
-@pytest.fixture
-def app(settings, supervisor, ripper):
-    # `autostart=False`: the scheduler is exercised by calling `app.state.run_one()` so that
-    # no test has to race a background task, and no test's job is run by a loop it did not
-    # start. The lifespan is still entered, so shutdown ordering -- which is where
-    # `RipperHost.close()`'s in-flight refusal lives -- is real.
-    return create_app(settings, supervisor=supervisor, ripper=ripper, autostart=False)
-
-
-@pytest.fixture
-async def running(app):
-    async with app.router.lifespan_context(app):
-        yield app
-
-
-async def _client(app) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE)
-
-
-@pytest.fixture
-async def client(running):
-    async with await _client(running) as http:
-        yield http
-
-
-@pytest.fixture
-async def authed(client):
-    response = await client.post("/api/auth/login", json={"password": PASSWORD})
-    assert response.status_code == 200, response.text
-    return client
-
-
-def _store(settings) -> JobStore:
-    return JobStore(settings.db_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -493,108 +134,6 @@ async def test_the_only_unauthenticated_route_is_health(running, client):
         assert (await client.get(path)).status_code == 404
         assert (await client.request("HEAD", path)).status_code == 404
     assert (await client.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})).status_code == 401
-
-
-async def test_the_security_headers_are_on_the_responses_that_matter(client, authed):
-    """Defence in depth, and it is probed rather than assumed (M5).
-
-    **Every kind of response goes through the one middleware, including the ones built by an
-    exception handler.** That was the doubt behind a second helper that used to exist here,
-    and it was wrong: `app.middleware("http")` sits *outside* the `ExceptionMiddleware` in the
-    stack, so the handler's response is what `call` returns and passes back through it like
-    any other. This test's "unauthenticated" row is a 401 raised by `_Unauthorized` and turned
-    by a registered handler, and it is here precisely because that was the case in doubt.
-
-    So the claim this test makes is a coverage claim, not an exception: the responses nobody
-    thinks to add headers to are the ones being asked -- the 401 from a handler, the 303 from
-    a page, the static files, the login page a browser reaches first.
-
-    `Content-Security-Policy` is the one that would actually stop an injected script, and its
-    **absence of `unsafe-inline`** is the load-bearing part: the templates put no `<script>`
-    block in a page, so nothing needs it, and adding it back would remove the only protection
-    against a template that starts trusting a filesystem-derived string.
-    """
-    for label, response in (
-        ("health", await client.get("/api/health")),
-        ("unauthenticated", await client.get("/api/jobs")),
-        ("login page", await client.get("/login")),
-        ("page redirect", await client.get("/queue", follow_redirects=False)),
-        ("static", await client.get("/static/app.css")),
-        ("authenticated", await authed.get("/api/jobs")),
-    ):
-        headers = response.headers
-        assert headers.get("X-Content-Type-Options") == "nosniff", label
-        assert headers.get("X-Frame-Options") == "DENY", label
-        assert "frame-ancestors 'none'" in (headers.get("Content-Security-Policy") or ""), label
-        assert headers.get("Referrer-Policy") == "no-referrer", label
-
-    csp = (await client.get("/login")).headers["Content-Security-Policy"]
-    assert "unsafe-inline" not in csp, (
-        "'unsafe-inline' would make the CSP decorative; the templates need no inline script"
-    )
-    assert "unsafe-eval" not in csp
-    # `default-src 'self'` and nothing else: no CDN, no third party. The whole client is two
-    # files served from `/static`.
-    assert "default-src 'self'" in csp
-    assert "http://" not in csp and "https://" not in csp
-
-
-async def test_the_static_mount_is_behind_the_session_guard(client, authed):
-    """`/static` was a `Mount` outside `guarded()`, and served both files to anybody.
-
-    Traversal was always clean -- Starlette refuses `..`, percent-encoded `..` and symlinks,
-    all 404 -- so this was an authentication gap and not a path-traversal one. The fix is a
-    `GuardedStatic` mount, and this walks the real directory so an asset added tomorrow is a
-    401 by default rather than an open file nobody looked at.
-    """
-    for path in ("/static/app.css", "/static/app.js"):
-        assert (await client.get(path)).status_code == 200, (
-            f"{path} is public because the login page needs it; a new asset is not"
-        )
-        assert (await client.get(path)).status_code == 200
-
-    # Every *other* file under the directory, refused. The walk is the point: the list is not
-    # asserted to be two items long, it is asserted to cover whatever is on disk.
-    for asset in sorted(STATIC_DIR.iterdir()):
-        served = f"/static/{asset.name}"
-        if served in PUBLIC_STATIC:
-            continue
-        assert (await client.get(served)).status_code == 401, (
-            f"{served} is readable with no session; add it to PUBLIC_STATIC only if it is "
-            f"needed by the login page"
-        )
-    assert (await authed.get("/static/app.css")).status_code == 200
-
-
-async def test_the_login_page_can_load_its_own_assets(client):
-    """The other half of guarding the mount: a login form that cannot render is worse.
-
-    `PUBLIC_STATIC` is the two files `base.html` references. This asserts they are *reachable*
-    without a session, so widening the guard to the whole mount without widening this list
-    would break the login page and be caught here rather than by a user.
-    """
-    body = (await client.get("/login")).text
-    assert "/static/app.css" in body
-    assert "/static/app.js" in body
-    for path in ("/static/app.css", "/static/app.js"):
-        assert (await client.get(path)).status_code == 200
-
-
-async def test_static_is_not_needed_to_render_the_login_form(client):
-    """The login page works with no session and no stylesheet: it is a plain form post.
-
-    A stylesheet is decoration; a *script* is the risk. `app.js` is served without a session
-    because `base.html` asks for it on every page, and this asserts the login flow does not
-    depend on it -- the form posts to `/login` and redirects, so a browser with scripting
-    disabled, or with the script blocked, can still sign in.
-    """
-    response = await client.post(
-        "/login", data={"password": PASSWORD}, follow_redirects=False
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/"
-    form = (await client.get("/login")).text
-    assert 'method="post"' in form and 'action="/login"' in form
 
 
 def _route_table(app) -> list[tuple[str, str]]:
@@ -1580,10 +1119,13 @@ async def test_progress_reaches_the_store_and_the_stream(
         await stream.read_data()  # the snapshot
         assert await running.state.run_one() is True
 
-        # One frame per reading, each a `running` job with the bytes that had arrived. Three
-        # readings were handed over and the frames are read *in order*, so the first is 0 --
-        # a report of "nothing yet" is still a report, and a handler that skipped it would be
-        # hiding the one reading that proves the bar starts at zero rather than jumping.
+        # One frame per reading, each a `running` job with the bytes that had arrived. The
+        # claim itself speaks first -- the pool names itself at 1 before the row speaks --
+        # and the readings follow in order, so the first is 0: a report of "nothing yet" is
+        # still a report, and a handler that skipped it would be hiding the one reading that
+        # proves the bar starts at zero rather than jumping.
+        claim = await stream.read_data()
+        assert claim["kind"] == "pool" and claim["ripping"] == 1
         first = await stream.read_data()
         assert first["kind"] == "job"
         assert first["job"]["status"] == "running"
@@ -1604,6 +1146,10 @@ async def test_progress_reaches_the_store_and_the_stream(
         # And the terminal frame, so the stream does not end on a `running` row.
         terminal = await stream.read_data()
         assert terminal["job"]["status"] == "done"
+
+        # The release closes the pair the claim opened: the pool says zero on its way out.
+        released = await stream.read_data()
+        assert released["kind"] == "pool" and released["ripping"] == 0
 
     # And the final row is `done`, so the last thing a tab sees is not a stuck `running`.
     job = _store(settings).get(1)
@@ -1636,8 +1182,9 @@ async def test_an_unknown_total_is_reported_as_none_and_not_as_zero(
     async with _ASGIStream(running, token=token) as stream:
         await stream.read_data()
         assert await running.state.run_one() is True
-        # The last of the three readings, which is the one that carries 1234.
-        readings = [await stream.read_data() for _ in range(3)]
+        # The last of the three readings, which is the one that carries 1234 -- behind the
+        # claim's pool frame, which opens the sequence now that the pool speaks.
+        readings = [await stream.read_data() for _ in range(4)]
     event = readings[-1]
     assert event["job"]["bytes_done"] == 1234
     assert event["job"]["bytes_total"] is None
@@ -2017,40 +1564,6 @@ async def test_the_library_scan_endpoint_also_reports_per_root(authed, settings,
     assert body["roots"] == [str(tmp_path / "drive-a"), str(empty)]
 
 
-async def test_the_library_page_warns_about_a_readable_but_empty_root(authed, settings,
-                                                                       tmp_path):
-    """The warning has to be on the page, because that is where somebody looks.
-
-    This is the check that could not be a harness: a per-root count in a `docker exec`
-    one-shot is only ever run by whoever remembers, and the thing it guards is invisible from
-    every other surface. `empty-root` is deliberately checked as text, so the row cannot be
-    quietly dropped from the template while the API keeps the number.
-    """
-    settings.library_roots = [tmp_path / "empty-root"]
-    (tmp_path / "empty-root").mkdir()  # readable and empty -- the state, not a missing path
-    body = (await authed.get("/library")).text
-    assert "is this mounted?" in body
-    assert "empty-root" in body
-    # And it is the *empty* row, not the unreadable one: a directory that is not there is a
-    # different warning and this root is not in `degraded_roots`.
-    assert "unreadable" not in body
-
-
-async def test_the_library_page_does_not_warn_about_a_populated_root(authed, library):
-    """The warning has to be absent when it is not warranted, or it is noise.
-
-    A row that says "is this mounted?" about 3,670 album directories is worse than no row at
-    all, so this is the negative half of the pair and it is the half a green-field test of
-    the warning would miss.
-    """
-    (library / "toe/4pi").mkdir(parents=True)
-    (library / "toe/4pi/t.m4a").write_bytes(b"")
-    body = (await authed.get("/library")).text
-    assert "is this mounted?" not in body
-    # The count is still shown, which is the part that is useful rather than alarming.
-    assert "album directories" in body
-
-
 async def test_status_reports_the_two_unready_states_differently(authed, supervisor):
     """`regions: []` and "not running" need different things from the user.
 
@@ -2100,6 +1613,17 @@ async def test_a_start_failure_keeps_the_supervisors_own_wording(authed, supervi
     response = await authed.post("/api/wrapper/start")
     assert response.status_code == 502
     assert "did not become ready" in response.json()["detail"]
+
+
+async def test_the_status_reports_the_rip_pool(authed, settings):
+    """`n/N ripping` as data: the scheduler's table and the configured ceiling.
+
+    The queue page speaks this sentence at the end of its stream line; `/api/status` is
+    where the same truth is read without a stream. Zero when idle is the whole point --
+    an idle hub that shows nothing is an idle hub you cannot distinguish from a dead one.
+    """
+    body = (await authed.get("/api/status")).json()
+    assert body["pool"] == {"ripping": 0, "limit": settings.rip_concurrency}
 
 
 async def test_status_summarises_the_queue(authed, settings):
@@ -3184,6 +2708,73 @@ async def test_the_stream_route_is_a_server_sent_event_stream(running, authed):
         assert (await stream.read_data())["kind"] == "snapshot"
 
 
+async def test_a_pool_frame_names_the_pool_around_a_rip(running, authed):
+    """`pool` frames are born and die with the claim, and say what was true then.
+
+    A consumer that does not know the kind already ignores it -- the browser switches on
+    `kind` and drops the rest, which is what makes an added kind a feature rather than a
+    migration. The pair here is the claim and the release: one ripping, then none, and a
+    `job` frame or three between them because the row's own truth changed too.
+    """
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    agen = running.state.broker.subscribe("jobs")
+    pull = asyncio.create_task(agen.__anext__())
+    await asyncio.sleep(0)  # subscription is established on the first read, not the call
+    await live_app_module.run_one(running.state)
+    kinds: list[str] = []
+    pools: list[dict] = []
+    for _ in range(6):
+        try:
+            if pull is not None:
+                chunk = await asyncio.wait_for(pull, 1.0)
+                pull = None
+            else:
+                chunk = await asyncio.wait_for(agen.__anext__(), 1.0)
+        except (TimeoutError, StopAsyncIteration):
+            break
+        frame = json.loads(chunk[len("data: ") :])
+        kinds.append(frame["kind"])
+        if frame["kind"] == "pool":
+            pools.append(frame)
+    if pull is not None and not pull.done():
+        pull.cancel()
+    await agen.aclose()
+    assert "pool" in kinds, kinds
+    assert pools[0]["ripping"] == 1 and pools[-1]["ripping"] == 0
+    assert all(frame["limit"] == 4 for frame in pools)
+
+
+async def test_an_idle_queue_announces_itself_once(running, authed, monkeypatch):
+    """The transition is the message, and the sink is the operator's to configure.
+
+    One job finishes, the counts hold nothing `queued`, `running` or `waiting`, and the
+    webhook gets exactly one sentence about it -- not one per job, not one per poll.
+    An unset URL was tested by every other test in this file before it existed; this one
+    is about what happens once somebody has asked to hear from the hub.
+    """
+    sent: list[dict] = []
+
+    async def capture(url: str, payload: dict) -> bool:
+        sent.append({"url": url, **payload})
+        return True
+
+    monkeypatch.setattr(live_app_module, "_post_notification", capture)
+    running.state.settings.notify_webhook_url = "http://notify.test/hook"
+
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    assert await live_app_module.run_one(running.state) is True
+    assert len(sent) == 1, sent
+    announcement = sent[0]
+    assert announcement["url"] == "http://notify.test/hook"
+    assert announcement["event"] == "queue-idle"
+    assert announcement["queue"]["done"] == 1 and announcement["queue"]["total"] == 1
+
+    # A pass over an empty queue announced nothing: it is the change into idle that
+    # speaks, not every observation of idle.
+    assert await live_app_module.run_one(running.state) is False
+    assert len(sent) == 1
+
+
 async def test_the_stream_sends_a_snapshot_and_then_live_updates(running, authed):
     """A tab opened mid-download has to render the queue as it is.
 
@@ -3288,7 +2879,10 @@ async def test_a_terminated_job_reaches_the_stream(running, authed, settings, ri
     async with _ASGIStream(running, token=token) as stream:
         await stream.read_data()  # the snapshot
         await running.state.run_one()
-        event = await stream.read_data()
+        # The pool opens and closes the rip; the row's own frame is the truth between them.
+        frames = [await stream.read_data(), await stream.read_data(), await stream.read_data()]
+        assert [frame["kind"] for frame in frames] == ["pool", "job", "pool"]
+        event = frames[1]
     assert event["kind"] == "job"
     assert event["job"]["id"] == 1
     assert event["job"]["status"] == "done"
@@ -3374,103 +2968,6 @@ async def test_the_single_worker_rule_is_real_and_not_just_a_comment():
     for attribute in ("broker", "jobs", "leaves", "scheduler", "session_generation", "loop"):
         assert hasattr(app.state, attribute), f"app.state has no {attribute}"
     app.state.jobs.close()
-
-
-async def test_the_queue_page_renders_the_rows(authed, settings, library):
-    (library / "toe/4pi").mkdir(parents=True)
-    (library / "toe/4pi/1-01 1 a.m. (feat. shinoだす。).m4a").write_bytes(b"")
-
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
-    store = _store(settings)
-    store.mark(1, "skipped", skip_reason="duplicate:toe/4pi")
-
-    body = (await authed.get("/queue")).text
-    assert "1 a.m. (feat. shinoだす。)" in body
-    assert "skipped" in body
-    assert "toe/4pi" in body
-
-
-async def test_a_scan_result_cannot_inject_markup_into_the_page(authed, running, library, settings):
-    """`skip_reason` is built from paths read off the filesystem, and the filesystem is the
-    untrusted input here.
-
-    A directory called `<img src=x onerror=alert(1)>` is not an exotic name to end up with:
-    these libraries are user-curated and ripped from arbitrary sources, and the rule about
-    keeping ` - Single` and ` (feat. …)` means odd characters are *kept* rather than
-    stripped. Jinja2's autoescaping is what stands between that and the browser, and this is
-    the test that would notice if a template were marked `|safe`.
-    """
-    hostile = library / "<img src=x onerror=alert(1)>/<script>alert(2)</script>"
-    hostile.mkdir(parents=True)
-    (hostile / "t.m4a").write_bytes(b"")
-    scan = scan_roots([library])
-    assert any("<script>" in album.relpath for album in scan.albums), "the fixture is not hostile"
-
-    store = _store(settings)
-    store._conn.execute(  # noqa: SLF001
-        "INSERT INTO job (url, url_type, adam_id, title, codec, language, force, status,"
-        " skip_reason, created_at) VALUES ('u', 'album', '7', 'a title with <b>markup</b>',"
-        " 'alac', 'ja', 0, 'skipped', ?, ?)",
-        (f"duplicate:{hostile.relative_to(library)}", "2026-09-27T00:00:00.000+00:00"),
-    )
-    body = (await authed.get("/queue")).text
-    # The property that matters is that no *tag* survives, not that the characters are gone:
-    # `onerror=alert(1)` still appears, as inert text, and that is correct. What must not
-    # appear is a `<` from the path, which is what would make it a tag.
-    assert "<script>alert(2)</script>" not in body
-    assert "<img src=x onerror=alert(1)>" not in body
-    assert "<b>markup</b>" not in body
-    assert "&lt;script&gt;alert(2)&lt;/script&gt;" in body
-    assert "&lt;img src=x onerror=alert(1)&gt;" in body
-    assert "a title with &lt;b&gt;markup&lt;/b&gt;" in body
-
-
-async def test_the_queue_page_warns_about_a_degraded_root(authed, settings, tmp_path):
-    settings.library_roots = settings.library_roots + [tmp_path / "gone"]
-    body = (await authed.get("/queue")).text
-    assert "gone" in body
-
-
-async def test_the_library_page_lists_the_albums_it_found(authed, library):
-    (library / "toe/4pi").mkdir(parents=True)
-    (library / "toe/4pi/t.m4a").write_bytes(b"")
-    body = (await authed.get("/library")).text
-    assert "4pi" in body
-    assert "toe" in body
-
-
-async def test_the_library_api_lists_albums_and_artists(authed, library):
-    (library / "toe/4pi").mkdir(parents=True)
-    (library / "toe/4pi/t.m4a").write_bytes(b"")
-    albums = (await authed.get("/api/library/albums")).json()["albums"]
-    assert [(album["name"], album["artist"]) for album in albums] == [("4pi", "toe")]
-    artists = (await authed.get("/api/library/artists")).json()["artists"]
-    assert artists == ["toe"]
-
-
-async def test_the_login_page_never_leaks_whether_a_password_was_tried(client):
-    body = (await client.get("/login")).text
-    assert "password" in body
-    # The form posts to itself, so it works with scripting turned off.
-    assert 'method="post"' in body
-
-
-async def test_a_successful_form_login_redirects_to_the_queue(client):
-    response = await client.post(
-        "/login", data={"password": PASSWORD}, follow_redirects=False
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/"
-
-
-async def test_a_failed_form_login_redirects_back_with_an_error(client):
-    response = await client.post(
-        "/login", data={"password": "nope"}, follow_redirects=False
-    )
-    assert response.status_code == 303
-    assert response.headers["location"] == "/login?error=1"
-    body = (await client.get("/login?error=1")).text
-    assert "Wrong password." in body
 
 
 # --------------------------------------------------------------------------- #
@@ -4002,224 +3499,6 @@ async def test_a_cached_ready_answer_does_not_claim(live_app, settings, supervis
         )
 
 
-def test_no_template_escapes_its_output():
-    """Every template, read as text, with nothing exempt (M3).
-
-    `base.html` claimed a test grepped the templates for `|safe` and there was none -- the
-    claim was about the *expressions* one test happened to render, not about the templates.
-    That is the difference between "the hostile directory did not execute" and "nothing in
-    this directory can be made to execute", and the second is the property worth having.
-
-    Read as source rather than inferred from behaviour, because a template that escapes
-    correctly today can gain a `|safe` tomorrow with no behavioural test failing: the
-    hostile input would have to reach *that* template to be caught, and most of them are not
-    rendered by the one test.
-    """
-    forbidden = (
-        ("|safe", "a `|safe` filter disables escaping for one expression"),
-        ("autoescape false", "`autoescape false` turns escaping off for a whole block"),
-        ("autoescape true", "`autoescape true` re-enables it and is never wanted here"),
-        ("Markup(", "`Markup(` produces unescaped output and is the other way to ask for it"),
-        ("markupsafe", "importing markupsafe to build raw HTML is the same thing indirectly"),
-        ("<script>", "an inline script is refused by the CSP and would have to be external"),
-    )
-    templates = sorted(TEMPLATES_DIR.glob("*.html"))
-    assert templates, "no templates found; the glob is wrong and this test would pass vacuously"
-
-    for path in templates:
-        source = path.read_text(encoding="utf-8")
-        # The comment blocks explain the rule and must be able to name it.
-        body = _strip_jinja_comments(source)
-        for needle, why in forbidden:
-            assert needle not in body, f"{path.name} contains {needle}: {why}"
-
-
-def _strip_jinja_comments(source: str) -> str:
-    """The template with `{# ... #}` removed, so a comment may quote a forbidden string.
-
-    `base.html` documents that `|safe` is forbidden; a test that failed on that documentation
-    would be a test nobody would leave in place, and then the property would be untested.
-    """
-    out: list[str] = []
-    index = 0
-    while True:
-        start = source.find("{#", index)
-        if start == -1:
-            out.append(source[index:])
-            return "".join(out)
-        end = source.find("#}", start)
-        if end == -1:
-            out.append(source[index:])
-            return "".join(out)
-        out.append(source[index:start])
-        index = end + 2
-
-
-async def test_every_template_is_in_the_render_graph(client, authed, library):
-    """No template is unreachable, by output *or* by `{% extends %}`/`{% include %}`.
-
-    Read from the *sources* rather than from the rendered pages, because a layout's own text
-    never appears in its children's output -- `base.html` is not "unrendered", it is rendered
-    into every page. So the graph is walked from the templates the three routes name, and a
-    template that nothing reaches is the thing this is looking for.
-    """
-    (library / "toe/4pi").mkdir(parents=True)
-    (library / "toe/4pi/t.m4a").write_bytes(b"")
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
-
-    # Render all three pages anyway, so a template that *is* reached cannot be silently broken
-    # by a rename: a 500 here would fail the test for the right reason.
-    for path in ("/login", "/queue", "/library"):
-        response = await (client if path == "/login" else authed).get(path)
-        assert response.status_code == 200, f"{path} answered {response.status_code}"
-
-    # The pages the routes render, named rather than guessed, and the graph walked from them.
-    sources = {
-        path.name: path.read_text(encoding="utf-8")
-        for path in sorted(TEMPLATES_DIR.glob("*.html"))
-    }
-    entries = {"login.html", "queue.html", "library.html"}
-    reached: set[str] = set()
-    frontier = list(entries)
-    while frontier:
-        name = frontier.pop()
-        if name in reached or name not in sources:
-            continue
-        reached.add(name)
-        for referenced in re.findall(r'{%\s*(?:extends|include)\s+"([^"]+)"', sources[name]):
-            if referenced not in reached:
-                frontier.append(referenced)
-
-    assert sources.keys() == reached, (
-        f"templates nothing reaches: {sorted(sources.keys() - reached)}; a template that is "
-        f"never rendered is dead code or an untested page"
-    )
-
-
-def test_the_new_modules_do_not_reach_upstream():
-    """`tests/test_ripper_host.py` enforces this for the whole package, but only after
-    `RipperHost.start()` has been reached in some other test. Asserting the two new entry
-    points import without the vendor tree on the path is a cheaper first line of defence.
-    """
-    import ast
-
-    for name in ("app.py", "auth.py", "api/__init__.py", "api/auth.py", "api/wrapper.py",
-                 "api/jobs.py", "api/library.py"):
-        path = Path(__file__).resolve().parents[1] / "hub" / name
-        source = path.read_text(encoding="utf-8")
-        assert "import src" not in source, name
-        assert "importlib" not in source, name
-        assert "runpy" not in source, name
-        assert "sys.path" not in source, name
-        ast.parse(source)
-
-
-def test_the_codec_set_matches_the_clients():
-    """The hub restates upstream's seven codecs because the boundary forbids importing them.
-
-    That is a duplicated constant, so something has to say it has not drifted. This reads the
-    real `src/types.py` and compares, which is the only check that can notice an upstream
-    change; it skips if the vendor tree is absent rather than failing a container build.
-    """
-    from hub.api import jobs as jobs_api
-
-    vendor = Path(__file__).resolve().parents[2] / "AppleMusicDecrypt/src/types.py"
-    if not vendor.is_file():
-        pytest.skip("no AppleMusicDecrypt checkout to compare against")
-    upstream = _upstream_constants(vendor, "class Codec")
-    assert jobs_api.CODECS == set(upstream), (
-        f"the hub's CODECS has drifted from {vendor.name}; upstream's Codec values are "
-        f"{sorted(upstream)}"
-    )
-
-
-def test_the_parent_type_set_matches_the_clients():
-    """The same duplication for `URLType`, which is what `create_batch` validates against."""
-    from hub.api import jobs as jobs_api
-
-    vendor = Path(__file__).resolve().parents[2] / "AppleMusicDecrypt/src/url.py"
-    if not vendor.is_file():
-        pytest.skip("no AppleMusicDecrypt checkout to compare against")
-    assert jobs_api.PARENT_TYPES == set(_upstream_constants(vendor, "class URLType"))
-
-
-def _upstream_constants(path: Path, class_marker: str) -> list[str]:
-    """The `"value"` constants assigned inside one `class` body of an upstream file.
-
-    Parsed out of the source text rather than imported, because importing `src.types` from a
-    test is exactly the boundary `tests/test_ripper_host.py` forbids -- and reading the text
-    is the point: the check has to be able to notice a change in a file the hub may not
-    import. Scanned line by line and stopped at the next *top-level* `class` or `def`, so a
-    same-named constant elsewhere in the file cannot leak in.
-    """
-    lines = path.read_text(encoding="utf-8").splitlines()
-    start = next(index for index, line in enumerate(lines) if line.startswith(class_marker))
-    values: list[str] = []
-    for line in lines[start + 1 :]:
-        if line and not line[0].isspace():
-            break
-        # Mixed case on purpose: upstream's `Codec` members are `ALAC`/`EC3`/`AAC_LEGACY`
-        # and its `URLType` members are `Song`/`Album`/`MusicVideo`, so a pattern that
-        # assumed uppercase constants would silently return the empty set for one of the two
-        # -- and a check comparing against `set()` fails with a message that reads like a
-        # production bug rather than a broken test.
-        found = re.match(r'\s+[A-Za-z_0-9]+ = "([^"]+)"$', line)
-        if found:
-            values.append(found.group(1))
-    return values
-
-
-async def test_health_reports_nothing_about_the_host(client):
-    """The one unauthenticated route, checked for what it must not contain."""
-    body = json.dumps((await client.get("/api/health")).json())
-    for leak in ("regions", "library", "jobs", "wrapper", "root", "/data", "/library"):
-        assert leak not in body
-
-
-def test_the_db_is_where_the_settings_said_and_the_roots_are_absolute(running, settings):
-    """`RipperHost` holds the process CWD for its whole life.
-
-    Every path the hub hands it has to be absolute, because a relative one would resolve
-    against `AppleMusicDecrypt/` and fail silently for reads.
-    """
-    assert settings.db_path.is_absolute()
-    assert running.state.ripper_config_path.is_absolute()
-
-
-def test_a_locked_database_is_reported_rather_than_served(running, settings):
-    """WAL + `busy_timeout` covers contention; an unusable file is an operator error."""
-    settings.db_path = settings.db_path.parent / "a-directory-not-a-file"
-    settings.db_path.mkdir()
-    from hub.jobs import JobStoreError
-
-    with pytest.raises(JobStoreError):
-        JobStore(settings.db_path)
-
-
-async def test_the_library_page_shows_a_path_that_resolves(authed, library):
-    """The album table's path column, and the defect it had a layer above.
-
-    It rendered `album.relpath`, which is the unresolvable form the round-1 fix removed from
-    `skip_reason`: with more than one library root configured it says which directory but not
-    which library. `_album_dict` already builds the qualified path, so the template was showing
-    the worse of the two values it was already holding.
-
-    The assertion names the exact string rather than checking that it "looks absolute",
-    because the existing page test asserts only that "4pi" and "toe" appear -- and both appear
-    in a bare relpath too, which is why nothing here could fail before.
-    """
-    (library / "toe/4pi").mkdir(parents=True)
-    (library / "toe/4pi/t.m4a").write_bytes(b"")
-
-    body = (await authed.get("/library")).text
-
-    assert f"<code>{library}/toe/4pi</code>" in body, (
-        "the album row should carry the root-qualified path, which is the one that opens"
-    )
-    # And the path it shows is a directory, right now.
-    assert (library / "toe/4pi").is_dir()
-
-
 # ---------------------------------------------------------------------------
 # Clearing the queue, from the API.
 #
@@ -4227,26 +3506,6 @@ async def test_the_library_page_shows_a_path_that_resolves(authed, library):
 # has to be forgotten in memory, or the registry grows by one entry per delete for the
 # life of the process. That is the whole reason `JobStore.delete_finished` returns ids.
 # ---------------------------------------------------------------------------
-
-
-def _expansion_with_three_usable_leaves():
-    """Three distinct tracks, so a bulk operation has three rows of its own to act on.
-
-    One POST of the default fixture's album makes a single job, and posting the same URL
-    again folds into it, so a test about a *set* of rows needs an expansion that produces
-    a set. Mirrors `_expansion_with_one_unusable_leaf` for the same reason: patching the
-    name the handler imported keeps the handler from reaching the real resolver.
-    """
-    from hub.jobs import Leaf
-
-    async def fake_expand(url, *, codec, language, web_api):
-        return [
-            Leaf(adam_id=str(n), title=f"track {n}", album_name="4pi", artist_name="toe",
-                 codec=codec, language=language, url=url, storefront="jp")
-            for n in (1, 2, 3)
-        ]
-
-    return fake_expand
 
 
 async def test_requeue_failed_puts_them_back_and_says_how_many(
@@ -4336,319 +3595,6 @@ async def test_both_bulk_routes_need_a_session(client):
     """A bulk delete is the most destructive thing the API offers, so it is guarded."""
     assert (await client.post("/api/jobs/requeue", json={"scope": "failed"})).status_code == 401
     assert (await client.delete("/api/jobs/finished")).status_code == 401
-
-
-# ---------------------------------------------------------------------------
-# The queue page.
-#
-# **What these tests do and do not claim.** They assert the *server-rendered contract*:
-# that the markup carries the hooks the browser script needs, and that the counts and the
-# ordering are right. They do **not** claim that clicking a button filters a row, because
-# nothing here runs JavaScript -- `hub/tests/` has no browser and adding one is out of
-# scope. An earlier version of this file had several tests whose names promised behaviour
-# they could not reach; these say what they check instead.
-# ---------------------------------------------------------------------------
-
-
-def _html_of(response) -> str:
-    return response.text
-
-
-async def test_the_queue_offers_both_clearing_controls(running, authed):
-    body = _html_of(await authed.get("/queue"))
-
-    assert 'data-action="queue-requeue"' in body
-    assert 'data-action="queue-delete-finished"' in body
-    # The scope is a choice, not a constant: "everything except done" includes `skipped`,
-    # which for a dedup-heavy library is the largest group and re-skips immediately.
-    assert 'name="scope"' in body
-    assert 'value="failed"' in body
-    assert 'value="unfinished"' in body
-
-
-async def test_the_queue_summarises_the_queue_without_reading_the_table(
-    running, authed, settings, monkeypatch
-):
-    """The counts a user checks first, so the page does not have to be read to know them."""
-    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
-    store = _store(settings)
-    store.mark(1, "done")
-    store.mark(2, "failed")
-    store.mark(3, "running")
-
-    body = _html_of(await authed.get("/queue"))
-
-    assert 'id="queue-summary"' in body
-    # Rendered from `queue_counts`, which the page already had. The numbers are the
-    # contract: a summary that shows a count the table contradicts is worse than none.
-    for status, count in (("done", 1), ("failed", 1), ("running", 1)):
-        assert f'data-count="{status}"' in body
-        assert f">{count}</span>" in body or f'>{count}<' in body, status
-
-
-async def test_finished_rows_are_marked_so_they_can_be_collapsed(running, authed, settings):
-    """Terminal rows carry the hook; whether the browser acts on it is not claimed here."""
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
-    _store(settings).mark(1, "done")
-
-    body = _html_of(await authed.get("/queue"))
-
-    assert "data-finished=" in body, "a finished row has to be identifiable without parsing its status"
-    assert 'data-action="queue-toggle-finished"' in body, "and there has to be a way to show them again"
-
-
-async def test_the_enqueue_form_is_above_the_wrapper_card(running, authed):
-    """The thing a user reaches for most should not be the fourth card on the page.
-
-    Asserted on document order, not on a CSS property: a form that is last in the markup
-    and moved up with `order:` is still last for a reader of the source and for anyone
-    printing the page.
-    """
-    body = _html_of(await authed.get("/queue"))
-
-    assert body.index('id="enqueue"') < body.index('id="wrapper-state"')
-
-
-async def test_every_status_gets_a_distinct_colour_hook(running, authed, settings, monkeypatch):
-    """One class per status, so the styling lives in CSS rather than in the template.
-
-    The test is that the class is *present and status-derived*; whether the stylesheet
-    makes it visible is a CSS question this file cannot answer.
-    """
-    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
-    store = _store(settings)
-    for job_id, status in ((1, "done"), (2, "failed"), (3, "queued")):
-        # A terminal status first, because `mark` refuses a finished job made active again
-        # -- and re-queueing one is what this page's new button does.
-        store.mark(job_id, "done")
-        if status != "done":
-            store._conn.execute(  # noqa: SLF001 - the transition rules are the point
-                "UPDATE job SET status = ? WHERE id = ?", (status, job_id)
-            )
-
-    body = _html_of(await authed.get("/queue"))
-
-    for status in ("queued", "done", "failed"):
-        assert f'class="status status-{status}"' in body, status
-
-
-def test_the_stylesheet_defines_every_status_class_the_template_emits():
-    """A class the CSS does not define is a row that looks like every other row.
-
-    This checks that the two files agree, not that the result is pretty: `hub/tests/` has no
-    browser, so whether a colour is legible is not something this file can answer.
-    """
-    css = (Path(__file__).parent.parent / "hub/web/static/app.css").read_text(encoding="utf-8")
-    for status in ("queued", "waiting", "running", "done", "failed", "skipped", "cancelled"):
-        assert f".status-{status}" in css, f"{status} has no rule, so its row is unstyled"
-
-
-def test_the_script_handles_every_bulk_action_the_page_offers():
-    """The page's `data-action` values and the script's handlers have to agree.
-
-    A `data-action` with no handler is a button that silently does nothing, which is worse
-    than a missing button. Checked as source text on both sides -- again, not behaviour.
-    """
-    js = (Path(__file__).parent.parent / "hub/web/static/app.js").read_text(encoding="utf-8")
-    for action in ("queue-requeue", "queue-delete-finished", "queue-toggle-finished"):
-        assert f'"{action}"' in js, f"the page offers {action} and the script does not handle it"
-
-
-def test_hidden_queue_rows_are_hidden_by_a_rule_not_by_the_user_agent():
-    """`row.hidden = true` alone is not enough on a `<tr>`, and the failure is silent.
-
-    The user-agent sheet's `[hidden] { display: none }` loses to any author rule that gives
-    `tr` a display value, and a responsive table rule is the kind of thing that arrives long
-    after this feature. The script sets the property; this is what makes it mean anything.
-    """
-    css = (Path(__file__).parent.parent / "hub/web/static/app.css").read_text(encoding="utf-8")
-    assert "tr[hidden]" in css, "nothing gives a hidden <tr> display:none, so the filter does nothing"
-
-
-def test_the_scripts_row_builder_agrees_with_the_template():
-    """The row markup is written twice -- once in Jinja, once in JS -- and they had drifted.
-
-    The template had been given a `data-finished` hook, a `status-<status>` class on the cell
-    and a column order with the id last. `buildRow` still produced the old row: no
-    `data-finished`, a bare `status` span, and the id in the first column. So the page was
-    correct until the SSE stream sent its first snapshot, at which point every row on screen
-    silently reverted to the old markup -- and the "hide finished" filter, which selects
-    `#queue-body tr[data-finished]`, matched nothing.
-
-    **This is the bug a server-rendered page cannot have and this one had.** The template
-    test passed, the served HTML had the attributes, and the page was still broken, because
-    the browser rebuilds every row from JSON on the first stream frame.
-
-    Checked as source text on both sides, which is as far as a file with no browser can go.
-    The column list is compared, not just the presence of a hook, because the order drifted
-    too and an attribute-only check would have missed it.
-    """
-    root = Path(__file__).parent.parent / "hub/web"
-    template = (root / "templates/job_row.html").read_text(encoding="utf-8")
-    script = (root / "static/app.js").read_text(encoding="utf-8")
-    builder = script[script.index("function buildRow") : script.index("function upsertRow")]
-
-    def template_cells(markup: str) -> list[str]:
-        return re.findall(r'<td class="([^"]+)"', markup)
-
-    def script_cells(builder: str) -> list[str]:
-        """The cells `buildRow` appends, in order, as a class each.
-
-        An earlier version of this test only matched `el("td", "class", ...)`, so it measured
-        its own regex rather than the code -- the three cells built by helpers were invisible
-        to it and the two sides could not be compared at all. Every `tr.appendChild(...)` is
-        classified here instead.
-        """
-        names = {"progressCell": "progress", "detailCell": "detail", "actionsCell": "actions"}
-        out: list[str] = []
-        for call in re.findall(r"tr\.appendChild\((.*?)\);", builder):
-            call = call.strip()
-            if call == "status":
-                out.append("status-cell")
-                continue
-            helper = re.fullmatch(r"(\w+)\(job\)", call)  # a helper takes the job and nothing else
-            if helper and helper.group(1) in names:
-                out.append(names[helper.group(1)])
-                continue
-            direct = re.match(r'el\("td", "([^"]+)"', call)
-            if direct:
-                out.append(direct.group(1))
-                continue
-            out.append(f"<unrecognised: {call}>")
-        return out
-
-    assert script_cells(builder) == template_cells(template), (
-        f"the template renders {template_cells(template)} and the script builds "
-        f"{script_cells(builder)}; a stream frame replaces every row, so a difference here "
-        f"is a page that reverts on its own"
-    )
-
-    # The hooks the filter and the stylesheet select on.
-    assert "dataset.finished" in builder, "buildRow does not set data-finished, so nothing can be collapsed"
-    assert 'el("span", "status status-"' in builder, (
-        "the status cell needs the same status-<status> class the template gives it"
-    )
-    assert "data-finished=" in template, "the template has to mark finished rows the same way"
-
-
-def _relative_luminance(colour: str) -> float:
-    """WCAG relative luminance for a `#rrggbb` colour."""
-
-    def channel(value: int) -> float:
-        srgb = value / 255
-        return srgb / 12.92 if srgb <= 0.04045 else ((srgb + 0.055) / 1.055) ** 2.4
-
-    r, g, b = (int(colour[i : i + 2], 16) for i in (1, 3, 5))
-    return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
-
-
-def _contrast(foreground: str, background: str) -> float:
-    a, b = _relative_luminance(foreground), _relative_luminance(background)
-    lighter, darker = max(a, b), min(a, b)
-    return (lighter + 0.05) / (darker + 0.05)
-
-
-def test_every_button_rule_is_legible_against_the_background_it_lands_on():
-    """`app.css` claims both themes are checked for contrast. This is that check.
-
-    It exists because a rule written for a transparent button was applied to a filled one:
-    `button` is `background: var(--accent)`, and a rule that only set `color: var(--accent)`
-    made the label the same colour as its own background. It looked like a button with no
-    text, which is what the screenshot showed. No assertion in the suite could have seen it,
-    because the failure is entirely in the cascade.
-
-    The rules are resolved the way the browser would: the base `button` block first, then the
-    more specific selector, taking `background` and `color` from whichever declares them
-    last.
-
-    **Both themes, each against its own values.** `themes.setdefault` across the two blocks
-    merged them and kept whichever came first, so only the palette at the top of the file was
-    ever measured and the other was checked in the docstring and nowhere else. The light
-    palette was that unchecked one and its primary button was #0b0d12 on #2f5fd0 -- 3.4:1,
-    under AA, shipped, green. A test that names two themes and measures one is worse than no
-    test, because it is the assertion everyone believes.
-    """
-    css = (Path(__file__).parent.parent / "hub/web/static/app.css").read_text(encoding="utf-8")
-    # Comments are stripped first: a rule preceded by a block comment would otherwise carry
-    # the comment into its "selector" and stop being findable by name. Which is exactly what
-    # the first version of this resolver did.
-    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
-
-    blocks = re.findall(r":root\s*\{(.*?)\}", css, re.S)
-    assert len(blocks) == 2, (
-        f"the palette is declared {len(blocks)} time(s); app.css declares light in `:root` "
-        f"and dark in `@media (prefers-color-scheme: dark)`, so both have to be here for the "
-        f"contrast below to be checking anything"
-    )
-    # One palette per block, kept apart. `setdefault`-ing across them collapsed two themes
-    # into one and measured only the first.
-    palettes: list[dict[str, str]] = [
-        dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})", block)) for block in blocks
-    ]
-    theme_names = ("light", "dark")
-
-    # selector -> (background, colour), as the cascade would resolve them.
-    def resolve(selector: str) -> tuple[str, str] | None:
-        background = colour = None
-        # `findall` yields (selector, body) in that order; an earlier version unpacked them
-        # the other way round and so searched the *selector* for declarations.
-        for sel, block in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
-            if selector not in [s.strip() for s in sel.split(",")]:
-                continue
-            # A value is a hex or a `var(--name)`; the base `button` uses the latter for its
-            # background, so a hex-only pattern silently reported the rule as unstyled.
-            found = dict(
-                re.findall(r"(background|color):\s*(#[0-9a-fA-F]{3,6}|var\(--[\w-]+\))", block)
-            )
-            if "background" in found:
-                background = found["background"]
-            if "color" in found:
-                colour = found["color"]
-        if background is None or colour is None:
-            return None
-        return background, colour
-
-    def expand(value: str, themes: dict[str, str]) -> str:
-        for name, resolved in themes.items():
-            value = value.replace(f"var(--{name})", resolved)
-        return value
-
-    checked = 0
-    for theme_name, themes in zip(theme_names, palettes, strict=True):
-        for selector in (
-            "button",
-            "button.danger",
-            '[data-action="queue-toggle-finished"][aria-pressed="true"]',
-        ):
-            found = resolve(selector)
-            assert found is not None, (
-                f"{selector} does not declare a background of its own, so it inherits the base "
-                f"button's fill and only recolours the label. That is the bug this test was "
-                f"written for: a rule that sets `color` alone lands coloured text on the accent "
-                f"background, which reads as a button with no text."
-            )
-            background, colour = (expand(v, themes) for v in found)
-            # An unexpanded `var(--name)` here means the palette is missing a token the rule
-            # asks for; `_contrast` would then raise on `int('var(...)', 16)`, which is a
-            # confusing error for what is really a missing definition.
-            for value in (background, colour):
-                assert not value.startswith("var("), (
-                    f"{theme_name} theme has no `{value[4:value.index(')')]}` for {selector}; "
-                    f"the two palettes have to define the same tokens or one of them is "
-                    f"silently unstyled"
-                )
-            if len(colour) == 4:  # #abc -> #aabbcc
-                colour = "#" + "".join(c * 2 for c in colour[1:])
-            ratio = _contrast(colour, background)
-            assert ratio >= 4.5, (
-                f"{theme_name} theme, {selector}: {colour} on {background} is {ratio:.2f}:1, "
-                f"below the 4.5:1 that WCAG AA asks of body text. A button whose label "
-                f"matches its own background reads as a button with no text."
-            )
-            checked += 1
-    assert checked == 2 * 3
 
 
 # ---------------------------------------------------------------------------
