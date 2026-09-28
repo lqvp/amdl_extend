@@ -1,0 +1,199 @@
+{
+ "cases": [
+  {
+   "name": "defaults",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library"
+   },
+   "settings": {
+    "password": "pw",
+    "bind": "0.0.0.0",
+    "port": 8080,
+    "library_roots": [
+     "/library"
+    ],
+    "rip_concurrency": 4,
+    "wrapper_binary": "/usr/local/bin/wrapper-lite-qemu",
+    "wrapper_base_dir": "/data/wrapper",
+    "wrapper_host": "127.0.0.1",
+    "wrapper_port": 12340,
+    "dedup_artist_scope": "loose",
+    "db_path": "/data/hub.db",
+    "session_secret_len": 32,
+    "session_secret": null
+   }
+  },
+  {
+   "name": "everything",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_BIND": "127.0.0.1",
+    "AMD_PORT": "9000",
+    "AMD_LIBRARY_ROOTS": "/library, /other ,, ",
+    "AMD_RIP_CONCURRENCY": "7",
+    "AMD_WRAPPER_BINARY": "/usr/local/bin/wrapper-lite-rootless",
+    "AMD_WRAPPER_BASE_DIR": "/data/wrapper",
+    "AMD_WRAPPER_HOST": "127.0.0.1",
+    "AMD_WRAPPER_PORT": "12341",
+    "AMD_DEDUP_ARTIST_SCOPE": "strict",
+    "AMD_DB_PATH": "/data/other.db",
+    "AMD_SESSION_SECRET": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   },
+   "settings": {
+    "password": "pw",
+    "bind": "127.0.0.1",
+    "port": 9000,
+    "library_roots": [
+     "/library",
+     "/other"
+    ],
+    "rip_concurrency": 7,
+    "wrapper_binary": "/usr/local/bin/wrapper-lite-rootless",
+    "wrapper_base_dir": "/data/wrapper",
+    "wrapper_host": "127.0.0.1",
+    "wrapper_port": 12341,
+    "dedup_artist_scope": "strict",
+    "db_path": "/data/other.db",
+    "session_secret_len": 40,
+    "session_secret": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+   }
+  },
+  {
+   "name": "blank values fall back",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library",
+    "AMD_BIND": "   ",
+    "AMD_PORT": "",
+    "AMD_DEDUP_ARTIST_SCOPE": " "
+   },
+   "settings": {
+    "password": "pw",
+    "bind": "0.0.0.0",
+    "port": 8080,
+    "library_roots": [
+     "/library"
+    ],
+    "rip_concurrency": 4,
+    "wrapper_binary": "/usr/local/bin/wrapper-lite-qemu",
+    "wrapper_base_dir": "/data/wrapper",
+    "wrapper_host": "127.0.0.1",
+    "wrapper_port": 12340,
+    "dedup_artist_scope": "loose",
+    "db_path": "/data/hub.db",
+    "session_secret_len": 32,
+    "session_secret": null
+   }
+  },
+  {
+   "name": "password missing",
+   "env": {
+    "AMD_LIBRARY_ROOTS": "/library"
+   },
+   "error": "AMD_PASSWORD is unset or empty. The hub has one shared password and no default; set it in the environment (compose reads it from .env)."
+  },
+  {
+   "name": "password blank",
+   "env": {
+    "AMD_PASSWORD": "   ",
+    "AMD_LIBRARY_ROOTS": "/library"
+   },
+   "error": "AMD_PASSWORD is unset or empty. The hub has one shared password and no default; set it in the environment (compose reads it from .env)."
+  },
+  {
+   "name": "roots missing",
+   "env": {
+    "AMD_PASSWORD": "pw"
+   },
+   "error": "AMD_LIBRARY_ROOTS is unset. Name every container-side directory that holds your music library, comma-separated, e.g. AMD_LIBRARY_ROOTS=/library. If you meant a directory on this host, that is a different variable (see the deployment's .env)."
+  },
+  {
+   "name": "roots blank",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": " , , "
+   },
+   "error": "AMD_LIBRARY_ROOTS is set but contains no usable path"
+  },
+  {
+   "name": "port is not a number",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library",
+    "AMD_PORT": "8080x"
+   },
+   "error": "AMD_PORT must be an integer, got '8080x'"
+  },
+  {
+   "name": "port is out of range",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library",
+    "AMD_PORT": "70000"
+   },
+   "error": "AMD_PORT must be between 1 and 65535, got 70000"
+  },
+  {
+   "name": "concurrency is not a number",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library",
+    "AMD_RIP_CONCURRENCY": "four"
+   },
+   "error": "AMD_RIP_CONCURRENCY must be a whole number, got 'four'"
+  },
+  {
+   "name": "concurrency is zero",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library",
+    "AMD_RIP_CONCURRENCY": "0"
+   },
+   "error": "AMD_RIP_CONCURRENCY must be at least 1, got 0. A value of 1 is the previous one-track-at-a-time behaviour."
+  },
+  {
+   "name": "scope is a typo",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library",
+    "AMD_DEDUP_ARTIST_SCOPE": "loosey"
+   },
+   "error": "AMD_DEDUP_ARTIST_SCOPE must be 'loose' or 'strict', got 'loosey'"
+  },
+  {
+   "name": "session secret is short",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library",
+    "AMD_SESSION_SECRET": "short"
+   },
+   "error": "AMD_SESSION_SECRET must be at least 32 characters, got 5; a short secret makes the session cookie forgeable"
+  },
+  {
+   "name": "session secret is exactly the minimum",
+   "env": {
+    "AMD_PASSWORD": "pw",
+    "AMD_LIBRARY_ROOTS": "/library",
+    "AMD_SESSION_SECRET": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+   },
+   "settings": {
+    "password": "pw",
+    "bind": "0.0.0.0",
+    "port": 8080,
+    "library_roots": [
+     "/library"
+    ],
+    "rip_concurrency": 4,
+    "wrapper_binary": "/usr/local/bin/wrapper-lite-qemu",
+    "wrapper_base_dir": "/data/wrapper",
+    "wrapper_host": "127.0.0.1",
+    "wrapper_port": 12340,
+    "dedup_artist_scope": "loose",
+    "db_path": "/data/hub.db",
+    "session_secret_len": 32,
+    "session_secret": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+   }
+  }
+ ]
+}

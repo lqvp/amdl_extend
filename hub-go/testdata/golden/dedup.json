@@ -1,0 +1,171 @@
+{
+ "roots": [
+  "testdata/synth/lib1",
+  "testdata/synth/lib2",
+  "testdata/synth/unreachable-does-not-exist"
+ ],
+ "cases": [
+  {
+   "album_name": "x",
+   "track_title": "Track",
+   "artist_name": "9Lana",
+   "artist_scope": "loose",
+   "matched": [
+    "9Lana/x",
+    "9Lana/x"
+   ],
+   "resolved": [
+    "testdata/synth/lib1/9Lana/x",
+    "testdata/synth/lib2/9Lana/x"
+   ]
+  },
+  {
+   "album_name": "x",
+   "track_title": "Track",
+   "artist_name": "9Lana",
+   "artist_scope": "strict",
+   "matched": [
+    "9Lana/x",
+    "9Lana/x"
+   ],
+   "resolved": [
+    "testdata/synth/lib1/9Lana/x",
+    "testdata/synth/lib2/9Lana/x"
+   ]
+  },
+  {
+   "album_name": "x",
+   "track_title": "track",
+   "artist_name": "9Lana",
+   "artist_scope": "strict",
+   "matched": [
+    "9Lana/x",
+    "9Lana/x"
+   ],
+   "resolved": [
+    "testdata/synth/lib1/9Lana/x",
+    "testdata/synth/lib2/9Lana/x"
+   ]
+  },
+  {
+   "album_name": "429 & nyankobrq",
+   "track_title": "T",
+   "artist_name": "429 & nyankobrq",
+   "artist_scope": "strict",
+   "matched": [
+    "429 & nyankobrq/429 & nyankobrq"
+   ],
+   "resolved": [
+    "testdata/synth/lib1/429 & nyankobrq/429 & nyankobrq"
+   ]
+  },
+  {
+   "album_name": "429 & nyankobrq",
+   "track_title": "T",
+   "artist_name": "nyankobrq",
+   "artist_scope": "strict",
+   "matched": null,
+   "resolved": null
+  },
+  {
+   "album_name": "429 & nyankobrq",
+   "track_title": "T",
+   "artist_name": "nyankobrq",
+   "artist_scope": "loose",
+   "matched": [
+    "429 & nyankobrq/429 & nyankobrq"
+   ],
+   "resolved": [
+    "testdata/synth/lib1/429 & nyankobrq/429 & nyankobrq"
+   ]
+  },
+  {
+   "album_name": "Various",
+   "track_title": "Artist - Title",
+   "artist_name": null,
+   "artist_scope": "loose",
+   "matched": null,
+   "resolved": null
+  },
+  {
+   "album_name": "０１．Ｖａｒｉｏｕｓ",
+   "track_title": "０１．Artist - Title",
+   "artist_name": "",
+   "artist_scope": "loose",
+   "matched": null,
+   "resolved": null
+  },
+  {
+   "album_name": "!_",
+   "track_title": "!!!",
+   "artist_name": null,
+   "artist_scope": "loose",
+   "matched": null,
+   "resolved": null
+  },
+  {
+   "album_name": "!",
+   "track_title": "!",
+   "artist_name": null,
+   "artist_scope": "loose",
+   "matched": null,
+   "resolved": null
+  },
+  {
+   "album_name": "",
+   "track_title": "",
+   "artist_name": null,
+   "artist_scope": "loose",
+   "matched": null,
+   "resolved": null
+  },
+  {
+   "album_name": "。”",
+   "track_title": "…",
+   "artist_name": "",
+   "artist_scope": "loose",
+   "matched": null,
+   "resolved": null
+  },
+  {
+   "album_name": "Escapism",
+   "track_title": "intro",
+   "artist_name": "TEMPLIME",
+   "artist_scope": "loose",
+   "matched": [
+    "TEMPLIME/Escapism"
+   ],
+   "resolved": [
+    "testdata/synth/lib1/TEMPLIME/Escapism"
+   ]
+  },
+  {
+   "album_name": "POP-AID",
+   "track_title": "POP",
+   "artist_name": "TEMPLIME",
+   "artist_scope": "strict",
+   "matched": [
+    "ALAC/Atmos/TEMPLIME/POP-AID"
+   ],
+   "resolved": [
+    "testdata/synth/lib1/ALAC/Atmos/TEMPLIME/POP-AID"
+   ]
+  },
+  {
+   "album_name": "x",
+   "track_title": "Track",
+   "artist_name": null,
+   "artist_scope": "strict",
+   "matched": null,
+   "resolved": null
+  },
+  {
+   "album_name": "x",
+   "track_title": "Track",
+   "artist_name": "",
+   "artist_scope": "strict",
+   "matched": null,
+   "resolved": null
+  }
+ ]
+}

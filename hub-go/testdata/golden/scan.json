@@ -1,0 +1,191 @@
+{
+ "roots": [
+  "testdata/synth/lib1",
+  "testdata/synth/lib2",
+  "testdata/synth/unreachable-does-not-exist"
+ ],
+ "reachable": [
+  true,
+  true,
+  false
+ ],
+ "degraded": [
+  "testdata/synth/unreachable-does-not-exist"
+ ],
+ "per_root": [
+  11,
+  2,
+  0
+ ],
+ "albums": [
+  {
+   "root_index": 0,
+   "relpath": ".",
+   "name": "",
+   "artist": null,
+   "track_keys": [
+    "dangling",
+    "hatsuboshi gakuen & kotone fujita - yellow big bang!"
+   ],
+   "resolved": "testdata/synth/lib1"
+  },
+  {
+   "root_index": 0,
+   "relpath": "01. Various",
+   "name": "01. Various",
+   "artist": null,
+   "track_keys": [
+    "artist - title",
+    "ガガ"
+   ],
+   "resolved": "testdata/synth/lib1/01. Various"
+  },
+  {
+   "root_index": 0,
+   "relpath": "429 & nyankobrq/429 & nyankobrq",
+   "name": "429 & nyankobrq",
+   "artist": "429 & nyankobrq",
+   "track_keys": [
+    "t"
+   ],
+   "resolved": "testdata/synth/lib1/429 & nyankobrq/429 & nyankobrq"
+  },
+  {
+   "root_index": 0,
+   "relpath": "4pi",
+   "name": "4pi",
+   "artist": null,
+   "track_keys": [
+    "4pi"
+   ],
+   "resolved": "testdata/synth/lib1/4pi"
+  },
+  {
+   "root_index": 0,
+   "relpath": "9Lana/x",
+   "name": "x",
+   "artist": "9Lana",
+   "track_keys": [
+    "track"
+   ],
+   "resolved": "testdata/synth/lib1/9Lana/x"
+  },
+  {
+   "root_index": 0,
+   "relpath": "ALAC/Atmos/TEMPLIME/POP-AID",
+   "name": "POP-AID",
+   "artist": "TEMPLIME",
+   "track_keys": [
+    "pop"
+   ],
+   "resolved": "testdata/synth/lib1/ALAC/Atmos/TEMPLIME/POP-AID"
+  },
+  {
+   "root_index": 0,
+   "relpath": "NTFS Drive/Album With Caps",
+   "name": "Album With Caps",
+   "artist": "NTFS Drive",
+   "track_keys": [
+    "track"
+   ],
+   "resolved": "testdata/synth/lib1/NTFS Drive/Album With Caps"
+  },
+  {
+   "root_index": 0,
+   "relpath": "Nyarons",
+   "name": "Nyarons",
+   "artist": null,
+   "track_keys": [
+    "a"
+   ],
+   "resolved": "testdata/synth/lib1/Nyarons"
+  },
+  {
+   "root_index": 0,
+   "relpath": "TEMPLIME",
+   "name": "TEMPLIME",
+   "artist": null,
+   "track_keys": [
+    "hiko"
+   ],
+   "resolved": "testdata/synth/lib1/TEMPLIME"
+  },
+  {
+   "root_index": 0,
+   "relpath": "TEMPLIME/Escapism",
+   "name": "Escapism",
+   "artist": "TEMPLIME",
+   "track_keys": [
+    "e",
+    "intro"
+   ],
+   "resolved": "testdata/synth/lib1/TEMPLIME/Escapism"
+  },
+  {
+   "root_index": 0,
+   "relpath": "薄塩指数/!_",
+   "name": "!_",
+   "artist": "薄塩指数",
+   "track_keys": [
+    ""
+   ],
+   "resolved": "testdata/synth/lib1/薄塩指数/!_"
+  },
+  {
+   "root_index": 1,
+   "relpath": "9Lana/x",
+   "name": "x",
+   "artist": "9Lana",
+   "track_keys": [
+    "track"
+   ],
+   "resolved": "testdata/synth/lib2/9Lana/x"
+  },
+  {
+   "root_index": 1,
+   "relpath": "new-dl",
+   "name": "new-dl",
+   "artist": null,
+   "track_keys": [
+    "loose"
+   ],
+   "resolved": "testdata/synth/lib2/new-dl"
+  }
+ ],
+ "by_name": {
+  "": [
+   "薄塩指数/!_"
+  ],
+  "01. various": [
+   "01. Various"
+  ],
+  "429 & nyankobrq": [
+   "429 & nyankobrq/429 & nyankobrq"
+  ],
+  "4pi": [
+   "4pi"
+  ],
+  "album with caps": [
+   "NTFS Drive/Album With Caps"
+  ],
+  "escapism": [
+   "TEMPLIME/Escapism"
+  ],
+  "new-dl": [
+   "new-dl"
+  ],
+  "nyarons": [
+   "Nyarons"
+  ],
+  "pop-aid": [
+   "ALAC/Atmos/TEMPLIME/POP-AID"
+  ],
+  "templime": [
+   "TEMPLIME"
+  ],
+  "x": [
+   "9Lana/x",
+   "9Lana/x"
+  ]
+ }
+}
