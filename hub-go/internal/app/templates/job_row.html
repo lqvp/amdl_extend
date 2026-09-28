@@ -1,0 +1,57 @@
+{{/*
+  job_row.html -- one queue row.
+
+  The `detail` cell is the part that matters. For a skipped job it holds
+  `duplicate:` followed by root-qualified absolute paths joined with `|`, so that each
+  one opens -- a bare relpath does not resolve once more than one library root is
+  configured. The paths are rendered **verbatim and individually** rather than as the
+  raw `skip_reason` string: they are the only thing that makes a `loose` match
+  adjudicable by a human, since `loose` deliberately treats two same-named albums as
+  one release (that is what catches a collab fanned out across every credited artist's
+  folder -- 164 of the 223 duplicate album names in the real library -- and it is the
+  only thing that can also produce a false positive).
+
+  They come off the filesystem, so they are untrusted text: `html/template` escapes
+  them, and the `join("|")` is added back for display only, never taken apart.
+*/}}{{ define "job_row" }}
+<tr id="job-{{ .id }}" data-job-id="{{ .id }}"
+    class="status-{{ .status }}"
+    data-finished="{{ if .finished }}1{{ else }}0{{ end }}">
+  <td class="title">{{ if .title }}{{ .title }}{{ else }}(no title){{ end }}</td>
+  <td class="status-cell"><span class="status status-{{ .status }}">{{ .status }}</span></td>
+  <td class="num">{{ .codec }}</td>
+  <td class="progress">
+    {{ if .progress }}
+      <progress max="1" value="{{ .progress }}"
+                title="{{ percent .progress }}%"></progress>
+    {{ else if eq .status "running" }}
+      <progress title="Working, but the total size is not known -- so no percentage. This is
+                   also what a music video looks like: that path reports no byte count."></progress>
+    {{ else }}
+      <span class="muted">&mdash;</span>
+    {{ end }}
+  </td>
+  <td class="detail">
+    {{ if and (eq .status "skipped") .skip_paths }}
+      <span class="muted">already on disk at</span>
+      <ul class="paths">
+        {{ range .skip_paths }}
+          <li><code>{{ . }}</code></li>
+        {{ end }}
+      </ul>
+    {{ else if .error }}
+      <span class="error-text">{{ .error }}</span>
+    {{ else if .parent_url }}
+      <a class="muted small" href="{{ .parent_url }}" rel="noreferrer noopener">source</a>
+    {{ end }}
+  </td>
+  <td class="num muted">{{ .id }}</td>
+  <td class="actions">
+    {{ if .finished }}
+      <button type="button" data-action="job-retry" data-job-id="{{ .id }}">Retry</button>
+    {{ else if eq .status "queued" }}
+      <button type="button" data-action="job-cancel" data-job-id="{{ .id }}">Cancel</button>
+    {{ end }}
+  </td>
+</tr>
+{{ end }}

@@ -1,0 +1,35 @@
+{{/*
+  login.html -- one field, one button, and one message.
+
+  A plain form post to /login, which redirects on both success and failure. No
+  JavaScript is involved in authenticating, so a browser with scripting disabled --
+  or a browser behind a proxy that mangles one script -- can still get in. That is a
+  deliberate choice for a tool that runs on one person's LAN.
+
+  The failure message is `Wrong password.` and nothing else. It is the same string for
+  an empty field, a wrong password and a body that was not a form at all, because the
+  hub has one secret and there is nothing to narrow down. See hub/auth.py.
+*/}}{{ define "content" }}
+<section class="card narrow">
+  <h1>Sign in</h1>
+  <p class="muted">This hub has one shared password. There are no accounts.</p>
+
+  {{ if .Failed }}
+    <p class="error" role="alert">{{ .Message }}</p>
+  {{ end }}
+
+  <form method="post" action="/login">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password"
+           required autofocus>
+    <button type="submit">Sign in</button>
+  </form>
+
+  {{ if not .WrapperOK }}
+    <p class="warn">
+      The wrapper launcher is not at <code>{{ .Binary }}</code>, so downloads cannot
+      start until it is. The login page still works.
+    </p>
+  {{ end }}
+</section>
+{{ end }}

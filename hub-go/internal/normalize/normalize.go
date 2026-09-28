@@ -59,10 +59,12 @@ func isAudioBase(filename string) (string, bool) {
 	if base == "" {
 		return filename, false
 	}
-	if _, ok := AudioExts[strings.ToLower(ext)]; !ok {
-		// The suffix reaching here is already casefolded by every caller, so a
-		// plain lower is only a belt-and-braces step; `ucd.CaseFold` would be
-		// wrong here because it maps "ß" to "ss" and no extension has one.
+	if _, ok := AudioExts[ucd.CaseFold(ext)]; !ok {
+		// `CaseFold` rather than `strings.ToLower`, and the difference is not
+		// theoretical: the ligature "ﬂ" (U+FB02) casefolds to "fl", so
+		// "Song.ﬂac" *is* an audio file to CPython while `ToLower` leaves it
+		// alone. The port has to agree about that, because the two are the same
+		// library's dedup index at different moments.
 		return filename, false
 	}
 	return base, true
@@ -116,6 +118,15 @@ func StemOf(filename string) string {
 // must treat an empty key as "cannot decide" and refuse to skip on it; that
 // guard lives at the dedup call site, not here.
 func Normalize(name string, stripTrackPrefix bool) string {
+	// The ASCII fast path. NFKC is the identity on ASCII, the casefold table has
+	// no ASCII entry, and Python's whitespace and alnum sets restricted to ASCII
+	// are three small tables -- so an all-ASCII name can be folded over bytes with
+	// no table searches at all, which is what `ascii.go` does. It is the common
+	// case even in a Japanese library: track numbers, separators, extensions and
+	// the Latin half of a title are all ASCII.
+	if isASCII(name) {
+		return normalizeASCII(name, stripTrackPrefix)
+	}
 	// NFKC, not NFC. Both reconcile composed and decomposed forms, which is what
 	// stops an NTFS-written track from failing to match itself. NFKC additionally
 	// folds ideographic width, which matters here: a Japanese library routinely

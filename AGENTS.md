@@ -106,6 +106,7 @@ cp .env.example .env && $EDITOR .env        # AMD_PASSWORD is required
 docker compose up -d --build
 docker compose logs -f amd-hub
 cd hub && uv run pytest -v                   # 647 tests
+cd hub-go && go build ./... && go test ./...  # the hub itself
 ```
 
 ### Key invariants
@@ -115,7 +116,13 @@ cd hub && uv run pytest -v                   # 647 tests
   single-uid map, so a non-root container cannot write a root-owned rootfs.
 - **No `network_mode: host`.** The launcher does not unshare a network
   namespace, so `host` would put its bind on the host's loopback.
-- **One process.** `--workers 1` lives in `hub.app.main()`.
+- **One process, and there is no knob for it.** The container runs one binary
+  (`/usr/local/bin/amdhub`); `hub-go/cmd/amdhub/main.go` takes no flags and reads
+  everything from the environment. (The Python hub still passes `workers=1` inside
+  `hub.app.main()`; it is no longer the entry point.)
+- **The hub is Go; the client is Python.** `hub-go/` owns everything except the Apple
+  client, which is reached across a line-delimited JSON pipe by
+  `hub-go/tools/pyworker.py`; do not reimplement the client or the vendor seam.
 - **Both `security_opt` values are mandatory** and `cap_add` must stay absent.
 - **The Apple token DB is not on `/data`.** The launcher chroots *before*
   resolving `--base-dir`, so it needs the `wrapper-data` volume at

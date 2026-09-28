@@ -53,9 +53,9 @@ const (
 // that string. See `jobs.isDedupeViolation` for why that is a positive
 // identification rather than an inference.
 type Error struct {
-	Code    Result
+	Code     Result
 	Extended int
-	Message string
+	Message  string
 }
 
 func (e *Error) Error() string {

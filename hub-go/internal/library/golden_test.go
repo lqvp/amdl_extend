@@ -18,11 +18,11 @@ type goldenAlbum struct {
 }
 
 type goldenScan struct {
-	Roots     []string           `json:"roots"`
-	Reachable []bool             `json:"reachable"`
-	Degraded  []string           `json:"degraded"`
-	PerRoot   []int              `json:"per_root"`
-	Albums    []goldenAlbum      `json:"albums"`
+	Roots     []string            `json:"roots"`
+	Reachable []bool              `json:"reachable"`
+	Degraded  []string            `json:"degraded"`
+	PerRoot   []int               `json:"per_root"`
+	Albums    []goldenAlbum       `json:"albums"`
 	ByName    map[string][]string `json:"by_name"`
 }
 
@@ -145,18 +145,18 @@ func TestUnreachableRootKeepsItsSlot(t *testing.T) {
 
 func TestCleanPathMatchesPathlib(t *testing.T) {
 	cases := map[string]string{
-		"":                ".",
-		".":               ".",
-		"/":               "/",
-		"a/../b":          "a/../b", // pathlib does not resolve ".."
-		"a/./b":           "a/b",
-		"//a/b":           "//a/b",
-		"///a/b":          "/a/b",
-		"a//b/":           "a/b",
-		"/library/":       "/library",
-		"/x/./y//z/":      "/x/y/z",
-		"../up":           "../up",
-		"/a/../../b":      "/a/../../b",
+		"":           ".",
+		".":          ".",
+		"/":          "/",
+		"a/../b":     "a/../b", // pathlib does not resolve ".."
+		"a/./b":      "a/b",
+		"//a/b":      "//a/b",
+		"///a/b":     "/a/b",
+		"a//b/":      "a/b",
+		"/library/":  "/library",
+		"/x/./y//z/": "/x/y/z",
+		"../up":      "../up",
+		"/a/../../b": "/a/../../b",
 	}
 	for input, want := range cases {
 		if got := library.CleanPath(input); got != want {

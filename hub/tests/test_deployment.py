@@ -686,11 +686,20 @@ def test_the_operator_is_told_a_separate_drive_is_not_required():
 # Environment names
 # --------------------------------------------------------------------------- #
 def _names_load_settings_reads() -> set[str]:
-    """The `AMD_*` names `load_settings` actually reads, from the source.
+    """The `AMD_*` names the hub actually reads, from both implementations' sources.
 
     Parsed out of `config.py` rather than listed, so a new setting cannot be added without
     this noticing and cannot be misspelled without this noticing. The helper calls are the
     only ways a value is read; anything else in the function is a constant.
+
+    **The Go port is a second reader, and it is read too.** `hub-go/internal/config` is what
+    the container now runs, and it reads five names the Python module has no reason to --
+    `AMD_PYTHON`, `AMD_PYTHON_WORKER`, `AMD_WORKER_DIR`, `AMD_WORKER_PYTHONPATH`,
+    `AMD_VENDOR_CONFIG` -- which is exactly what the Dockerfile sets for the worker. A
+    reader that only knew the Python side would report every one of them as an invented
+    name, which is this test's failure mode pointed at the port instead of at a typo. The
+    names are string literals in that file, so the scan is a regex rather than an AST walk:
+    there is no helper indirection on that side to see through.
     """
     source = (REPO_ROOT / "hub" / "hub" / "config.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -725,6 +734,14 @@ def _names_load_settings_reads() -> set[str]:
                 and node.args[0].value.startswith("AMD_")
             ):
                 names.add(node.args[0].value)
+    names.update(
+        re.findall(
+            r'"(AMD_[A-Z_]+)"',
+            (REPO_ROOT / "hub-go" / "internal" / "config" / "config.go").read_text(
+                encoding="utf-8"
+            ),
+        )
+    )
     return names
 
 
@@ -1037,32 +1054,39 @@ def test_only_8080_is_published_and_the_wrapper_never_is():
 
 
 def test_one_process_and_the_setting_is_not_reachable_from_compose():
-    """`--workers 1` lives in `hub.app.main()`, and that is deliberate.
+    """One process, and no compose file may offer a way to ask for more.
 
-    Everything the app owns is on `app.state` -- the SSE broker, the job store, the leaf
-    registry, the scheduler, the session generation. Two workers would be two of each: two
-    schedulers racing `claim_next` (atomic, so no double rip, but two leaf registries, so a
-    job could be claimed by a worker that never expanded it) and two session generations, so
-    a logout on one would not revoke a session minted by the other.
+    Everything the hub owns lives in one process: the SSE broker, the job store, the leaf
+    registry, the scheduler, the session generation and the wrapper supervisor. Two of those
+    would be two schedulers racing `claim_next` (atomic, so no double rip, but two leaf
+    registries, so a job could be claimed by a process that never expanded it) and two
+    session generations, so a logout on one would not revoke a session minted by the other.
 
-    So the requirement is two-sided: `CMD` must go through `main()` rather than a bare
-    `uvicorn` invocation that could grow a flag, and no compose file may offer a way to ask
-    for more.
+    So the requirement is two-sided: `CMD` must be the hub's own entry point rather than a
+    generic server invocation that could grow a worker count, and no compose file may offer a
+    way to ask for more.
+
+    **The entry point is the Go binary now.** The Python hub held the property by passing
+    `workers=1` to uvicorn inside `main()`; the port holds it by construction, because
+    `cmd/amdhub/main.go` takes no arguments at all and no flags -- the environment is the
+    whole configuration. The assertion below is therefore about the binary being the entry
+    point and about the Go entry point having nowhere to put a knob, rather than about a
+    particular argument list.
     """
     raw_cmd = next(args for verb, args in _dockerfile_instructions() if verb == "CMD")
     cmd = json.loads(raw_cmd)  # exec form, so the arguments are a real list
-    assert cmd[-3:] == ["-m", "hub.app"] or cmd[-2:] == ["-m", "hub.app"], (
-        f"CMD should be `python -m hub.app`, not {cmd!r}"
-    )
-    assert "hub.app" in cmd, (
-        f"CMD should run the module's own entry point, not {cmd!r}"
+    assert cmd == ["/usr/local/bin/amdhub"], (
+        f"CMD should be the hub binary with no arguments for a worker count to hide in; "
+        f"found {cmd!r}"
     )
     assert "uvicorn" not in " ".join(cmd), (
-        "`uvicorn hub.app:app` would take --workers from the command line, which is a knob "
-        "this deployment must not have"
+        "`uvicorn ...` would take --workers from the command line, which is a knob this "
+        "deployment must not have"
     )
-    assert "workers=1" in (REPO_ROOT / "hub" / "hub" / "app.py").read_text(encoding="utf-8"), (
-        "main() has to pass workers=1; that is where the single-process rule is enforced"
+    entry = (REPO_ROOT / "hub-go" / "cmd" / "amdhub" / "main.go").read_text(encoding="utf-8")
+    assert "flag." not in entry, (
+        "the hub binary must take no flags: a `--workers` is exactly the knob this "
+        "deployment must not have, and the environment is the whole configuration"
     )
     for compose_path in (COMPOSE,):
         raw = compose_path.read_text(encoding="utf-8")
@@ -1665,6 +1689,14 @@ def test_the_context_excludes_what_must_never_ship():
         "hub/pyproject.toml",
         "hub/uv.lock",
         "hub/deploy/build_gate.py",
+        # The hub itself, which the Go stage compiles, and the worker script the runtime
+        # stage copies. A pattern that pruned any of these would fail the build with a
+        # `COPY` error rather than a mystery -- but it would still be a build that cannot
+        # work, and the exclusions above are easy to widen by accident.
+        "hub-go/go.mod",
+        "hub-go/cmd/amdhub/main.go",
+        "hub-go/internal/sqlite",
+        "hub-go/tools/pyworker.py",
     ):
         assert not _excluded_from_context(required), (
             f"{required} is excluded from the build context but the image needs it"

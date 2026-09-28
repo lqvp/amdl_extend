@@ -236,7 +236,55 @@ RUN set -eux; \
     git -C /app/AppleMusicDecrypt checkout --quiet "$VENDOR_COMMIT"
 
 # ---------------------------------------------------------------------------
-# Stage 3: the runtime image
+# Stage 3: the Go hub, compiled
+# ---------------------------------------------------------------------------
+# **The hub is Go now; the Apple client is still Python, and the boundary is the pipe.**
+# `hub-go` is this repository's own code -- settings, the library walk, dedup, the job
+# store, the scheduler, the wrapper supervisor and the HTTP/SSE API -- and it is compiled
+# here into the one binary the runtime stage starts. The client is deliberately *not*
+# ported: it is the part that talks to somebody else's servers through FairPlay and
+# Widevine, it is already tuned against them, and a second implementation would drift from
+# upstream in ways nobody would notice until a track refused to download. It crosses the
+# boundary as a subprocess (`hub-go/tools/pyworker.py`, copied into the runtime stage
+# below), one JSON object per line in each direction.
+#
+# **`golang:bookworm`, not Debian's `golang-1.19` package**, for the same reason the NDK
+# above is pinned by version rather than inherited: the module declares `go 1.20`, and an
+# older toolchain would make the build fetch a newer one over the network, which is a
+# build that fails whenever the network does. The tag is the pin.
+FROM golang:1.22-bookworm AS hub-build
+
+# A C compiler, because the job store is SQLite: `internal/sqlite` declares
+# `#cgo LDFLAGS: -l:libsqlite3.so.0`, and the runtime stage installs that library
+# explicitly (see the runtime deps below). The headers are not needed -- the package
+# carries the declarations it uses -- but the file `-l:` names has to exist at link time,
+# and `libsqlite3-0` is what provides it.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libsqlite3-0; \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/hub-go
+
+# Only the build inputs. `tools/`, `bench/` and `testdata/` are development material --
+# the worker script among them is copied into the runtime stage on its own -- and copying
+# the whole directory would put the golden files and the synthetic library in a layer
+# nothing reads.
+COPY hub-go/go.mod hub-go/cmd hub-go/internal /src/hub-go/
+
+# **`GOPROXY=off` is the point rather than a workaround for a sandbox.** The module has no
+# third-party dependencies at all -- standard library plus cgo -- so a build that wants to
+# fetch anything is a build that has grown a dependency, and failing loudly here is the
+# cheapest place to find out. `-trimpath` keeps `/src/hub-go/...` out of the binary's
+# stack traces, and there is no `-ldflags` version string: a version that can disagree with
+# the image tag is worse than no version at all.
+RUN set -eux; \
+    CGO_ENABLED=1 GOFLAGS=-mod=mod GOPROXY=off GOTOOLCHAIN=local \
+        go build -trimpath -o /out/amdhub ./cmd/amdhub; \
+    test -x /out/amdhub
+
+# ---------------------------------------------------------------------------
+# Stage 4: the runtime image
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim
 
@@ -246,13 +294,19 @@ FROM python:3.13-slim
 # ffmpeg: Phase 3's post-save ALAC integrity check. Upstream treats a missing ffmpeg as a
 # warning rather than an error, so this is a convenience today and a requirement later --
 # but it is cheap now and expensive to retrofit, which is the plan's reason for including it.
-# uv: build-time only. The venv is at /opt/venv and CMD calls its python directly, so nothing
-# re-resolves the lock at container start.
+# uv: build-time only. The venv is at /opt/venv and the worker is started from it directly,
+# so nothing re-resolves the lock at container start.
+# libsqlite3-0: the Go hub's job store links SQLite dynamically (`hub-go/internal/sqlite`
+# declares `#cgo LDFLAGS: -l:libsqlite3.so.0`). The base image carries it for its own
+# `sqlite3` module, and it is named here for exactly the reason ca-certificates is: a binary
+# that runs because of a coincidence of the base image is a binary that stops running when
+# the base image changes.
 RUN apt-get update \
     && apt-get install --no-install-recommends --yes \
         ca-certificates \
         curl \
         ffmpeg \
+        libsqlite3-0 \
     && pip install --no-cache-dir uv==0.12.9 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -392,6 +446,24 @@ RUN set -eu; \
 COPY hub/hub /app/hub/hub
 COPY hub/deploy/build_gate.py /app/build_gate.py
 
+# The two halves of the boundary, and both are asserted before the image is finished.
+#
+# The binary is the hub. It is COPYed from the builder rather than compiled here for the
+# usual reason -- the runtime image has no toolchain and must not grow one -- and the
+# `test -x` is the same argument as the wrapper payload's check above: a stage that
+# produced nothing looks exactly like a stage that produced something until the container
+# starts, and then it is `exec: "/usr/local/bin/amdhub": no such file or directory`.
+#
+# The worker script is the other half. It is `hub-go/tools/pyworker.py` copied to /app
+# rather than part of the package, because it belongs to the Go tree: it exists to be the
+# Python end of the pipe, it imports `hub.ripper_host` (which *is* the package above), and
+# its docstring is the protocol's specification.
+COPY --from=hub-build /out/amdhub /usr/local/bin/amdhub
+COPY hub-go/tools/pyworker.py /app/pyworker.py
+RUN set -eu; \
+    test -x /usr/local/bin/amdhub; \
+    test -f /app/pyworker.py
+
 # PYTHONPATH is /app/hub -- the directory that CONTAINS the package.
 #
 # `import hub` needs a sys.path entry holding `hub/__init__.py`. The package is COPYed to
@@ -423,6 +495,34 @@ COPY hub/deploy/build_gate.py /app/build_gate.py
 # the seam's own sys.path insert, which is what the boundary test in test_ripper_host.py
 # enforces.
 ENV PYTHONPATH=/app/hub
+
+# --- The Go hub's window onto the client ----------------------------------
+# Five variables, and every one of them is absolute for the same reason the paths above
+# are: RipperHost holds the process working directory at the vendor root for its whole
+# life, so a relative path handed to the hub resolves against /app/AppleMusicDecrypt and
+# fails on a read, silently.
+#
+# AMD_PYTHON is the venv interpreter and not `python3`. The worker imports the client --
+# creart, temari, pywidevine -- and those live in /opt/venv; a bare `python3` would start,
+# fail the import, and exit, which the hub reports one screen away as "URLs cannot be
+# expanded" and "downloads cannot run".
+ENV AMD_PYTHON=/opt/venv/bin/python
+# The worker script, absolute: it is started as `$AMD_PYTHON $AMD_PYTHON_WORKER --config
+# $AMD_VENDOR_CONFIG`.
+ENV AMD_PYTHON_WORKER=/app/pyworker.py
+# The worker's working directory, and the directory `import hub` resolves through.
+#
+# **`AMD_WORKER_PYTHONPATH` rather than `PYTHONPATH`, and that is deliberate.** The hub
+# hands the worker a *constructed* environment (`config.Settings.WorkerEnv`) instead of
+# inheriting its own, so that a stray `PYTHONPATH` in the container -- pointed at some
+# other `hub` -- cannot make the worker import a different package than the image
+# installed. That failure looks exactly like a working worker until a URL fails to expand.
+ENV AMD_WORKER_DIR=/app/hub
+ENV AMD_WORKER_PYTHONPATH=/app/hub
+# The client's config, named rather than derived. The Python hub derived it from the
+# package's own location (`parents[2] / "AppleMusicDecrypt"`), which the build gate above
+# still asserts; the Go side is handed the value, and this is the path that gate verified.
+ENV AMD_VENDOR_CONFIG=/app/AppleMusicDecrypt/config.toml
 
 # AMD_WRAPPER_BINARY points at the ROOTLESS launcher, and that is not interchangeable with
 # the default this client ships:
@@ -459,14 +559,21 @@ ENV AMD_LIBRARY_ROOTS=${AMD_DOWNLOAD_ROOT}
 
 EXPOSE 8080
 
-# `python -m hub.app`, not `uvicorn hub.app:app`. main() reads the environment and serves on
-# one worker, so the settings and the lifespan the process actually runs are the ones the
-# factory was handed. A `--workers 1` that lives only in a compose file is a default someone
-# can raise, and the broker, the job store, the leaf registry, the scheduler and the session
-# generation all live on app.state -- so a second worker would be a second of each of those:
-# two schedulers claiming jobs, two leaf registries, and a logout that revokes only the
-# sessions its own worker minted.
-CMD ["/opt/venv/bin/python", "-m", "hub.app"]
+# The hub binary, and there is no worker-count flag to get wrong.
+#
+# `python -m hub.app` used to be the entry point, because a bare `uvicorn hub.app:app` would
+# take `--workers` from the command line -- a knob this deployment must not have, since
+# everything the hub owns lives in one process: the SSE broker, the job store, the leaf
+# registry, the scheduler, the session generation and the wrapper supervisor. Two of those
+# would be two schedulers racing `claim_next` (atomic, so no double rip, but two leaf
+# registries, so a job could be claimed by a process that never expanded it) and two session
+# generations, so a logout on one would not revoke a session minted by the other.
+#
+# The Go binary takes **no arguments at all** -- everything it reads comes from the
+# environment -- so the property holds by construction rather than by a flag being absent
+# from a command line. `cmd/amdhub/main.go` carries the argument, and
+# `test_one_process_and_the_setting_is_not_reachable_from_compose` reads it there.
+CMD ["/usr/local/bin/amdhub"]
 
 # The build gate, last, so it sees the finished image. AMD_PASSWORD is a throwaway for this
 # step only -- load_settings will not build Settings without one and the gate has to reach

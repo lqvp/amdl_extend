@@ -28,9 +28,9 @@ const (
 	DefaultBind = "0.0.0.0" // Reachable from the LAN.
 	DefaultPort = 8080
 	// The wrapper is loopback-only and its port must never be published.
-	DefaultWrapperHost   = "127.0.0.1"
-	DefaultWrapperPort   = 12340
-	DefaultWrapperBinary = "/usr/local/bin/wrapper-lite-qemu"
+	DefaultWrapperHost    = "127.0.0.1"
+	DefaultWrapperPort    = 12340
+	DefaultWrapperBinary  = "/usr/local/bin/wrapper-lite-qemu"
 	DefaultWrapperBaseDir = "/data/wrapper"
 	// Only job state is persisted, so the hub needs exactly one database file,
 	// and it lives on the hub-data volume.
@@ -46,6 +46,9 @@ const (
 	// put on a home connection without worrying the Apple account -- upstream's
 	// own ceiling (`maxRunningTasks`, 128) is tuned for a TUI driven by a person.
 	DefaultRipConcurrency = 4
+
+	// DefaultPython is the interpreter the client worker runs under.
+	DefaultPython = "python3"
 
 	MinSessionSecretChars = 32
 	// A port outside this range cannot be bound, and the failure would otherwise
@@ -64,10 +67,10 @@ type Settings struct {
 	// WrapperBinary is the launcher the supervisor starts. The image ships
 	// `wrapper-lite-rootless`, not `wrapper-lite-qemu`: the QEMU build has no host
 	// rootfs and cannot serve the 2FA code the hub writes.
-	WrapperBinary string
+	WrapperBinary  string
 	WrapperBaseDir string
-	WrapperHost   string
-	WrapperPort   int
+	WrapperHost    string
+	WrapperPort    int
 	// RipConcurrency is how many tracks to rip at once. Upstream's
 	// `DownloadManager` has been built for concurrency all along --
 	// `asyncio.Semaphore(maxRunningTasks)`, 128 by default -- and only the hub
@@ -79,6 +82,36 @@ type Settings struct {
 	DedupArtistScope string
 	DBPath           string
 	SessionSecret    []byte
+
+	// Python is the interpreter the Apple client's worker runs under.
+	Python string
+	// PythonWorker is the worker script (`hub-go/tools/pyworker.py`). Empty means
+	// "this deployment has no Apple client", which is a working hub: URLs cannot be
+	// expanded and downloads cannot run, and both say so through the client's own
+	// error text rather than through a crashed process.
+	PythonWorker string
+	// VendorConfig is the `AppleMusicDecrypt/config.toml` the seam reads.
+	//
+	// **Absolute, and supplied rather than derived.** The Python hub derives it from
+	// its own file's location (`parents[2] / "AppleMusicDecrypt"`), which is a
+	// derivation the *image layout* has to satisfy. In the port the layout is
+	// asserted once, by `hub/deploy/build_gate.py` and the Dockerfile that sets this
+	// variable, so the code has no second opinion about where the client is.
+	VendorConfig string
+	// WorkerDir is the worker's working directory. Empty means the process's own.
+	WorkerDir string
+	// TrustForwarded says whether a proxy is in front of the hub, which decides
+	// whether `X-Forwarded-Proto` may be believed. Off by default: the header is
+	// trivially spoofable, so believing it unconditionally would let anyone talk the
+	// hub out of setting `Secure` on its own session cookie.
+	TrustForwarded bool
+	// WorkerEnv is the worker's environment.
+	//
+	// Built explicitly rather than inherited, because a stray `PYTHONPATH` in the
+	// container that points at the Python hub would make the worker import a
+	// *different* `hub` than the one the image installed -- a bug that looks exactly
+	// like a working worker.
+	WorkerEnv []string
 }
 
 // Load builds `Settings` from `env`, or from the process environment when `env`
@@ -144,7 +177,52 @@ func Load(env map[string]string) (*Settings, error) {
 		DedupArtistScope: scope,
 		DBPath:           library.CleanPath(text(source, "AMD_DB_PATH", DefaultDBPath)),
 		SessionSecret:    secret,
+		Python:           text(source, "AMD_PYTHON", DefaultPython),
+		PythonWorker:     text(source, "AMD_PYTHON_WORKER", ""),
+		VendorConfig: library.CleanPath(
+			text(source, "AMD_VENDOR_CONFIG", "")),
+		WorkerDir:      text(source, "AMD_WORKER_DIR", ""),
+		TrustForwarded: truthy(source["AMD_TRUST_FORWARDED"]),
+		WorkerEnv:      workerEnv(source),
 	}, nil
+}
+
+// workerEnv is the client worker's environment: enough to import the package, and
+// nothing that could shadow it.
+//
+// `PYTHONUNBUFFERED` is not an optimisation. The worker writes one JSON object per
+// line to a pipe, and a buffered stdout means the Go side waits for an answer that is
+// already written -- a hang that looks like a slow download, on every request, until
+// the buffer happens to fill.
+//
+// `PYTHONPATH` is passed through only when it is set explicitly, and it is the one
+// variable that decides *which* `hub` package the worker imports.
+// truthy is the flag parse for the boolean settings. Anything unset or unrecognised is
+// false: a typo that turned the header trust *on* would be a silent downgrade of the
+// cookie's protection, and one that turned it off is a redirect loop somebody notices.
+func truthy(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func workerEnv(source map[string]string) []string {
+	env := []string{"PYTHONUNBUFFERED=1"}
+	if path := text(source, "PATH", ""); path != "" {
+		env = append(env, "PATH="+path)
+	}
+	if home := text(source, "HOME", ""); home != "" {
+		env = append(env, "HOME="+home)
+	}
+	if lang := text(source, "LANG", ""); lang != "" {
+		env = append(env, "LANG="+lang)
+	}
+	if pythonPath := text(source, "AMD_WORKER_PYTHONPATH", ""); pythonPath != "" {
+		env = append(env, "PYTHONPATH="+pythonPath)
+	}
+	return env
 }
 
 func environ() map[string]string {

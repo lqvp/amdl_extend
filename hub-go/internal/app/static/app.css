@@ -1,0 +1,270 @@
+/* amd-hub
+ *
+ * No framework and no build step. The queue's live updates are the platform's
+ * `EventSource`, and every other action is a plain form post, so the hub works with
+ * scripting disabled -- which is the right default for something that runs on one person's
+ * LAN behind whatever their router does to it.
+ *
+ * Dark by default with `prefers-color-scheme: light` as the alternative, because a page
+ * that is white in a dark room at 2am is a page about a download that has been running for
+ * two hours. Both are checked for contrast on the text colours used against the surfaces.
+ */
+
+:root {
+  --bg: #14161a;
+  --surface: #1c1f26;
+  --surface-2: #23262f;
+  --line: #31353f;
+  --text: #e6e8ec;
+  --muted: #9aa1ad;
+  --accent: #7aa2f7;
+  --ok: #86c06c;
+  --warn: #e0af68;
+  --bad: #f7768e;
+  --radius: 8px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --surface-2: #eef0f4;
+    --line: #d8dce3;
+    --text: #1a1d23;
+    --muted: #5b6472;
+    --accent: #2f5fd0;
+    --ok: #2f7a1f;
+    --warn: #8a5a00;
+    --bad: #b02a3f;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP",
+        sans-serif;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: 0.75rem 1.25rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.bar .brand { font-weight: 700; letter-spacing: 0.02em; text-decoration: none; color: var(--text); }
+.bar nav { display: flex; gap: 1rem; }
+.bar nav a { color: var(--muted); text-decoration: none; }
+.bar nav a:hover { color: var(--text); }
+.bar .logout { margin-left: auto; }
+
+main {
+  max-width: 68rem;
+  margin: 0 auto;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+}
+
+.card.narrow { max-width: 26rem; margin: 3rem auto; }
+.card h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
+.card h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+
+label { display: block; margin: 0.6rem 0 0.2rem; font-size: 0.85rem; color: var(--muted); }
+label.inline { display: inline-flex; align-items: center; gap: 0.35rem; margin: 0; }
+
+input, select, textarea {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+}
+
+input[type="checkbox"] { width: auto; }
+
+button {
+  margin-top: 0.75rem;
+  padding: 0.45rem 0.9rem;
+  background: var(--accent);
+  color: #0b0d12;
+  border: 0;
+  border-radius: 6px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.08); }
+button.link { background: none; color: var(--muted); margin: 0; font-weight: 400; padding: 0; }
+button.link:hover { color: var(--text); }
+
+.row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+.row > label { margin: 0; }
+.row input, .row select { width: auto; min-width: 8rem; }
+
+.muted { color: var(--muted); }
+.small { font-size: 0.82rem; }
+.error, .error-text { color: var(--bad); }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; }
+
+pre#log {
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.6rem;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.actions { white-space: nowrap; }
+td.actions button { margin: 0; padding: 0.2rem 0.5rem; font-size: 0.8rem; }
+
+.status { font-weight: 600; }
+.status-queued .status { color: var(--muted); }
+.status-waiting .status { color: var(--warn); }
+.status-running .status { color: var(--accent); }
+.status-done .status { color: var(--ok); }
+.status-skipped .status { color: var(--warn); }
+.status-failed .status, .status-cancelled .status { color: var(--bad); }
+
+progress { width: 8rem; height: 0.5rem; }
+
+.paths { margin: 0.25rem 0 0; padding-left: 1.1rem; }
+.paths li { word-break: break-all; }
+
+.roots { margin: 0.4rem 0; padding-left: 1.1rem; }
+.roots li.bad { color: var(--bad); }
+
+.pill {
+  display: inline-block;
+  margin-right: 0.35rem;
+  padding: 0.05rem 0.45rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* -- the queue, read at a glance ------------------------------------------------
+ *
+ * A queue that only grows is a queue you scroll. Three things keep it readable: the
+ * counts above the table, so the state is knowable without reading it; the two bulk
+ * controls, because there is otherwise no way to remove a row at all; and collapsing
+ * the finished ones, which on a busy library are almost all of them.
+ *
+ * `status-*` colours are on the cell rather than the row because the row background is
+ * how a selection would read, and this table has no selection.
+ */
+
+.summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 0.75rem;
+}
+
+.count {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.count-n { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+
+/* The counts are ordered by status name, so the eye cannot rely on position. A count
+ * worth noticing gets the colour its rows use, which is one fewer thing to learn. */
+.count[data-count="failed"] .count-n,
+.count[data-count="cancelled"] .count-n { color: var(--bad); }
+.count[data-count="running"] .count-n { color: var(--accent); }
+.count[data-count="queued"] .count-n,
+.count[data-count="waiting"] .count-n { color: var(--muted); }
+.count[data-count="done"] .count-n,
+.count[data-count="skipped"] .count-n { color: var(--ok); }
+
+.row.bulk { margin: 0 0 0.4rem; }
+.row.bulk .inline-form { display: inline-flex; align-items: center; gap: 0.4rem; }
+.row.bulk .inline-form label { margin: 0; }
+
+/* Both of these set a `background` of their own rather than only a `color`. The base
+ * `button` is a filled `var(--accent)`, so a rule that recoloured the label alone painted it
+ * onto that fill -- and at `var(--accent)` on `var(--accent)` the label disappeared, which is
+ * what the first screenshot of this page showed. The pressed state is an *inset* button
+ * rather than a tint, because a tint of a filled button is the same colour as the button. */
+button.danger { background: var(--bad); color: #0b0d12; }
+button.danger:hover { filter: brightness(1.08); }
+
+[data-action="queue-toggle-finished"][aria-pressed="true"] {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--accent);
+}
+
+/* The status cell carries the weight as well as the colour, so the state is legible
+ * without relying on hue -- which is the one thing a colour-only signal gets wrong. */
+.status { font-weight: 600; }
+.status-running { font-weight: 700; }
+.status-failed, .status-cancelled { text-decoration: underline; text-decoration-thickness: 1px; }
+
+/* The two status cards are <details>, so they are closed when there is nothing to say.
+ * A closed card is one line; the marker is styled rather than removed so it still reads
+ * as expandable. */
+details.card > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary::before {
+  content: "▸";
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+details.card[open] > summary::before { content: "▾"; }
+details.card > summary h1, details.card > summary h2 { margin: 0; }
+details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--accent); }
+
+/* `row.hidden = true` relies on the UA's `[hidden] { display: none }`, and a `<tr>` is
+ * exactly the element where that is unreliable: a single author rule giving `tr` a display
+ * value outranks the UA sheet, and the row then stays visible while the script believes it
+ * is hidden. Said once, here, so no future rule can undo it by accident. */
+#queue-body tr[hidden] { display: none; }

@@ -63,7 +63,11 @@ ODD = [
 ]
 SEPARATORS = ["", ".", "-", "_", "．", "－", "＿", " ", "  ", "\u3000", " - "]
 EXTS = [".m4a", ".M4A", ".Flac", ".flac", ".mp4", ".wav", ".opus", ".aac", ".ec3",
-        ".jpg", ".lrc", ".part", ".m4a.part", "", ".", ".m4", ".ogg", ".m4b"]
+        ".jpg", ".lrc", ".part", ".m4a.part", "", ".", ".m4", ".ogg", ".m4b",
+        # `casefold` is not `lower`: the ligature "ﬂ" folds to "fl", so ".ﬂac" is a
+        # known extension while a `ToLower`-based port says it is not. These three
+        # pin that, because the difference is invisible until it is a re-download.
+        ".ﬂac", ".ﬄac", ".ﬅac"]
 TITLES = [
     "Caribbean Blue", "Song. Pt. 2", "01. Artist - Title", "1. Title",
     "1979 - Song", "…to mo da ti _", "...And Then", "4pi", "1st EP",
@@ -84,6 +88,7 @@ def name_corpus() -> list[str]:
         names.add(f"{odd}.m4a")
         names.add(f"Title {odd}")
         names.add(f"{odd}{odd}")
+    names.update({"Song.ﬂac", "Song.ﬄac", "Song.ﬅac", "Song.ＦＬＡＣ.m4a", "ＡＢＣ.ﬂac"})
     for fw in FULLWIDTH:
         names.add(fw)
         names.add(f"01{fw}Title")

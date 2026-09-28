@@ -5,6 +5,12 @@ client and the `wrapper-lite` backend, packaged as one container. It watches you
 deduplicates against it, and drives the downloader so an album is requested from a browser
 instead of a terminal.
 
+The hub itself -- the web UI, the queue, the library scan, dedup and the wrapper supervisor -- is
+written in **Go**, in `hub-go/`, and the container runs the one binary that produces. The Apple
+client is not ported: it is the part that talks to Apple's servers through FairPlay and Widevine,
+and it runs as a Python subprocess behind a line-delimited JSON pipe. See
+[The Go hub and the Python client](#the-go-hub-and-the-python-client).
+
 ## Run it
 
 ```bash
@@ -29,6 +35,7 @@ is missing:
 upstream repos at build time, each pinned to a commit hash, so a plain clone is all you need and
 there is nothing to update by hand. One stage compiles the wrapper's launcher and Android payload
 with the NDK, which means there is no host build to do and no prebuilt binary to go looking for.
+Another compiles `hub-go/` into the single binary the container starts.
 
 The first build downloads the NDK (692 MB, one layer, cached afterwards), clones those two repos,
 and fetches cJSON and Dobby for CMake, so allow a few minutes on a cold cache and expect the
@@ -148,14 +155,54 @@ That is a login prompt, not a failure. Log in as above and restart the wrapper. 
 `start_period` is 120 s for exactly this reason; lowering it makes a correct boot look like a
 crash loop.
 
+## The Go hub and the Python client
+
+The hub's own code lives in `hub-go/`. Settings, the library walk, dedup, the SQLite job store and
+queue, the scheduler, the wrapper supervisor, the HTTP API and the SSE stream are all there, and
+the templates and the two static assets are **embedded in the binary** -- there is no file layout
+to get wrong at runtime and no working directory a page depends on.
+
+The Apple client is deliberately not ported. It is the four thousand lines of Apple API and
+FairPlay/Widevine work that talks to somebody else's servers, it is already tuned against them,
+and a second implementation would drift from upstream in ways nobody would notice until a track
+refused to download. It stays Python, reached through `hub/ripper_host.py`, and the Go side drives
+it across a process boundary: one long-lived worker (`hub-go/tools/pyworker.py`) speaking one JSON
+object per line in each direction. Starting the client is what costs seconds -- the token cache,
+the HTTP client, `creart`'s process-global caches -- so the worker is started once and reused
+rather than per request.
+
+What the port buys is the hub's own hot paths, measured against the Python implementation doing
+the same work (`hub-go/tools/bench_compare.sh`, on a synthetic 3,315-album / 21,400-file library):
+
+| | Go | Python | |
+|---|---|---|---|
+| library scan (3,315 scopes) | 47.4 ms | 185.6 ms | 3.9x |
+| filename normalization | 1,335 ns | 2,438 ns | 1.8x |
+| duplicate lookup | 3,396 ns | 9,766 ns | 2.9x |
+
+Nothing about the behaviour changed with it: the scan is still taken on every request rather than
+cached, dedup is still the same `loose`/`strict` rule with the matched paths named in
+`skip_reason`, and the queue still refuses to run the same `adam_id` twice at once.
+
+Running the hub outside a container needs the same environment the image sets: `AMD_PASSWORD` and
+`AMD_LIBRARY_ROOTS`, plus the client seam's five -- `AMD_PYTHON` (the interpreter that can import
+the client), `AMD_PYTHON_WORKER` (`hub-go/tools/pyworker.py`), `AMD_WORKER_PYTHONPATH` (the
+directory holding the `hub` package), `AMD_WORKER_DIR`, `AMD_VENDOR_CONFIG` (the client's
+`config.toml`) and `AMD_WRAPPER_BINARY`.
+
 ## Development
 
 ```bash
-cd hub && uv run pytest -v          # 647 tests
+cd hub && uv run pytest -v          # 647 tests, the Python half
+cd hub-go && go build ./... && go test ./...
+cd hub-go && tools/bench_compare.sh # the port's own numbers, against this checkout's Python
 ```
 
-`hub/` is the only code here we own. `AppleMusicDecrypt/` and `wrapper/` are upstream projects
-that the build clones at a pinned commit and does not track here.
+`hub/` and `hub-go/` are the code this repository owns. `hub/` keeps the client seam
+(`ripper_host.py`, `resolver.py`), which is what the worker imports, plus the deployment gate and
+the test suite that pins the deployment's invariants; `hub-go/` is the hub.
+`AppleMusicDecrypt/` and `wrapper/` are upstream projects that the build clones at a pinned commit
+and does not track here.
 
 `hub/tests/test_deployment.py` holds the deployment's invariants — the vendor-path derivation,
 `PYTHONPATH`, the config pin, the security posture, the mounts. `hub/deploy/build_gate.py` runs
@@ -178,7 +225,7 @@ makes a zero visible.
 
 ## Licence and provenance
 
-`hub/` is the work of this repository. `AppleMusicDecrypt/` and `wrapper/` are upstream projects
+`hub/` and `hub-go/` are the work of this repository. `AppleMusicDecrypt/` and `wrapper/` are upstream projects
 with their own licences, cloned from their own remotes at pinned commits. Their sources are used
 as-is; the image builds its own `config.toml` from upstream's `config.example.toml` and compiles
 the wrapper's launcher and Android payload.

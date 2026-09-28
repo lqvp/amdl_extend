@@ -24,10 +24,10 @@ type goldenSettings struct {
 }
 
 type goldenConfigCase struct {
-	Name     string          `json:"name"`
+	Name     string            `json:"name"`
 	Env      map[string]string `json:"env"`
-	Error    string          `json:"error"`
-	Settings *goldenSettings `json:"settings"`
+	Error    string            `json:"error"`
+	Settings *goldenSettings   `json:"settings"`
 }
 
 type goldenConfig struct {

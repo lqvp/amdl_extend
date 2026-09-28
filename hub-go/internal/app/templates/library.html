@@ -1,0 +1,77 @@
+{{/*
+  library.html -- what the filesystem says.
+
+  Read-only, and deliberately so: destructive cleanup of the library is refused
+  outright, because a file operation run by mistake against 341 GB of real data is a
+  far larger harm than the convenience of offering it. This page is the list.
+
+  The per-root count and the *empty* warning below it are the part that matters, and
+  `degraded_roots` cannot cover them: a drive that is not plugged in can be mounted and
+  empty rather than missing -- Docker's bind-mount autocreate makes the directory -- and
+  that reads as a perfectly healthy root with nothing in it. Nothing on disk
+  distinguishes an empty library from an absent drive, so the only honest thing is to
+  show the count and let a human notice a zero. Without it the failure is a silent
+  re-download of everything that lived on the drive.
+
+  The path column is `album.path`, not `album.relpath`: a bare relpath does not resolve
+  once more than one library root is configured -- it says which directory but not which
+  library -- and in a listing that matters as much as it does in a `skip_reason`. It is
+  the same `roots[root_index] / relpath` expression the API builds.
+*/}}{{ define "content" }}
+<section class="card">
+  <h1>Library</h1>
+  <p class="muted small">
+    {{ len .Listing.Albums }} album directories across {{ len .Listing.Roots }} root(s),
+    {{ len .Listing.Artists }} artists.
+    Read from disk on every request: a folder moved or renamed outside the hub is followed
+    immediately, and there is no index to go stale.
+  </p>
+  {{ if .Listing.DegradedRoots }}
+    <p class="error" role="alert">
+      Unreadable:
+      {{ range $index, $root := .Listing.DegradedRoots }}{{ if $index }}, {{ end }}<code>{{ $root }}</code>{{ end }}.
+      Downloads continue; duplicates are only detected against the roots that are readable.
+    </p>
+  {{ end }}
+  <table class="roots small">
+    <thead>
+      <tr><th>root</th><th class="num">album directories</th><th></th></tr>
+    </thead>
+    <tbody>
+      {{ range .Listing.RootRows }}
+        <tr>
+          <td><code>{{ .Path }}</code></td>
+          <td class="num">{{ .Count }}</td>
+          <td>
+            {{- if .Degraded -}}
+              <span class="error-text">unreadable</span>
+            {{- else if eq .Count 0 -}}
+              <span class="error-text" role="alert">empty &mdash; is this mounted?</span>
+            {{- end -}}
+          </td>
+        </tr>
+      {{ end }}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <table>
+    <thead>
+      <tr><th>artist</th><th>album</th><th>tracks</th><th>path</th></tr>
+    </thead>
+    <tbody>
+      {{ range .Listing.Albums }}
+        <tr>
+          <td>{{ if .Artist }}{{ .Artist }}{{ else }}&mdash;{{ end }}</td>
+          <td>{{ if .Name }}{{ .Name }}{{ else }}&mdash;{{ end }}</td>
+          <td class="num">{{ .Tracks }}</td>
+          <td class="small"><code>{{ .Path }}</code></td>
+        </tr>
+      {{ else }}
+        <tr><td colspan="4" class="muted">No album directories were found.</td></tr>
+      {{ end }}
+    </tbody>
+  </table>
+</section>
+{{ end }}

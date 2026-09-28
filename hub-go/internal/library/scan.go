@@ -27,6 +27,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -210,73 +211,147 @@ func walkRoot(rootIndex int, root string) []*AlbumDir {
 	if !strings.HasSuffix(prefix, string(os.PathSeparator)) {
 		prefix += "/"
 	}
-	var out []*AlbumDir
-	var walk func(dir string)
-	walk = func(dir string) {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			// `os.walk` with a default `onerror` skips a directory it cannot
-			// read, and `os.ReadDir` does the same for the directory itself. A
-			// permission-denied subtree must not abort the other 3,000 albums.
-			return
+	walker := &walker{prefix: prefix, sem: make(chan struct{}, walkParallelism())}
+	return walker.walk(rootIndex, root)
+}
+
+// walkParallelism bounds how many directories are walked at once.
+//
+// The pool is a channel rather than an unbounded `go` per directory because a
+// 4,000-album library is ~5,000 directories, and 5,000 goroutines each doing one
+// `ReadDir` would spend more time in the scheduler than in the syscall. Four per
+// available CPU is the usual shape for an I/O-bound walk: enough overlap to keep
+// the disk and the cores busy, not so much that the in-flight set is unbounded.
+func walkParallelism() int {
+	limit := 4 * runtime.GOMAXPROCS(0)
+	if limit < 2 {
+		limit = 2
+	}
+	return limit
+}
+
+// walker holds the walk's one piece of shared state -- the concurrency limit --
+// and the root prefix the relpaths are cut against.
+type walker struct {
+	prefix string
+	sem    chan struct{}
+}
+
+// walk yields the album scopes under one directory, in a stable order, and
+// **descends into subdirectories concurrently**.
+//
+// Order is what makes this more than a `go` per directory: a directory's own
+// scope comes first, then its children in name order, which is exactly what
+// CPython's `os.walk` yields and what `TestScanMatchesPython` pins against a
+// generated corpus. Concurrency is bounded by `sem` and the results are
+// reassembled positionally, so the answer is byte-identical to the sequential
+// one -- the only thing parallelism changes is how long it takes.
+//
+// The recursion is what makes it worth doing at all on the deployment's common
+// shape: `AMD_LIBRARY_ROOTS` is usually *one* root, so per-root concurrency would
+// give a single-threaded walk, and the walk is where 0.044 s of the Python
+// original's 0.091 s scan is spent.
+//
+// Nothing below the root is resolved or cleaned -- see the package comment for
+// why that is load-bearing rather than fastidious.
+func (w *walker) walk(rootIndex int, dir string) []*AlbumDir {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// `os.walk` with a default `onerror` skips a directory it cannot read, and
+		// `os.ReadDir` does the same for the directory itself. A permission-denied
+		// subtree must not abort the other 3,000 albums.
+		return nil
+	}
+	// readdir order is filesystem-dependent -- NTFS does not sort -- and relpaths
+	// are shown to the user in `skip_reason`, so two scans of one unchanged tree
+	// have to come out in the same order. `os.ReadDir` sorts by name, which is the
+	// same order `dirnames.sort()` produces.
+	var dirs []string
+	var audio []string
+	for _, entry := range entries {
+		if isDirEntry(dir, entry) {
+			dirs = append(dirs, entry.Name())
+			continue
 		}
-		// readdir order is filesystem-dependent -- NTFS does not sort -- and
-		// relpaths are shown to the user in `skip_reason`, so two scans of one
-		// unchanged tree have to come out in the same order. `os.ReadDir` sorts
-		// by name, which is the same order `dirnames.sort()` produces.
-		var dirs []string
-		var audio []string
-		for _, entry := range entries {
-			if isDirEntry(dir, entry) {
-				dirs = append(dirs, entry.Name())
-				continue
-			}
-			if normalize.IsAudioFile(entry.Name()) {
-				audio = append(audio, entry.Name())
-			}
-		}
-		if len(audio) > 0 {
-			relpath := relpathOf(dir, root, prefix)
-			// `.part` is already gone because `IsAudioFile` rejects it: 160 of
-			// those are the real library's leftovers from interrupted downloads,
-			// and counting one as an existing track would wrongly skip a
-			// re-request.
-			keys := make(map[string]struct{}, len(audio))
-			for _, name := range audio {
-				keys[normalize.Normalize(name, true)] = struct{}{}
-			}
-			parts := []string{}
-			if relpath != RootScope {
-				parts = strings.Split(relpath, "/")
-			}
-			// A root that holds audio directly is still an album scope -- the
-			// real library has a loose track sitting in it, and leaving those
-			// files out would make them invisible to dedup, silently.
-			//
-			// Its name is "" rather than the root's own basename. No directory on
-			// any filesystem can have an empty name, so "" cannot be the name of
-			// a real album; a basename taken from the caller's spelling of the
-			// path can (the same drive is "Music" at one path and "my-music" at
-			// another), which would make `Scan.Albums` depend on how the root was
-			// configured.
-			name := ""
-			if len(parts) > 0 {
-				name = parts[len(parts)-1]
-			}
-			out = append(out, &AlbumDir{
-				RootIndex: rootIndex,
-				Relpath:   relpath,
-				Name:      name,
-				Artist:    artist(parts),
-				TrackKeys: keys,
-			})
-		}
-		for _, child := range dirs {
-			walk(dir + "/" + child)
+		if normalize.IsAudioFile(entry.Name()) {
+			audio = append(audio, entry.Name())
 		}
 	}
-	walk(root)
+
+	var out []*AlbumDir
+	if len(audio) > 0 {
+		out = append(out, w.scope(rootIndex, dir, audio))
+	}
+	if len(dirs) == 0 {
+		return out
+	}
+
+	// One child is walked inline: spawning a goroutine for a chain of
+	// single-child directories would be all overhead and no parallelism.
+	if len(dirs) == 1 {
+		return append(out, w.walk(rootIndex, dir+"/"+dirs[0])...)
+	}
+
+	children := make([][]*AlbumDir, len(dirs))
+	var wg sync.WaitGroup
+	for i, child := range dirs {
+		path := dir + "/" + child
+		select {
+		case w.sem <- struct{}{}:
+			wg.Add(1)
+			go func(i int, path string) {
+				defer wg.Done()
+				defer func() { <-w.sem }()
+				children[i] = w.walk(rootIndex, path)
+			}(i, path)
+		default:
+			// The pool is full: this goroutine does the child itself, which is
+			// what keeps the work moving without more goroutines.
+			children[i] = w.walk(rootIndex, path)
+		}
+	}
+	wg.Wait()
+	for _, child := range children {
+		out = append(out, child...)
+	}
 	return out
+}
+
+// scope is the one unambiguous fact a walk yields: a directory that directly
+// holds at least one audio file is an album scope.
+func (w *walker) scope(rootIndex int, dir string, audio []string) *AlbumDir {
+	relpath := relpathOf(dir, strings.TrimSuffix(w.prefix, "/"), w.prefix)
+	// `.part` is already gone because `IsAudioFile` rejects it: 160 of those are
+	// the real library's leftovers from interrupted downloads, and counting one as
+	// an existing track would wrongly skip a re-request.
+	keys := make(map[string]struct{}, len(audio))
+	for _, name := range audio {
+		keys[normalize.Normalize(name, true)] = struct{}{}
+	}
+	parts := []string{}
+	if relpath != RootScope {
+		parts = strings.Split(relpath, "/")
+	}
+	// A root that holds audio directly is still an album scope -- the real library
+	// has a loose track sitting in it, and leaving those files out would make them
+	// invisible to dedup, silently.
+	//
+	// Its name is "" rather than the root's own basename. No directory on any
+	// filesystem can have an empty name, so "" cannot be the name of a real album;
+	// a basename taken from the caller's spelling of the path can (the same drive
+	// is "Music" at one path and "my-music" at another), which would make
+	// `Scan.Albums` depend on how the root was configured.
+	name := ""
+	if len(parts) > 0 {
+		name = parts[len(parts)-1]
+	}
+	return &AlbumDir{
+		RootIndex: rootIndex,
+		Relpath:   relpath,
+		Name:      name,
+		Artist:    artist(parts),
+		TrackKeys: keys,
+	}
 }
 
 // isDirEntry mirrors CPython's `os.walk`, which asks `entry.is_dir()` -- and
