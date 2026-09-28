@@ -52,6 +52,11 @@
   --bad: #b03057;
   --on-bad: #fff8fa;
 
+  /* One shadow per theme, tinted to the page rather than dropped in as black: a card on a
+   * pale rose ground with a grey-black shadow reads as two different products stacked. */
+  --shadow: 0 1px 2px rgba(43, 31, 36, 0.04), 0 10px 24px -14px rgba(168, 62, 99, 0.22);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+
   --radius: 8px;
   --radius-sm: 6px;
   --radius-pill: 999px;
@@ -90,6 +95,9 @@
     --warn: #e0af68;
     --bad: #f7768e;
     --on-bad: #24181d;
+
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 28px -16px rgba(244, 170, 195, 0.14);
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 }
 
@@ -118,8 +126,9 @@ body {
 .bar {
   display: flex;
   align-items: center;
-  gap: var(--sp-5);
-  padding: var(--sp-3) var(--sp-5);
+  gap: var(--sp-4);
+  min-height: 3.5rem; /* the header is chrome; 56px is the whole of its budget */
+  padding: var(--sp-2) var(--sp-5);
   background: var(--surface);
   border-bottom: 1px solid var(--line);
   position: sticky;
@@ -127,14 +136,44 @@ body {
   z-index: 2;
 }
 
-.bar .brand { font-weight: 700; letter-spacing: 0.02em; text-decoration: none; color: var(--text); }
-.bar nav { display: flex; gap: var(--sp-4); }
-.bar nav a { color: var(--muted); text-decoration: none; }
+.bar .brand {
+  font-weight: 700;
+  font-size: var(--text-lg);
+  letter-spacing: -0.01em;
+  text-decoration: none;
+  color: var(--text);
+}
+
+/* The nav is two pages, not a menu, so it wears the shape that names the pair: a pill
+ * container with the current page lifted out of it. `aria-current` is still what drives it
+ * -- the server writes the attribute, so the control reads correctly with scripting off and
+ * the lift is the same signal in both themes. */
+.bar nav {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+}
+.bar nav a {
+  padding: 0.2rem 0.85rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
 .bar nav a:hover { color: var(--text); }
 /* The current page is named by the server (`aria-current`, set from the request path), so
  * it works with scripting off. Two nav items that look the same is a small thing until the
  * hub is on a phone and "which of these am I on" costs a tap. */
-.bar nav a[aria-current="page"] { color: var(--accent-ink); font-weight: 600; }
+.bar nav a[aria-current="page"] {
+  background: var(--surface);
+  color: var(--accent-ink);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
 .bar .logout { margin-left: auto; }
 
 main {
@@ -151,11 +190,12 @@ main {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: var(--sp-5) var(--sp-6);
+  box-shadow: var(--shadow);
 }
 
 .card.narrow { max-width: 26rem; margin: var(--sp-6) auto; }
-.card h1 { font-size: var(--text-xl); line-height: 1.25; letter-spacing: -0.01em; margin: 0 0 var(--sp-2); }
-.card h2 { font-size: var(--text-lg); line-height: 1.25; letter-spacing: -0.01em; margin: 0 0 var(--sp-2); }
+.card h1 { font-size: var(--text-xl); font-weight: 700; line-height: 1.25; letter-spacing: -0.015em; margin: 0 0 var(--sp-2); }
+.card h2 { font-size: var(--text-lg); font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; margin: 0 0 var(--sp-2); }
 
 /* Prose gets a measure; a paragraph of explanation that runs the full 68rem is a paragraph
  * nobody finishes. The counts row is excluded because it is a flex list, not prose. */
@@ -176,6 +216,10 @@ input, select, textarea {
 
 input[type="checkbox"] { width: auto; }
 
+/* Placeholders are examples here, not labels, and the UA's grey fails AA on the tinted
+ * field. --muted clears 4.5:1 on both field grounds in both themes. */
+input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
+
 /* The base `button` used to carry `margin-top: 0.75rem`, which is a form's spacing written
  * as a property of every button on the page -- and then had to be undone three times, in
  * `td.actions`, in `.row.bulk`, and by accident in the wrapper's Start/Stop/Restart row,
@@ -184,9 +228,13 @@ input[type="checkbox"] { width: auto; }
 button {
   margin: 0;
   padding: 0.45rem 0.9rem;
+  min-height: 2.25rem;
   background: var(--accent);
   color: var(--on-accent);
-  border: 0;
+  /* A 1px edge in the ink hue at a third strength: the pastel fill alone disappears on a
+   * pale page, and the edge is what says "this pushes". `color-mix` is dropped whole on
+   * engines without it, which leaves the old borderless button -- the state before. */
+  border: 1px solid color-mix(in srgb, var(--accent-ink) 32%, transparent);
   border-radius: var(--radius-sm);
   font: inherit;
   font-weight: 600;
@@ -200,7 +248,7 @@ button:not(.link):hover { filter: brightness(0.95); }
 /* Pressed, not tapped: a 1px drop is the whole of the acknowledgement, and `transform` is
  * the one property here that does not trigger layout. */
 button:not(.link):active { transform: translateY(1px); }
-button.link { background: none; color: var(--muted); margin: 0; font-weight: 400; padding: 0; transition: color 0.12s ease; }
+button.link { background: none; border: 0; color: var(--muted); margin: 0; min-height: 0; font-weight: 400; padding: 0; transition: color 0.12s ease; }
 button.link:hover { color: var(--text); }
 
 .row { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
@@ -219,6 +267,10 @@ button.link:hover { color: var(--text); }
  * no label to keep company, and stacking it would break the re-queue form away from its
  * button. */
 @media (max-width: 44rem) {
+  .bar { gap: var(--sp-3); padding: var(--sp-2) var(--sp-4); }
+  .bar nav a { padding: 0.2rem 0.65rem; }
+  main { padding: var(--sp-4); }
+  .card { padding: var(--sp-4); }
   .row:not(.bulk) {
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
@@ -239,7 +291,7 @@ button.link:hover { color: var(--text); }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
 
-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88em; }
+code { font-family: var(--font-mono); font-size: 0.88em; }
 
 pre#log {
   margin: 0;
@@ -252,8 +304,10 @@ pre#log {
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
-  padding: var(--sp-2);
+  padding: var(--sp-3);
+  font-family: var(--font-mono);
   font-size: var(--text-xs);
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -266,11 +320,19 @@ pre#log {
 .table-wrap { overflow-x: auto; }
 
 table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+th, td { text-align: left; padding: 0.45rem 0.55rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+th {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  padding-block: 0.55rem;
+}
+/* The title is what the operator scans for; everything else in the row is state around it. */
+td.title { font-weight: 600; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.actions { white-space: nowrap; }
-td.actions button { padding: 0.2rem 0.5rem; font-size: var(--text-xs); }
+td.actions button { padding: 0.2rem 0.5rem; min-height: 1.75rem; font-size: var(--text-xs); }
 
 /* Tracking a value across seven columns is the one thing a table makes hard that a list
  * does not, and a hover is the cheapest thing that fixes it. */
@@ -293,6 +355,7 @@ td.actions button { padding: 0.2rem 0.5rem; font-size: var(--text-xs); }
 .status {
   display: inline-block;
   padding: 0.1rem 0.5rem;
+  border: 1px solid color-mix(in srgb, currentColor 26%, transparent);
   border-radius: var(--radius-pill);
   background: color-mix(in srgb, currentColor 14%, transparent);
 }
@@ -346,6 +409,33 @@ ul.roots li.bad { color: var(--bad); }
   border-radius: var(--radius-pill);
   font-size: var(--text-xs);
   color: var(--muted);
+}
+
+/* A path is shown to be acted on. The copy button belongs to the path, not to the row:
+ * quiet, the size of the text it copies, and it answers with a word ("copied"/"failed")
+ * rather than an animation -- on plain HTTP the legacy clipboard path is the normal route
+ * and the answer has to be legible when it arrives, not pretty while it goes. */
+button.copy {
+  margin-left: 0.35rem;
+  padding: 0 0.4rem;
+  min-height: 0;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
+  font-weight: 400;
+}
+button.copy:hover { color: var(--text); }
+
+/* A row's age, beside its title. `tabular-nums` because "9m" becoming "10m" on a five
+ * second beat must not shuffle the title. */
+.ago {
+  margin-left: 0.35rem;
+  font-size: var(--text-xs);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* -- the queue, read at a glance ------------------------------------------------
@@ -453,8 +543,10 @@ details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--
 
 /* Motion above feedback -- a hover, a press, a focus ring arriving -- has no business on a
  * tool someone leaves open all day, and the page does not claim any. This is the switch for
- * the two transitions that do exist, for the operator who has asked the OS for less. */
+ * every hover and press transition in the file, for the operator who has asked the OS for
+ * less. */
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }
   button:not(.link):active { transform: none; }
+  .bar nav a { transition: none; }
 }

@@ -51,7 +51,7 @@
               {%- if root in listing.degraded_roots -%}
                 <span class="error-text">unreadable</span>
               {%- elif listing.per_root[loop.index0] == 0 -%}
-                <span class="error-text" role="alert">empty &mdash; is this mounted?</span>
+                <span class="error-text" role="alert">empty, is this mounted?</span>
               {%- endif -%}
             </td>
           </tr>
@@ -81,7 +81,8 @@
               `roots[root_index] / relpath`, which `_album_dict` already builds and which
               `DuplicateHit.resolved` is built from.
             -#}
-            <td class="small"><code>{{ album.path }}</code></td>
+            <td class="small"><code>{{ album.path }}</code><button type="button" class="copy"
+                data-action="copy-text" data-text="{{ album.path }}" title="copy this path">copy</button></td>
           </tr>
         {% else %}
           <tr><td colspan="4" class="muted">No album directories were found.</td></tr>

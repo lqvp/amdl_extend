@@ -65,7 +65,8 @@
       <span class="muted">already on disk at</span>
       <ul class="paths">
         {% for path in job.skip_reason.removeprefix('duplicate:').split('|') %}
-          <li><code>{{ path }}</code></li>
+          <li><code>{{ path }}</code><button type="button" class="copy" data-action="copy-text"
+               data-text="{{ path }}" title="copy this path">copy</button></li>
         {% endfor %}
       </ul>
     {% elif job.error %}

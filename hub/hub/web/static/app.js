@@ -1,4 +1,4 @@
-/* amd-hub's client, in one file and about four hundred and fifty lines.
+/* amd-hub's client, in one file and about six hundred lines.
  *
  * No HTMX. The brief named server-rendered HTMX templates, and the server-rendered half is
  * what is here -- every page arrives complete from Jinja2 and every action is a form that
@@ -26,6 +26,56 @@
  */
 (function () {
   "use strict";
+
+  /* The copy buttons live wherever a path is shown -- a skipped row's matched paths, a
+   * library listing's album directories -- so this half runs before the queue guard below,
+   * which returns early on pages that have no queue. Clipboard honesty: `navigator.clipboard`
+   * only exists in a secure context, and the hub is served over plain HTTP on a LAN, so the
+   * legacy path is not a fallback, it is the normal route. Both end in the same feedback:
+   * the button says what happened, for a moment, and the text is never trusted into
+   * `innerHTML` anywhere.
+   */
+  function copyFeedback(button, ok) {
+    button.textContent = ok ? "copied" : "failed";
+    window.setTimeout(function () {
+      button.textContent = "copy";
+    }, 1200);
+  }
+
+  function legacyCopy(text, done) {
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    var ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (err) {
+      ok = false;
+    }
+    document.body.removeChild(area);
+    done(ok);
+  }
+
+  function copyText(button) {
+    var text = button.dataset.text || "";
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(
+        function () { copyFeedback(button, true); },
+        function () { legacyCopy(text, function (ok) { copyFeedback(button, ok); }); }
+      );
+    } else {
+      legacyCopy(text, function (ok) { copyFeedback(button, ok); });
+    }
+  }
+
+  document.addEventListener("click", function (event) {
+    var target = event.target.closest('[data-action="copy-text"]');
+    if (target) copyText(target);
+  });
 
   var body = document.getElementById("queue-body");
   if (!body) return;
@@ -87,6 +137,12 @@
         if (!path) return;
         var li = el("li");
         li.appendChild(el("code", null, path));
+        var copy = el("button", "copy", "copy");
+        copy.type = "button";
+        copy.dataset.action = "copy-text";
+        copy.dataset.text = path;
+        copy.title = "copy this path";
+        li.appendChild(copy);
         ul.appendChild(li);
       });
       td.appendChild(ul);
@@ -132,6 +188,33 @@
    * `test_the_scripts_row_builder_agrees_with_the_template` is what keeps them in step. */
   var FINISHED_STATUSES = ["done", "failed", "skipped", "cancelled"];
 
+  /* The age label. `created_at` is already in the job JSON -- `asdict(Job)`, and the column
+   * was made browser-parseable for exactly this -- and the label ticks every five seconds
+   * below so "waiting 40s" does not lie about a job that has waited two minutes. It hangs
+   * off the title cell rather than joining the column contract: the td list
+   * `test_the_scripts_row_builder_agrees_with_the_template` compares is the row's, and the
+   * server-rendered rows lose the span on the first snapshot like everything else.
+   */
+  function ago(iso) {
+    var then = new Date(iso).getTime();
+    if (isNaN(then)) return "now";
+    var secs = Math.floor((Date.now() - then) / 1000);
+    if (secs < 0) secs = 0;
+    if (secs < 60) return secs + "s";
+    var mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + "m";
+    var hours = Math.floor(mins / 60);
+    if (hours < 24) return hours + "h " + (mins % 60) + "m";
+    return Math.floor(hours / 24) + "d " + (hours % 24) + "h";
+  }
+
+  function ageSpan(job) {
+    var span = el("span", "ago", " " + ago(job.created_at));
+    span.title = "enqueued " + job.created_at;
+    span.dataset.at = job.created_at;
+    return span;
+  }
+
   function buildRow(job) {
     var tr = el("tr", "status-" + job.status);
     tr.id = "job-" + job.id;
@@ -150,6 +233,7 @@
     tr.appendChild(detailCell(job));
     tr.appendChild(el("td", "num muted", job.id));
     tr.appendChild(actionsCell(job));
+    if (job.created_at) tr.children[0].appendChild(ageSpan(job));
     return tr;
   }
 
@@ -206,10 +290,26 @@
    * reader gets. Setting the attribute rather than adding a `<span>` matters because the
    * label is written with `textContent`, which would delete a child node on the first
    * frame -- and the dot is then the one thing that survives a reconnect. */
+  /* The stream's own line is where live state is allowed to speak, and the pool count
+   * rides it: "live · 2/4 ripping" is one honest sentence, rebuilt rather than patched,
+   * because `textContent` is what keeps filesystem-derived strings out of the markup.
+   * The initial count comes from `/api/status` and does not wait for the stream -- the
+   * pool is the scheduler's truth with or without a subscriber -- and a `pool` frame on
+   * the jobs channel overtakes it the moment the table changes.
+   */
+  var streamBase = "connecting…";
+  var poolText = "";
+
+  function renderStreamLabel() {
+    if (!state) return;
+    state.textContent = poolText ? streamBase + " · " + poolText : streamBase;
+  }
+
   function setStreamState(name, label) {
     if (!state) return;
     state.dataset.state = name;
-    state.textContent = label;
+    streamBase = label;
+    renderStreamLabel();
   }
 
   function handle(event) {
@@ -237,6 +337,10 @@
       case "library":
         if (payload.detail) log(payload.detail);
         break;
+      case "pool":
+        poolText = payload.ripping + "/" + payload.limit + " ripping";
+        renderStreamLabel();
+        break;
       case "wrapper":
         log("the wrapper is not ready: " + payload.problem);
         break;
@@ -253,11 +357,41 @@
     setStreamState("live", "live");
   });
   source.addEventListener("message", handle);
+
+  /* The pool count before any frame: the scheduler's table as the server last saw it.
+   * A failure here is silent on purpose -- the stream is the loud channel, and a page
+   * that cannot reach `/api/status` once will hear about it there instead. */
+  fetch("/api/status", { credentials: "same-origin" })
+    .then(function (response) {
+      return response.ok ? response.json() : null;
+    })
+    .then(function (body) {
+      if (body && body.pool) {
+        poolText = body.pool.ripping + "/" + body.pool.limit + " ripping";
+        renderStreamLabel();
+      }
+    })
+    .catch(function () {
+      /* No pool line rather than a broken page; frames will carry it if they can. */
+    });
   source.addEventListener("error", function () {
     // EventSource reconnects on its own and the stream's first frame is a fresh snapshot, so
     // a drop is a resync rather than a gap. Saying so is better than a spinner that lies.
     setStreamState("reconnecting", "reconnecting…");
   });
+
+  /* The age labels tick on a five-second beat, and only while the tab is visible -- a
+   * backgrounded queue does not need a timer rewriting text nobody is reading. A snapshot
+   * or an upsert rebuilds each row's span from `created_at` anyway, so the beat only ever
+   * ages rows that are genuinely sitting in the table, and a row that changes state gets a
+   * fresh label with the rest of its markup.
+   */
+  window.setInterval(function () {
+    if (document.hidden) return;
+    document.querySelectorAll("#queue-body .ago").forEach(function (span) {
+      span.textContent = " " + ago(span.dataset.at);
+    });
+  }, 5000);
 
   // -- actions ------------------------------------------------------------
 
@@ -421,6 +555,32 @@
 
   var enqueue = document.getElementById("enqueue");
   if (enqueue) {
+    /* The form remembers itself. One operator typing the same codec every session should
+     * not re-pick it, and `localStorage` is the only storage that survives a reload of a
+     * page this hub does not own the server state of. Both directions are wrapped: a
+     * private-mode or full store means the form starts empty, which is what it did before.
+     */
+    var ENQUEUE_MEMORY = "amd-hub.enqueue";
+    var remembered = (function () {
+      try {
+        return JSON.parse(localStorage.getItem(ENQUEUE_MEMORY)) || {};
+      } catch (err) {
+        return {};
+      }
+    })();
+    var codecSelect = enqueue.querySelector('[name="codec"]');
+    var languageBox = enqueue.querySelector('[name="language"]');
+    var forceBox = enqueue.querySelector('[name="force"]');
+    if (
+      remembered.codec &&
+      codecSelect &&
+      codecSelect.querySelector('option[value="' + remembered.codec + '"]')
+    ) {
+      codecSelect.value = remembered.codec;
+    }
+    if (typeof remembered.language === "string" && languageBox) languageBox.value = remembered.language;
+    if (remembered.force && forceBox) forceBox.checked = true;
+
     enqueue.addEventListener("submit", function (event) {
       event.preventDefault();
       showError("#enqueue-error", "");
@@ -446,6 +606,18 @@
         } else if (!result.ok) {
           showError("#enqueue-error", result.data.detail);
           return;
+        }
+        try {
+          localStorage.setItem(
+            ENQUEUE_MEMORY,
+            JSON.stringify({
+              codec: fields.codec,
+              language: fields.language || "",
+              force: fields.force === "1",
+            })
+          );
+        } catch (err) {
+          /* The submit still worked. A refused store costs the next visit one click. */
         }
         (result.data.rejected || []).forEach(function (name) {
           log("not queued: " + name);
