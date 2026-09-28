@@ -105,12 +105,23 @@ jobs:
           # for on a job whose whole purpose is being fast.
           cache-dependency-glob: hub/uv.lock
 
-      # `--locked` rather than a bare `uv run`. `uv run` on its own re-resolves when
-      # `pyproject.toml` and `uv.lock` disagree, which turns an uncommitted dependency bump
-      # into a green run against versions nobody reviewed; `--locked` fails instead, and
-      # names the lockfile, which is the actionable half of the message. The difference is
-      # between "the tests ran" and "the tests ran against what is committed".
-      #
+      # `--locked` rather than a bare `uv run`, in both steps below. `uv run` on its own
+      # re-resolves when `pyproject.toml` and `uv.lock` disagree, which turns an
+      # uncommitted dependency bump into a green run against versions nobody reviewed;
+      # `--locked` fails instead, and names the lockfile, which is the actionable half of
+      # the message. The difference is between "the tests ran" and "the tests ran against
+      # what is committed".
+
+      # `ruff` before `pytest` because it is the cheaper question: "does this even parse,
+      # and is every name defined?" The rule set is `hub/pyproject.toml`'s, and its history
+      # is the reason this step exists -- a fatal `NameError` (`asyncio` used, never
+      # imported) once shipped past a "ruff clean" that had never covered `ripper_host.py`.
+      # The config pins `F821` and the rules around it; this step is what makes the pin a
+      # gate rather than a wish. ruff is dev-only, so the image is untouched by its presence.
+      - name: ruff
+        working-directory: hub
+        run: uv run --locked ruff check .
+
       # `working-directory: hub` because that is the uv project root -- the same `cd hub`
       # the README and AGENTS.md tell a human to run, so CI and a laptop agree on where the
       # suite lives.
