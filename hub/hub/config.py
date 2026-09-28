@@ -69,6 +69,10 @@ class Settings(BaseModel):
     dedup_artist_scope: ArtistScope
     db_path: Path
     session_secret: bytes
+    #: Where an idle-queue announcement is POSTed. Empty means silence, which is the
+    #: default: the hub has always been the kind of tool that waits to be looked at,
+    #: and an operator who has not pointed it at anything must find it unchanged.
+    notify_webhook_url: str = ""
 
 
 def _text(env: Mapping[str, str], key: str, default: str) -> str:
@@ -217,4 +221,5 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         dedup_artist_scope=_scope(source),
         db_path=Path(_text(source, "AMD_DB_PATH", str(DEFAULT_DB_PATH))),
         session_secret=_session_secret(source),
+        notify_webhook_url=_text(source, "AMD_NOTIFY_WEBHOOK_URL", ""),
     )

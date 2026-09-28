@@ -328,5 +328,12 @@ async def status(request: Request) -> dict:
         "wrapper": await wrapper_state(state),
         "library": await _library_summary(state),
         "queue": state.jobs_counts(),
+        # The scheduler's live shape: who is mid-rip right now against the configured
+        # ceiling. Uncached for the same reason as the library -- `2/4 ripping` read from
+        # a cache is the number that misleads while a drive is actually moving.
+        "pool": {
+            "ripping": len(state.ripping_adam_ids),
+            "limit": max(1, state.settings.rip_concurrency),
+        },
         "dedup_artist_scope": state.settings.dedup_artist_scope,
     }

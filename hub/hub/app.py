@@ -41,6 +41,7 @@ from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI
 
 from hub.api.jobs import JOBS_CHANNEL, LeafRegistry, _publish_job, job_to_dict
@@ -154,6 +155,7 @@ async def _worker(state, running, declined, budget) -> int:
             continue
         if job.adam_id:
             running[job.adam_id] = job.id
+            _publish_pool(state, running)
         ran += 1
         try:
             await _execute(state, job)
@@ -165,7 +167,9 @@ async def _worker(state, running, declined, budget) -> int:
         finally:
             if job.adam_id:
                 running.pop(job.adam_id, None)
+                _publish_pool(state, running)
             state.leaves.forget(job.id)
+            await _announce_if_idle(state)
     return ran
 
 
@@ -239,6 +243,72 @@ def _in_flight_table(state: HubState) -> dict[str, int]:
     has exactly one home and the fallback had no reason left.
     """
     return state.ripping_adam_ids
+
+
+def _publish_pool(state: HubState, running: dict[str, int]) -> None:
+    """Say, at the two moments the truth changes, how full the pool is.
+
+    A `pool` frame rides the jobs channel beside the `job` frames, and a subscriber that
+    does not know the kind already ignores it -- the stream was built so an added kind is
+    a feature and not a break. `publish` never blocks and never raises on a slow reader,
+    so the claim path pays a `put_nowait` and nothing else; the number is the scheduler's
+    own table, not a count of rows a reader could compute, which is what makes
+    "2/4 ripping" mean the same thing here as it does in `/api/status`.
+    """
+    state.broker.publish(
+        JOBS_CHANNEL,
+        {
+            "kind": "pool",
+            "ripping": len(running),
+            "limit": max(1, state.settings.rip_concurrency),
+        },
+    )
+
+
+async def _announce_if_idle(state: HubState) -> None:
+    """When the queue empties, tell the webhook -- if the operator configured one.
+
+    The transition is the whole message: the store's own counts say there is nothing
+    `queued`, nothing `running`, and nothing parked `waiting`, which is the same sentence
+    `/api/status` would answer with and is not a second arithmetic anyone has to keep
+    honest. An unset URL is silence -- an announcement nobody asked for is spam, and the
+    hub waited to be looked at long before this existed. A failed delivery is a log line
+    and never a job failure: nobody is going to lose a download because the mailbox that
+    announces it is finished was unreachable.
+    """
+    url = state.settings.notify_webhook_url
+    if not url:
+        return
+    counts = state.jobs_counts()
+    if any(counts.get(status) for status in ("queued", "running", "waiting")):
+        return
+    if await _post_notification(url, {"event": "queue-idle", "queue": counts}):
+        return
+    state.broker.publish(
+        JOBS_CHANNEL,
+        {"kind": "log", "line": "the idle announcement could not be delivered; the queue is still idle"},
+    )
+
+
+async def _post_notification(url: str, payload: dict) -> bool:
+    """One POST, five seconds, one retry. Both outcomes belong to the log, not the queue.
+
+    A timeout is the expected failure mode of a webhook on the same LAN as the hub: the
+    sink is usually something that is allowed to be asleep. One retry with the same
+    ceiling is the whole of the reliability budget -- the retry is the second opinion,
+    and the next real transition will announce again anyway.
+    """
+    for attempt in (False, True):
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.post(url, json=payload)
+            if response.is_success:
+                return True
+        except Exception:  # noqa: BLE001 - a mailbox that is down is not a failed rip
+            pass
+        if attempt:
+            return False
+    return False
 
 async def _execute(state, job: Job) -> None:
     """One job: find its leaf, decide whether it is on disk, and rip it or skip it."""
