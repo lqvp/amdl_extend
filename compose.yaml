@@ -197,6 +197,17 @@ services:
       # claiming work it never started.
       AMD_RIP_CONCURRENCY: ${AMD_RIP_CONCURRENCY:-4}
 
+      # Whether `X-Forwarded-Proto` may be believed when the hub decides whether its own
+      # session cookie gets `Secure`. Listed here because this file's `environment:` block
+      # is the only channel an `.env` value has into the container -- a setting absent from
+      # it cannot be set at all, whatever `.env.example` says. An interpolation *because*
+      # it is safe to interpolate: a boolean, not a path, so the two failure modes
+      # `AMD_LIBRARY_ROOTS` above is built to avoid cannot happen to it. Default 0 and
+      # worth keeping: the header is trivially spoofable, so believing it unconditionally
+      # would let any client talk the hub out of marking its own cookie Secure. Set it to
+      # 1 only when a reverse proxy you control terminates TLS and sets the header itself.
+      AMD_TRUST_FORWARDED: ${AMD_TRUST_FORWARDED:-0}
+
       # Everything else is an ENV in the Dockerfile, deliberately, so that the values the
       # image and the vendor config have to agree on (AMD_WRAPPER_BINARY, AMD_WRAPPER_PORT,
       # AMD_WRAPPER_HOST, AMD_WRAPPER_BASE_DIR, AMD_DB_PATH) are asserted in exactly one place
