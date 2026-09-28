@@ -999,7 +999,25 @@ async def test_a_port_held_by_a_non_wrapper_fails_fast(fake_launcher, tmp_path):
     operator is given.
     """
     port = _free_port()
-    blocker = await asyncio.start_server(lambda r, w: None, "127.0.0.1", port)
+    held: list[asyncio.StreamWriter] = []
+
+    def _silent(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        held.append(writer)
+
+    # The listener answers nothing for as long as the pre-flight runs, because answering
+    # nothing is the scenario. What it accepted is closed in the cleanup below, and that is
+    # not tidying -- on Python 3.12 it is the difference between this test finishing and
+    # this test never finishing.
+    #
+    # `Server.wait_closed()` does not return while the server holds a connection, and
+    # `Server.close()` only wakes it when that count is already zero. CPython 3.13 tracks
+    # the count as a `weakref.WeakSet` of client transports and ships `close_clients()`;
+    # 3.12 tracks an integer, and the probe's connection -- accepted here, and never closed
+    # by the old `lambda r, w: None`, which being not a coroutine got neither a task nor a
+    # close (asyncio/streams.py) -- keeps it above zero for good. So on 3.12 the `finally`
+    # below became an infinite await, which is how the suite was found wedged in CI with
+    # 89% of its tests already passed and 20 minutes gone.
+    blocker = await asyncio.start_server(_silent, "127.0.0.1", port)
     sup = _supervisor(fake_launcher, tmp_path, port=port)
     try:
         with pytest.raises(SupervisorError, match="port") as excinfo:
@@ -1007,6 +1025,8 @@ async def test_a_port_held_by_a_non_wrapper_fails_fast(fake_launcher, tmp_path):
         assert "another process" in str(excinfo.value)
     finally:
         blocker.close()
+        for writer in held:
+            writer.close()
         await blocker.wait_closed()
     assert not sup.running
 
