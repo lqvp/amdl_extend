@@ -44,8 +44,10 @@ import pytest
 
 from hub.wrapper_supervisor import (
     CHILD_TWOFA_WINDOW,
+    Readiness,
     SupervisorError,
     WrapperSupervisor,
+    observe_readiness,
 )
 
 # How long a test waits for a stub to serve /status. Generous for a deliberately slow
@@ -1456,3 +1458,75 @@ async def test_status_before_start_is_reported_not_an_httpx_error(fake_launcher,
     sup = _supervisor(fake_launcher, tmp_path)
     with pytest.raises(SupervisorError, match="not started"):
         await sup.status()
+
+
+# --------------------------------------------------------------------------- #
+# observe_readiness -- the observation every caller renders its vocabulary from.
+# --------------------------------------------------------------------------- #
+class _Observed:
+    """A supervisor's observed face only: `running`, and a `status` that answers or fails.
+
+    The double is this small on purpose. `observe_readiness` is a function over the
+    public face, so a caller carrying `running`/`status()` is observed exactly like the
+    real supervisor -- which is also the assertion that the seam stayed two members.
+    """
+
+    def __init__(
+        self,
+        *,
+        running: bool,
+        payload: dict | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.running = running
+        self._payload = payload
+        self._error = error
+        self.asks = 0
+
+    async def status(self) -> dict:
+        self.asks += 1
+        if self._error is not None:
+            raise self._error
+        assert self._payload is not None
+        return self._payload
+
+
+async def test_a_wrapper_with_no_process_is_down_and_is_never_asked() -> None:
+    """`down` comes from the supervisor's own record, not from a failed request."""
+    observed = _Observed(running=False)
+    readiness = await observe_readiness(observed)
+    assert readiness.kind == "down"
+    assert observed.asks == 0, "a process nobody has must not be spoken to"
+
+
+async def test_a_failed_probe_is_unreachable_and_never_down() -> None:
+    """The payload may be perfectly healthy; a check that failed to ask says nothing.
+
+    This is the round-3 symmetry rule in its one-home form: an uninformative
+    observation supports no specific claim, in either direction.
+    """
+    observed = _Observed(running=True, error=ConnectionError("boom"))
+    readiness = await observe_readiness(observed)
+    assert readiness.kind == "unreachable"
+    assert readiness.detail == "ConnectionError: boom", (
+        "the probe's own error is the only thing known about the wrapper, so it is "
+        "what the caller gets to say"
+    )
+
+
+async def test_serving_without_regions_is_no_account() -> None:
+    """Up, answering, and unable to serve a download -- the fresh-install state."""
+    observed = _Observed(running=True, payload={"regions": []})
+    readiness = await observe_readiness(observed)
+    assert readiness.kind == "no-account"
+
+
+async def test_serving_keeps_the_regions_it_observed() -> None:
+    observed = _Observed(running=True, payload={"regions": ["jp", "us"]})
+    readiness = await observe_readiness(observed)
+    assert isinstance(readiness, Readiness)
+    assert readiness.kind == "serving"
+    assert readiness.regions == ("jp", "us"), (
+        "the render needs the fact, not just the verdict: wrapper_state answers with "
+        "these and start() gates on them"
+    )

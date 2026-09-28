@@ -6,17 +6,20 @@ facts that are hard to infer from the code.
 
 ## Layout: this repo, plus two upstream trees the build clones
 
-| Upstream | Pin | Branch |
-|---|---|---|
-| `WorldObservationLog/AppleMusicDecrypt` | `8b609df` | `v3` |
-| `itouakirai/wrapper` | `c61dea9` | `lite` |
+| Upstream | Pin — the `ARG` in the `Dockerfile`, full 40-char SHA |
+|---|---|
+| `WorldObservationLog/AppleMusicDecrypt` | `VENDOR_COMMIT=8b609df027facb824f0f16f0fd42c2354b1cfce3` |
+| `itouakirai/wrapper` | `WRAPPER_COMMIT=c61dea9a09627300818a026879565a213be54b73` |
 
 **Neither tree is in this repository.** No `.gitmodules`, no gitlink, no
-`git submodule status`: the Dockerfile clones both at build time, pinned by the
-`VENDOR_COMMIT` and `WRAPPER_COMMIT` args. A plain `git clone` of this repo is
-therefore enough to build the image, and `.gitignore` and `.dockerignore` both
-exclude `AppleMusicDecrypt/` and `wrapper/` as whole trees so a local checkout
-cannot enter the build context.
+`git submodule status`: the Dockerfile clones both at build time, pinned by those
+args — full SHAs, never abbreviations (an abbreviated prefix stops resolving the
+day upstream adds a colliding object, and CI greps these `ARG NAME=value` lines,
+so keep that shape). A plain `git clone` of this repo is therefore enough to
+build the image, and `.gitignore` and `.dockerignore` both exclude
+`AppleMusicDecrypt/` and `wrapper/` as whole trees so a local checkout cannot
+enter the build context. (Docker reads only `.dockerignore` — upstream trees' own
+`.gitignore`s do not apply to the build context.)
 
 Moving a pin is still deliberate: `wrapper`'s `rootfs/` is 101 tracked `.so`
 files, so a re-pin changes the payload.
@@ -105,8 +108,31 @@ copy that the build ignores, so an edit made there cannot reach the image and
 cp .env.example .env && $EDITOR .env        # AMD_PASSWORD is required
 docker compose up -d --build
 docker compose logs -f amd-hub
-cd hub && uv run pytest -v                   # 647 tests
+cd hub && uv run pytest -v                   # 655 tests
 ```
+
+### Verifying changes
+
+- Tests: `cd hub && uv run pytest` (~50 s). CI runs exactly
+  `uv run --locked pytest -q` from `hub/` on Python 3.13 (`.github/workflows/test.yml`);
+  under Python 3.12 one supervisor test wedges forever in `asyncio.Server.close()`,
+  so never run the suite with the host interpreter.
+- On a **fresh clone** the suite first needs the vendor tree: clone
+  `AppleMusicDecrypt` at the Dockerfile's `VENDOR_COMMIT` and copy
+  `config.example.toml` → `config.toml` (CI does both). Without it ~74 tests fail.
+- Any `docker compose` subcommand on a fresh checkout fails on the `:?` guards by
+  design — compose interpolates the whole file before anything else. Copy `.env` first.
+- `hub/deploy/` holds the deployment's probes: `build_gate.py` runs as the image's
+  last build step; `acceptance_check.py` checks library claims against the real
+  mounted tree (copy it in with `docker compose cp`, not `docker cp`);
+  `mutation_check.py` mutates Dockerfile/compose/.dockerignore to prove each
+  invariant can actually fail — run it after changing any deployment assertion;
+  `oversubscribe_check.py` re-runs a timing-sensitive test under 2× CPU (one
+  supervisor test passed 25/25 isolated and failed 20/20 oversubscribed, so a lone
+  pass on those is not evidence).
+- ruff is configured in `hub/pyproject.toml` (`F821` is the rule that matters —
+  an undefined-name `NameError` shipped once because a "ruff clean" didn't cover
+  `ripper_host.py`; `E501` is deliberately off). It is not a CI gate.
 
 ### Key invariants
 

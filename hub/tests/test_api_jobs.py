@@ -3677,7 +3677,6 @@ async def test_the_supervisor_is_stopped_after_the_host(live_app, supervisor):
     before the wrapper goes away, not after -- and this records it.
     """
     order: list[str] = []
-    live_app.state.log = order  # unused; the real assertions are below
 
     original_stop = supervisor.stop
 
@@ -4617,7 +4616,7 @@ def test_every_button_rule_is_legible_against_the_background_it_lands_on():
         return value
 
     checked = 0
-    for theme_name, themes in zip(theme_names, palettes):
+    for theme_name, themes in zip(theme_names, palettes, strict=True):
         for selector in (
             "button",
             "button.danger",

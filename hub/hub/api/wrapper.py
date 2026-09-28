@@ -34,7 +34,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from hub.api import fail, guarded
-from hub.wrapper_supervisor import SupervisorError
+from hub.wrapper_supervisor import SupervisorError, observe_readiness
 
 router = guarded()
 
@@ -100,19 +100,19 @@ async def wrapper_state(state) -> dict:
     detail: str | None = None
 
     if running:
-        try:
-            payload = await supervisor.status()
-        except Exception as exc:  # noqa: BLE001 - any failure here is "cannot be asked"
+        readiness = await observe_readiness(supervisor)
+        regions = list(readiness.regions)
+        if readiness.kind == "no-account":
+            # The distinct state: serving, healthy, and unable to serve a download
+            # because no account is on it. `NOT_READY_MARKER` is deliberately absent
+            # from `detail` so that the two messages cannot be read as one.
+            problem = "no-account"
+            detail = NO_ACCOUNT_DETAIL
+        elif readiness.kind == "unreachable":
+            # "Cannot be asked", and the probe's own error is all that may honestly
+            # be said about the wrapper.
             problem = "unavailable"
-            detail = f"{type(exc).__name__}: {exc}"
-        else:
-            regions = [str(region) for region in (payload or {}).get("regions") or []]
-            if not regions:
-                # The distinct state: serving, healthy, and unable to serve a download
-                # because no account is on it. `NOT_READY_MARKER` is deliberately absent
-                # from `detail` so that the two messages cannot be read as one.
-                problem = "no-account"
-                detail = NO_ACCOUNT_DETAIL
+            detail = readiness.detail
     else:
         # A `start()` that failed is the one case where nothing can be probed, and the
         # message it left behind is the only evidence there is. It is classified rather than

@@ -56,7 +56,8 @@ from hub.jobs import (
     Progress,
 )
 from hub.ripper_host import RipperHost, RipperHostError
-from hub.wrapper_supervisor import WrapperSupervisor
+from hub.state import HubState
+from hub.wrapper_supervisor import WrapperSupervisor, observe_readiness
 
 #: How long the loop waits between finds of an empty queue. Short enough that a job enqueued
 #: and cancelled in the same breath is noticed promptly, long enough that an idle hub is not
@@ -197,8 +198,7 @@ async def run_pool(state) -> int:
     writing to one SQLite file is four times the chance of `database is locked`. A pool that
     collected and then ignored that would report a drain it did not perform.
     """
-    running: dict[str, int] = getattr(state, "ripping_adam_ids", None) or {}
-    state.ripping_adam_ids = running
+    running = _in_flight_table(state)
     declined: set[int] = set()
     limit = max(1, state.settings.rip_concurrency)
 
@@ -231,10 +231,14 @@ async def run_one(state) -> bool:
     return (await _worker(state, _in_flight_table(state), set(), 1)) > 0
 
 
-def _in_flight_table(state) -> dict[str, int]:
-    running: dict[str, int] = getattr(state, "ripping_adam_ids", None) or {}
-    state.ripping_adam_ids = running
-    return running
+def _in_flight_table(state: HubState) -> dict[str, int]:
+    """The one in-flight table per process.
+
+    The getattr dance this replaces existed because `app.state` was an undeclared bag;
+    `ripping_adam_ids` is declared on `HubState` and constructed with it, so the table
+    has exactly one home and the fallback had no reason left.
+    """
+    return state.ripping_adam_ids
 
 async def _execute(state, job: Job) -> None:
     """One job: find its leaf, decide whether it is on disk, and rip it or skip it."""
@@ -380,13 +384,14 @@ async def _park_reason(state) -> tuple[str | None, str]:
     A failed probe is still `not ready` for parking purposes: unknown is not ready, and
     `waiting` is re-checked before the next claim, so the safe direction is to wait.
     """
-    if not state.supervisor.running:
-        return "unavailable", ""
-    try:
-        regions = (await state.supervisor.status()).get("regions") or []
-    except Exception as exc:  # noqa: BLE001 - unknown is not ready, and the safe direction
-        return "unreachable", f"{type(exc).__name__}: {exc}"
-    return (None if regions else "no-account"), ""
+    readiness = await observe_readiness(state.supervisor)
+    if readiness.kind == "serving":
+        return None, ""
+    if readiness.kind == "unreachable":
+        return "unreachable", readiness.detail
+    if readiness.kind == "no-account":
+        return "no-account", ""
+    return "unavailable", ""
 
 
 #: The park reasons, and what the user is told to do -- keyed by reason so a message cannot be
@@ -855,85 +860,70 @@ def create_app(
     )
 
     # -- the singletons ----------------------------------------------------
-    app.state.settings = resolved
+    # The bag of attributes that used to hang off `app.state` one at a time is now a
+    # declaration: `hub.state.HubState`. Same fields, same rules, `create_app` still
+    # the only constructor -- what changed is that the interface sits in one file and
+    # `slots=True` keeps it from growing an undeclared attribute. The invariant
+    # comments live on the fields now; what stays here is the wiring.
     from hub.auth import SessionStore
 
-    app.state.sessions = SessionStore(secret=resolved.session_secret)
-    app.state.broker = EventBroker()
-    app.state.jobs = JobStore(resolved.db_path)
-    app.state.leaves = LeafRegistry()
-    app.state.ripper_config_path = (
+    # The host is built here rather than in the lifespan, because `on_progress` has to
+    # be handed over at construction: the seam is one-per-process and `start()` may
+    # never be retried, so an attribute set later would arrive too late for the rip it
+    # is meant to describe.
+    #
+    # **`_progress`, not `partial(_on_progress, state)`.** The round-1 code had the
+    # `partial`, which does not bind the state -- it builds a callable that, when the
+    # seam calls it with a `Progress`, invokes `_on_progress(state, progress)`, and
+    # `_on_progress` takes *one* argument and *returns* the callback. So every progress
+    # tick raised `TypeError` inside the seam's sampler, where it became an unretrieved
+    # task exception, and the progress column stayed empty for the whole download.
+    # `test_create_app_hands_the_seam_a_live_progress_callback` calls what the factory
+    # handed over, so it cannot come back.
+    def _progress(reading: Progress) -> None:
+        # Late binding: `state` does not exist while its own constructor arguments are
+        # evaluated, and the callback fires long after them, so the closed-over object
+        # is resolved at call time -- exactly what `_on_progress(app.state)` did.
+        _on_progress(state)(reading)
+
+    config_path = (
         Path(ripper_config_path).resolve() if ripper_config_path else vendor_config_path()
     )
-    # The host is built here rather than in the lifespan, because `on_progress` has to be
-    # handed over at construction: the seam is one-per-process and `start()` may never be
-    # retried, so an attribute set later would arrive too late for the rip it is meant to
-    # describe. It is built *after* `state` exists for the same reason -- the callback closes
-    # over `app.state` and the loop it hops to is not known until the lifespan runs.
-    #
-    # **`_on_progress(app.state)`, not `partial(_on_progress, app.state)`.** The round-1 code
-    # had the `partial`, which does not bind the state -- it builds a callable that, when the
-    # seam calls it with a `Progress`, invokes `_on_progress(state, progress)`, and
-    # `_on_progress` takes *one* argument and *returns* the callback. So every progress tick
-    # raised `TypeError` inside the seam's sampler, where it became an unretrieved task
-    # exception, and the progress column stayed empty for the whole download. Passing the
-    # partial is the kind of mistake that is invisible precisely because the callback is a
-    # closure over state and both forms "look" like a bound function;
-    # `test_create_app_hands_the_seam_a_live_progress_callback` calls what the factory handed
-    # over, so it cannot come back.
-    #
-    # An injected `ripper` is left exactly as given: a test's fake already has whatever
-    # behaviour it is asserting, and wrapping it in a real host to attach a callback would
-    # defeat the injection.
-    app.state.ripper = (
-        ripper
-        if ripper is not None
-        else RipperHost(
-            app.state.ripper_config_path, on_progress=_on_progress(app.state)
-        )
+    state = HubState(
+        settings=resolved,
+        sessions=SessionStore(secret=resolved.session_secret),
+        broker=EventBroker(),
+        jobs=JobStore(resolved.db_path),
+        leaves=LeafRegistry(),
+        ripper_config_path=config_path,
+        # An injected `ripper` is left exactly as given: a test's fake already has
+        # whatever behaviour it is asserting, and wrapping it in a real host to attach
+        # a callback would defeat the injection.
+        ripper=(
+            ripper
+            if ripper is not None
+            else RipperHost(config_path, on_progress=_progress)
+        ),
+        supervisor=(
+            supervisor
+            if supervisor is not None
+            else WrapperSupervisor(
+                binary=resolved.wrapper_binary,
+                base_dir=resolved.wrapper_base_dir,
+                host=resolved.wrapper_host,
+                port=resolved.wrapper_port,
+                log_sink=lambda line: _log(state, line),
+            )
+        ),
+        templates=api.build_templates(),
     )
-    app.state.supervisor = (
-        supervisor
-        if supervisor is not None
-        else WrapperSupervisor(
-            binary=resolved.wrapper_binary,
-            base_dir=resolved.wrapper_base_dir,
-            host=resolved.wrapper_host,
-            port=resolved.wrapper_port,
-            log_sink=lambda line: _log(app.state, line),
-        )
-    )
-    # Set before the lifespan runs, and read by every status path, so "the wrapper is not
-    # running" can always be answered with the reason it is not.
-    app.state.startup_error = None
-    app.state.pending_2fa = None
-    app.state.stopping = asyncio.Event()
-    app.state.scheduler: asyncio.Task | None = None
-    app.state.degraded_roots: tuple[str, ...] = ()
-    # Which job the scheduler is running, and the loop to hop back to. Both are read by the
-    # progress callback, which is called from upstream's transfer loop on a worker thread and
-    # therefore cannot touch the store or the broker directly. `None` whenever nothing is
-    # running, which is the check that keeps a late reading from being written to a job id
-    # that has since been cancelled.
-    app.state.current_job: int | None = None
-    app.state.loop: asyncio.AbstractEventLoop | None = None
-    # The last readiness answer, and it is **never read as an answer** -- `scheduler_loop`
-    # probes before every claim, which is the whole of I5. It exists only so a caller that
-    # wants to know "is the wrapper up?" between claims can ask without a round-trip, and it
-    # is set on every probe so it cannot go stale without anyone noticing.
-    app.state.cached_problem: str | None = None
-    # The session generation, bumped by logout (I1). A session here is a boolean with no
-    # server-side table, so "which sessions are alive" is this one integer: incrementing it
-    # retires every token ever issued, which is what makes logout a revocation rather than a
-    # request to the browser. It is per-`app` rather than module scope because two apps in one
-    # process (a test and a REPL) must not share it.
-    app.state.session_generation = 0
-    app.state.templates = api.build_templates()
-    app.state.jobs_counts = partial(_jobs_counts, app.state)
-    app.state.run_one = partial(run_one, app.state)
-    app.state.run_pool = partial(run_pool, app.state)
-    app.state.ripping_adam_ids = {}
-    app.state.scheduler_loop = partial(scheduler_loop, app.state)
+    # The driving surface is bound after construction because each partial names
+    # `state` itself; a constructor cannot hand an object to itself.
+    state.jobs_counts = partial(_jobs_counts, state)
+    state.run_one = partial(run_one, state)
+    state.run_pool = partial(run_pool, state)
+    state.scheduler_loop = partial(scheduler_loop, state)
+    app.state = state
 
     api.install(app)
     return app
@@ -1004,9 +994,10 @@ def main() -> None:
     objects either way, and a `uvicorn hub.app:create_app --factory` line in a compose file
     is a place for them to stop being.
 
-    **Single worker, and it is not a default that can be overridden by accident.** Everything
-    the app owns lives on `app.state`: the broker, the job store, the leaf registry, the
-    scheduler and the session generation. Two workers would be two brokers (so an SSE
+    **Single worker, and it is not a default that can be overridden by accident.**
+    Everything the app owns lives on `app.state`, and `app.state` is the declared
+    `hub.state.HubState`: the broker, the job store, the leaf registry, the scheduler
+    and the session generation. Two workers would be two brokers (so an SSE
     subscriber would see only its own worker's events), two schedulers racing `claim_next`
     (which is atomic, so no double rip -- but two leaf registries, so a job could be claimed
     by a worker that never expanded it), and two session generations, so a logout on one

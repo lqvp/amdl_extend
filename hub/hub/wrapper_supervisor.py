@@ -93,6 +93,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 import httpx
 
@@ -281,6 +282,68 @@ class _Probe:
     regions: list
     data: dict
     detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class Readiness:
+    """One observation of "can a download be served right now", kept whole.
+
+    `kind` is a fact about the wrapper, not a vocabulary: how it is *said* belongs to
+    the caller that owns the audience -- `hub.app._park_reason` renders the park words,
+    `hub.api.wrapper.wrapper_state` renders the JSON contract, and the two vocabularies
+    stay deliberately unequal (park keeps `"unreachable"` apart; the status contract
+    folds it into `"unavailable"`). What they share is this observation, so the rule it
+    encodes has one home instead of three.
+    """
+
+    kind: Literal["serving", "no-account", "down", "unreachable"]
+    regions: tuple[str, ...]
+    detail: str
+
+
+def readiness_of_status(payload: object) -> Readiness:
+    """The R6 verdict on an *answered* status: the storefronts decide, nothing else.
+
+    This is the rule in its only written form. It is shared by the two instruments
+    that ask the question -- `observe_readiness`, where the call answered or failed,
+    and `_wait_ready`'s gate, where the envelope was usable or was not -- so "empty
+    regions cannot serve a download" (`src/cmd.py`'s test, and the reason `start()`
+    gates on it) cannot drift between them. An answered-but-unparseable payload reads
+    as no regions: the envelope arrived, and that is the same no-storefront fact.
+    """
+    regions = tuple(
+        str(region)
+        for region in (payload.get("regions") if isinstance(payload, dict) else None) or ()
+    )
+    return Readiness(kind="serving" if regions else "no-account", regions=regions, detail="")
+
+
+async def observe_readiness(supervisor: WrapperSupervisor) -> Readiness:
+    """The home of the readiness observation: `running` -> `status()` -> `regions`.
+
+    A free function over the public face (`running`, `status()`) rather than a method,
+    so a double carrying those two members is observed exactly like the real supervisor
+    -- the fakes stay adapters, and a method on the class would have made every one of
+    them re-implement the vocabulary by hand.
+
+    Three rules, each one someone paid for:
+
+    * no process is `down`, and no request is sent -- `running` is the supervisor's own
+      record, and the observation claims nothing beyond its evidence (R6's "never log
+      text", R7's namespaces, R8's adoption all keep meaning the same thing here);
+    * a failed probe is `unreachable`, never `down` -- the payload may be perfectly
+      healthy and the check may have simply failed to ask it. An uninformative
+      observation supports no specific claim, applied symmetrically;
+    * an answered status is judged by `readiness_of_status`, which is the same gate
+      `_wait_ready` runs while it waits.
+    """
+    if not supervisor.running:
+        return Readiness(kind="down", regions=(), detail="")
+    try:
+        payload = await supervisor.status()
+    except Exception as exc:  # noqa: BLE001 - unknown is not down, and never will be
+        return Readiness(kind="unreachable", regions=(), detail=f"{type(exc).__name__}: {exc}")
+    return readiness_of_status(payload)
 
 
 class WrapperSupervisor:
@@ -916,17 +979,20 @@ class WrapperSupervisor:
             await self._raise_if_dead()
             probe = await self._probe_status(self._bound_port)
             last_detail = probe.detail
-            if probe.usable and probe.regions:
-                return
-            if probe.usable and not serving_without_regions:
-                serving_without_regions = True
-                # Said once, not every poll: the payload serves this state for as long as no
-                # account is logged in, which is the state a fresh install boots into.
-                self._emit(
-                    f"the wrapper is serving on {self._status_url()} but reports no "
-                    f"regions: it is up and healthy, there is just no Apple account logged "
-                    f"in on it yet, so the hub should offer to log in"
-                )
+            if probe.usable:
+                # The gate is `readiness_of_status` -- the same rule the callers observe,
+                # so the start-up gate and the running answer cannot disagree.
+                if readiness_of_status(probe.data).kind == "serving":
+                    return
+                if not serving_without_regions:
+                    serving_without_regions = True
+                    # Said once, not every poll: the payload serves this state for as long as no
+                    # account is logged in, which is the state a fresh install boots into.
+                    self._emit(
+                        f"the wrapper is serving on {self._status_url()} but reports no "
+                        f"regions: it is up and healthy, there is just no Apple account logged "
+                        f"in on it yet, so the hub should offer to log in"
+                    )
             await self._raise_if_dead()
 
             remaining = deadline - loop.time()

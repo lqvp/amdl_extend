@@ -55,7 +55,7 @@ jobs:
       # one more that needs `config.example.toml` and one expecting a different error, for 74
       # failures in a suite that is otherwise green. The repository cannot carry the tree:
       # `.dockerignore` and `.gitignore` both exclude it, so a fresh clone -- which is what a
-      # runner gets -- has none, and this is the difference between the 647 that pass on a
+      # runner gets -- has none, and this is the difference between the 655 that pass on a
       # laptop with a checkout and what CI actually sees.
       #
       # The pins are read out of the Dockerfile rather than restated here, so moving one stays
