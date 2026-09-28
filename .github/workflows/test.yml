@@ -187,6 +187,18 @@ jobs:
         working-directory: hub-go
         run: go vet ./...
 
+      # The goldens describe a fixture the repository deliberately does not carry:
+      # `testdata/synth` is generated (`.gitignore` in hub-go lists it) because it is
+      # a directory tree, not source. `gen_golden.py --tree-only` rebuilds it from the
+      # same shapes the goldens were generated against -- deterministic, hand-written
+      # names, no randomness -- so a fresh checkout tests the same fixture a laptop
+      # does. Without this the scan and dedup goldens fail against an empty tree, which
+      # is the run this step exists to prevent: the failure says "Python found a match,
+      # Go found nothing" for a tree that is not there.
+      - name: the tree the goldens describe
+        working-directory: hub-go
+        run: python3 tools/gen_golden.py --tree-only
+
       # The same command AGENTS.md gives a human. It runs the golden comparison against
       # `testdata/golden` -- generated once from the Python sources by `tools/gen_golden.py`
       # and committed, which is why this job needs neither the uv environment nor the vendor

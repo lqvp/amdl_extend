@@ -27,6 +27,7 @@ Two things it does on purpose, both of which make the comparison meaningful:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import random
@@ -39,10 +40,25 @@ HERE = Path(__file__).resolve().parent
 MODULE = HERE.parent
 PY_HUB = MODULE.parent / "hub"
 
-sys.path.insert(0, str(PY_HUB))
+def load_hub() -> None:
+    """Import the Python implementation -- the source of truth -- on first use.
 
-from hub import dedup, library_scan, normalize  # noqa: E402
-from hub import config as hub_config  # noqa: E402
+    Lazy, and the reason is CI: `--tree-only` builds the fixture on the Go job's
+    runner, which has no hub environment and needs none. Importing `hub.*` at
+    module level would make the fixture impossible to build there, and the
+    alternative -- a second copy of the tree shapes in the workflow -- is a
+    fixture that drifts from the goldens it feeds.
+
+    `global` because the payload builders below are written against module
+    names; the alternative is threading four modules through five call sites for
+    one import.
+    """
+    global dedup, library_scan, normalize, hub_config
+    if "dedup" in globals():
+        return
+    sys.path.insert(0, str(PY_HUB))
+    from hub import dedup, library_scan, normalize
+    from hub import config as hub_config
 
 GOLDEN = MODULE / "testdata" / "golden"
 SYNTH = MODULE / "testdata" / "synth"
@@ -341,10 +357,25 @@ def config_payload() -> list[dict]:
     return out
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--tree-only",
+        action="store_true",
+        help="build testdata/synth and exit; the goldens are not regenerated. "
+        "This is what CI runs before `go test`, because the goldens describe a "
+        "fixture the repository deliberately does not carry.",
+    )
+    args = parser.parse_args(argv)
+
     os.chdir(MODULE)
-    GOLDEN.mkdir(parents=True, exist_ok=True)
     roots = build_tree()
+    if args.tree_only:
+        print(f"built {SYNTH.relative_to(MODULE)}: roots {roots}")
+        return 0
+
+    load_hub()
+    GOLDEN.mkdir(parents=True, exist_ok=True)
 
     payloads = {
         "normalize.json": normalize_payload(),
