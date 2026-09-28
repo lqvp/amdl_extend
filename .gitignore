@@ -1,8 +1,15 @@
 # --- Upstream trees: cloned at build time, not shipped --------------------
 # Both upstream repos are cloned at build time (pinned by commit hash in the Dockerfile).
 # They are not submodules and not tracked here.
-AppleMusicDecrypt/
-wrapper/
+#
+# **Anchored to the repository root, and the anchors are load-bearing.** An unanchored
+# `wrapper/` matched *every* directory called `wrapper`, including
+# `hub-go/internal/wrapper/` -- the Go package that supervises the wrapper -- so that
+# package was silently untracked: `git add -A` skipped it, no commit ever contained it,
+# and the first CI checkout found `package amdhub/internal/wrapper is not in GOROOT`.
+# The working tree looked complete because ignored files are invisible to `git status`.
+/AppleMusicDecrypt/
+/wrapper/
 
 # --- Local secrets -------------------------------------------------------
 .env

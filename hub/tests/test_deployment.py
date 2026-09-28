@@ -1696,6 +1696,10 @@ def test_the_context_excludes_what_must_never_ship():
         "hub-go/go.mod",
         "hub-go/cmd/amdhub/main.go",
         "hub-go/internal/sqlite",
+        # The wrapper supervisor's package, named because it was once missing from git
+        # entirely: an unanchored `wrapper/` in .gitignore swallowed it and no commit
+        # contained it. It is in the build context only because it is tracked.
+        "hub-go/internal/wrapper",
         "hub-go/tools/pyworker.py",
     ):
         assert not _excluded_from_context(required), (
