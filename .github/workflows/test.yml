@@ -37,8 +37,52 @@ permissions:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # A hang has to cost minutes, not the runner's default six hours. The suite is 49.91 s
+    # on a laptop and its slowest single test is 5.08 s, so even a cold uv sync plus a slow
+    # runner leaves an enormous margin under 20 -- and a run that reaches it is not slow,
+    # it is stuck, which is a different diagnosis needing a different response. The first
+    # execution of this workflow sat in the pytest step for 15 minutes with no output
+    # available (logs only appear on completion), and that is exactly the failure this
+    # bounds.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+
+      # The hub has no URL parser of its own: `hub/vendor.py` hands the job to upstream's
+      # `AppleMusicURL.parse_url`, reached through `ripper_host._require_vendor_root()`,
+      # which raises `RipperHostError` when `<repo>/AppleMusicDecrypt/src` is not there. So
+      # without this tree every test that posts a URL to /api/jobs fails -- 72 of them, plus
+      # one more that needs `config.example.toml` and one expecting a different error, for 74
+      # failures in a suite that is otherwise green. The repository cannot carry the tree:
+      # `.dockerignore` and `.gitignore` both exclude it, so a fresh clone -- which is what a
+      # runner gets -- has none, and this is the difference between the 647 that pass on a
+      # laptop with a checkout and what CI actually sees.
+      #
+      # The pins are read out of the Dockerfile rather than restated here, so moving one stays
+      # a single edit and CI cannot be left validating a commit other than the one the image
+      # will contain. The pair is the Dockerfile's own pair, for the reason that file records:
+      # GitHub does not serve arbitrary SHAs over the wire (`uploadpack.allowAnySHA1InWant`),
+      # so a `fetch <sha>` against a repository nobody configured fails, while a full clone
+      # followed by `checkout <sha>` always works. `.gitignore` already lists
+      # `AppleMusicDecrypt/`, so this leaves the working tree as clean as it found it.
+      - name: vendor checkout
+        run: |
+          VENDOR_URL=$(grep -m1 '^ARG VENDOR_URL=' Dockerfile | cut -d= -f2-)
+          VENDOR_COMMIT=$(grep -m1 '^ARG VENDOR_COMMIT=' Dockerfile | cut -d= -f2-)
+          if [ -z "$VENDOR_URL" ] || [ -z "$VENDOR_COMMIT" ]; then
+            echo "VENDOR_URL / VENDOR_COMMIT not found in the Dockerfile as 'ARG <name>=<value>'"
+            exit 1
+          fi
+          git clone --quiet "$VENDOR_URL" AppleMusicDecrypt
+          git -C AppleMusicDecrypt checkout --quiet "$VENDOR_COMMIT"
+          # `config.toml` is untracked upstream -- it is the operator's file -- so a fresh
+          # clone has only `config.example.toml`, and `hub.config` refuses to start without
+          # it ("copy config.example.toml there"). The image builds it the same way for the
+          # same reason, at Dockerfile:373; only the copy is needed here, because the three
+          # `sed` overrides that follow in the image point paths at the container's
+          # /library, which has no meaning on a runner. What the tests read off that file
+          # is asserted against the Dockerfile's text, not against a running copy of it.
+          cp AppleMusicDecrypt/config.example.toml AppleMusicDecrypt/config.toml
 
       # No `actions/setup-python`, and that is deliberate. uv installs the interpreter the
       # lockfile records, so a second tool also choosing a Python version would be a second
