@@ -14,17 +14,17 @@
   They come off the filesystem, so they are untrusted text: `html/template` escapes
   them, and the `join("|")` is added back for display only, never taken apart.
 */}}{{ define "job_row" }}
-<tr id="job-{{ .id }}" data-job-id="{{ .id }}"
-    class="status-{{ .status }}"
-    data-finished="{{ if .finished }}1{{ else }}0{{ end }}">
-  <td class="title">{{ if .title }}{{ .title }}{{ else }}(no title){{ end }}</td>
-  <td class="status-cell"><span class="status status-{{ .status }}">{{ .status }}</span></td>
-  <td class="num">{{ .codec }}</td>
+<tr id="job-{{ .ID }}" data-job-id="{{ .ID }}"
+    class="status-{{ .Status }}"
+    data-finished="{{ if .Finished }}1{{ else }}0{{ end }}">
+  <td class="title">{{ if .Title }}{{ .Title }}{{ else }}(no title){{ end }}</td>
+  <td class="status-cell"><span class="status status-{{ .Status }}">{{ .Status }}</span></td>
+  <td class="num">{{ .Codec }}</td>
   <td class="progress">
-    {{ if .progress }}
-      <progress max="1" value="{{ .progress }}"
-                title="{{ percent .progress }}%"></progress>
-    {{ else if eq .status "running" }}
+    {{ if .Progress }}
+      <progress max="1" value="{{ .Progress }}"
+                title="{{ percent .Progress }}%"></progress>
+    {{ else if eq .Status "running" }}
       <progress title="Working, but the total size is not known -- so no percentage. This is
                    also what a music video looks like: that path reports no byte count."></progress>
     {{ else }}
@@ -32,25 +32,25 @@
     {{ end }}
   </td>
   <td class="detail">
-    {{ if and (eq .status "skipped") .skip_paths }}
+    {{ if and (eq .Status "skipped") .SkipPaths }}
       <span class="muted">already on disk at</span>
       <ul class="paths">
-        {{ range .skip_paths }}
+        {{ range .SkipPaths }}
           <li><code>{{ . }}</code></li>
         {{ end }}
       </ul>
-    {{ else if .error }}
-      <span class="error-text">{{ .error }}</span>
-    {{ else if .parent_url }}
-      <a class="muted small" href="{{ .parent_url }}" rel="noreferrer noopener">source</a>
+    {{ else if .Error }}
+      <span class="error-text">{{ .Error }}</span>
+    {{ else if .ParentURL }}
+      <a class="muted small" href="{{ .ParentURL }}" rel="noreferrer noopener">source</a>
     {{ end }}
   </td>
-  <td class="num muted">{{ .id }}</td>
+  <td class="num muted">{{ .ID }}</td>
   <td class="actions">
-    {{ if .finished }}
-      <button type="button" data-action="job-retry" data-job-id="{{ .id }}">Retry</button>
-    {{ else if eq .status "queued" }}
-      <button type="button" data-action="job-cancel" data-job-id="{{ .id }}">Cancel</button>
+    {{ if .Finished }}
+      <button type="button" data-action="job-retry" data-job-id="{{ .ID }}">Retry</button>
+    {{ else if eq .Status "queued" }}
+      <button type="button" data-action="job-cancel" data-job-id="{{ .ID }}">Cancel</button>
     {{ end }}
   </td>
 </tr>

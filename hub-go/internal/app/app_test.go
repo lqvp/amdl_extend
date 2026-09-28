@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -332,6 +333,100 @@ func TestAMissingJobIs404AndNotAClosedConnection(t *testing.T) {
 		}
 		if !strings.Contains(string(body), "999") {
 			t.Errorf("%s %s: the 404 has to name the id: %s", target.method, target.path, body)
+		}
+	}
+}
+
+// --------------------------------------------------------------------------- //
+// Rendering
+// --------------------------------------------------------------------------- //
+func TestEveryPageRendersWithEveryKindOfRowInTheQueue(t *testing.T) {
+	// **`template.Must(Parse)` does not check this.** A field name that does not exist
+	// parses, and fails only when the template is executed -- so a typo in a row template
+	// shows up as a 500 on the queue page and nowhere else. The rows below are one per
+	// status the four pages have branches for, which is what makes each branch execute:
+	// a skipped row renders its matched paths, a failed one its error, a running one the
+	// indeterminate progress bar, and a done one its retry button.
+	state, server := testServer(t)
+	_, cookies := login(t, server, "hunter2")
+
+	parent := "https://music.apple.com/jp/album/1"
+	leaves := []jobs.Leaf{
+		{AdamID: "1", Title: "Queued Track", Codec: "alac", Language: "jp", URL: parent,
+			Storefront: "jp"},
+		{AdamID: "2", Title: "Running Track", Codec: "aac", Language: "jp", URL: parent,
+			Storefront: "jp"},
+		{AdamID: "3", Title: "Skipped Track", Codec: "alac", Language: "jp", URL: parent,
+			Storefront: "jp"},
+		{AdamID: "4", Title: "Failed Track", Codec: "alac", Language: "jp", URL: parent,
+			Storefront: "jp"},
+		{AdamID: "5", Title: "Done Track", Codec: "alac", Language: "jp", URL: parent,
+			Storefront: "jp"},
+	}
+	result, err := state.Store.CreateBatch(parent, "album", leaves, false)
+	if err != nil {
+		t.Fatalf("CreateBatch: %v", err)
+	}
+	if len(result.Created) != len(leaves) {
+		t.Fatalf("expected %d rows, got %v", len(leaves), result.Created)
+	}
+	progress := 0.42
+	failure := "ResolveError: the storefront refused the request"
+	paths := "duplicate:/library/Artist/Album/01 x.m4a|/library/Artist/Album/02 y.m4a"
+	for index, id := range result.Created {
+		switch index {
+		case 1:
+			if err := state.Store.Mark(id, "running", jobs.MarkFields{Progress: &progress}); err != nil {
+				t.Fatalf("mark running: %v", err)
+			}
+		case 2:
+			if err := state.Store.Mark(id, "skipped", jobs.MarkFields{SkipReason: &paths}); err != nil {
+				t.Fatalf("mark skipped: %v", err)
+			}
+		case 3:
+			if err := state.Store.Mark(id, "failed", jobs.MarkFields{Error: &failure}); err != nil {
+				t.Fatalf("mark failed: %v", err)
+			}
+		case 4:
+			if err := state.Store.Mark(id, "done", jobs.MarkFields{}); err != nil {
+				t.Fatalf("mark done: %v", err)
+			}
+		}
+	}
+	state.logLine("a line for the log pane")
+
+	for _, path := range []string{"/queue", "/library", "/", "/login"} {
+		resp, body := get(t, server, path, cookies)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s: %d %s", path, resp.StatusCode, body)
+			continue
+		}
+		if strings.Contains(body, "could not be rendered") {
+			t.Errorf("GET %s: %s", path, body)
+		}
+	}
+
+	_, body := get(t, server, "/queue", cookies)
+	for _, marker := range []string{
+		`<tr id="job-` + strconv.FormatInt(result.Created[0], 10) + `"`,
+		`class="status status-skipped"`,
+		`class="status status-failed"`,
+		`class="status status-running"`,
+		`class="status status-done"`,
+		`/library/Artist/Album/01 x.m4a`, // the matched path, individually
+		`/library/Artist/Album/02 y.m4a`, // ...and the second one
+		"ResolveError",                   // the failure's own text
+		"a line for the log pane",        // the log pane's backlog
+		`value="0.42"`,                   // a known fraction, not a pointer address
+	} {
+		if !strings.Contains(body, marker) {
+			t.Errorf("the queue page is missing %q", marker)
+		}
+	}
+	// The count pills come from the store, so the summary has to agree with the rows.
+	for _, status := range []string{"queued", "running", "skipped", "failed", "done"} {
+		if !strings.Contains(body, `data-count="`+status+`"`) {
+			t.Errorf("the summary has no count for %q", status)
 		}
 	}
 }
