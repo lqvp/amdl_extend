@@ -34,53 +34,60 @@
     the failure is a silent re-download of everything that lived on the drive, which is the
     one outcome §8.1 exists to prevent.
   -#}
-  <table class="roots small">
-    <thead>
-      <tr><th>root</th><th class="num">album directories</th><th></th></tr>
-    </thead>
-    <tbody>
-      {% for root in listing.roots %}
-        <tr>
-          <td><code>{{ root }}</code></td>
-          <td class="num">{{ listing.per_root[loop.index0] }}</td>
-          <td>
-            {%- if root in listing.degraded_roots -%}
-              <span class="error-text">unreadable</span>
-            {%- elif listing.per_root[loop.index0] == 0 -%}
-              <span class="error-text" role="alert">empty &mdash; is this mounted?</span>
-            {%- endif -%}
-          </td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  {#- A root path is an absolute directory the operator chose; it can be longer than the
+      whole viewport. Scrolling the cell is the alternative to shrinking the font, and a
+      path at 6px is a path nobody reads. -#}
+  <div class="table-wrap">
+    <table class="roots small">
+      <thead>
+        <tr><th>root</th><th class="num">album directories</th><th></th></tr>
+      </thead>
+      <tbody>
+        {% for root in listing.roots %}
+          <tr>
+            <td><code>{{ root }}</code></td>
+            <td class="num">{{ listing.per_root[loop.index0] }}</td>
+            <td>
+              {%- if root in listing.degraded_roots -%}
+                <span class="error-text">unreadable</span>
+              {%- elif listing.per_root[loop.index0] == 0 -%}
+                <span class="error-text" role="alert">empty &mdash; is this mounted?</span>
+              {%- endif -%}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 
 <section class="card">
-  <table>
-    <thead>
-      <tr><th>artist</th><th>album</th><th>tracks</th><th>path</th></tr>
-    </thead>
-    <tbody>
-      {% for album in listing.albums %}
-        <tr>
-          <td>{{ album.artist or "—" }}</td>
-          <td>{{ album.name or "—" }}</td>
-          <td class="num">{{ album.tracks }}</td>
-          {#-
-            `album.path`, not `album.relpath`. A bare relpath does not resolve once more
-            than one library root is configured -- it says which directory but not which
-            library, and in a listing that matters as much as it does in a `skip_reason`.
-            This is the same defect one layer over and the fix is the same expression:
-            `roots[root_index] / relpath`, which `_album_dict` already builds and which
-            `DuplicateHit.resolved` is built from.
-          -#}
-          <td class="small"><code>{{ album.path }}</code></td>
-        </tr>
-      {% else %}
-        <tr><td colspan="4" class="muted">No album directories were found.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>artist</th><th>album</th><th>tracks</th><th>path</th></tr>
+      </thead>
+      <tbody>
+        {% for album in listing.albums %}
+          <tr>
+            <td>{{ album.artist or "—" }}</td>
+            <td>{{ album.name or "—" }}</td>
+            <td class="num">{{ album.tracks }}</td>
+            {#-
+              `album.path`, not `album.relpath`. A bare relpath does not resolve once more
+              than one library root is configured -- it says which directory but not which
+              library, and in a listing that matters as much as it does in a `skip_reason`.
+              This is the same defect one layer over and the fix is the same expression:
+              `roots[root_index] / relpath`, which `_album_dict` already builds and which
+              `DuplicateHit.resolved` is built from.
+            -#}
+            <td class="small"><code>{{ album.path }}</code></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4" class="muted">No album directories were found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </section>
 {% endblock %}

@@ -4562,7 +4562,14 @@ def test_every_button_rule_is_legible_against_the_background_it_lands_on():
 
     The rules are resolved the way the browser would: the base `button` block first, then the
     more specific selector, taking `background` and `color` from whichever declares them
-    last. Both themes are checked, because the palette is defined twice.
+    last.
+
+    **Both themes, each against its own values.** `themes.setdefault` across the two blocks
+    merged them and kept whichever came first, so only the palette at the top of the file was
+    ever measured and the other was checked in the docstring and nowhere else. The light
+    palette was that unchecked one and its primary button was #0b0d12 on #2f5fd0 -- 3.4:1,
+    under AA, shipped, green. A test that names two themes and measures one is worse than no
+    test, because it is the assertion everyone believes.
     """
     css = (Path(__file__).parent.parent / "hub/web/static/app.css").read_text(encoding="utf-8")
     # Comments are stripped first: a rule preceded by a block comment would otherwise carry
@@ -4572,14 +4579,16 @@ def test_every_button_rule_is_legible_against_the_background_it_lands_on():
 
     blocks = re.findall(r":root\s*\{(.*?)\}", css, re.S)
     assert len(blocks) == 2, (
-        f"the palette is declared {len(blocks)} time(s); app.css says dark by default with "
-        f"prefers-color-scheme: light as the alternative, so both have to be here for the "
+        f"the palette is declared {len(blocks)} time(s); app.css declares light in `:root` "
+        f"and dark in `@media (prefers-color-scheme: dark)`, so both have to be here for the "
         f"contrast below to be checking anything"
     )
-    themes: dict[str, str] = {}
-    for block in blocks:
-        for name, value in re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})", block):
-            themes.setdefault(name, value)
+    # One palette per block, kept apart. `setdefault`-ing across them collapsed two themes
+    # into one and measured only the first.
+    palettes: list[dict[str, str]] = [
+        dict(re.findall(r"--([\w-]+):\s*(#[0-9a-fA-F]{6})", block)) for block in blocks
+    ]
+    theme_names = ("light", "dark")
 
     # selector -> (background, colour), as the cascade would resolve them.
     def resolve(selector: str) -> tuple[str, str] | None:
@@ -4602,35 +4611,45 @@ def test_every_button_rule_is_legible_against_the_background_it_lands_on():
             return None
         return background, colour
 
-    def expand(value: str) -> str:
+    def expand(value: str, themes: dict[str, str]) -> str:
         for name, resolved in themes.items():
             value = value.replace(f"var(--{name})", resolved)
         return value
 
     checked = 0
-    for selector in (
-        "button",
-        "button.danger",
-        '[data-action="queue-toggle-finished"][aria-pressed="true"]',
-    ):
-        found = resolve(selector)
-        assert found is not None, (
-            f"{selector} does not declare a background of its own, so it inherits the base "
-            f"button's fill and only recolours the label. That is the bug this test was "
-            f"written for: a rule that sets `color` alone lands coloured text on the accent "
-            f"background, which reads as a button with no text."
-        )
-        background, colour = (expand(v) for v in found)
-        if len(colour) == 4:  # #abc -> #aabbcc
-            colour = "#" + "".join(c * 2 for c in colour[1:])
-        ratio = _contrast(colour, background)
-        assert ratio >= 4.5, (
-            f"{selector}: {colour} on {background} is {ratio:.2f}:1, below the 4.5:1 that "
-            f"WCAG AA asks of body text. A button whose label matches its own background "
-            f"reads as a button with no text."
-        )
-        checked += 1
-    assert checked == 3
+    for theme_name, themes in zip(theme_names, palettes):
+        for selector in (
+            "button",
+            "button.danger",
+            '[data-action="queue-toggle-finished"][aria-pressed="true"]',
+        ):
+            found = resolve(selector)
+            assert found is not None, (
+                f"{selector} does not declare a background of its own, so it inherits the base "
+                f"button's fill and only recolours the label. That is the bug this test was "
+                f"written for: a rule that sets `color` alone lands coloured text on the accent "
+                f"background, which reads as a button with no text."
+            )
+            background, colour = (expand(v, themes) for v in found)
+            # An unexpanded `var(--name)` here means the palette is missing a token the rule
+            # asks for; `_contrast` would then raise on `int('var(...)', 16)`, which is a
+            # confusing error for what is really a missing definition.
+            for value in (background, colour):
+                assert not value.startswith("var("), (
+                    f"{theme_name} theme has no `{value[4:value.index(')')]}` for {selector}; "
+                    f"the two palettes have to define the same tokens or one of them is "
+                    f"silently unstyled"
+                )
+            if len(colour) == 4:  # #abc -> #aabbcc
+                colour = "#" + "".join(c * 2 for c in colour[1:])
+            ratio = _contrast(colour, background)
+            assert ratio >= 4.5, (
+                f"{theme_name} theme, {selector}: {colour} on {background} is {ratio:.2f}:1, "
+                f"below the 4.5:1 that WCAG AA asks of body text. A button whose label "
+                f"matches its own background reads as a button with no text."
+            )
+            checked += 1
+    assert checked == 2 * 3
 
 
 # ---------------------------------------------------------------------------

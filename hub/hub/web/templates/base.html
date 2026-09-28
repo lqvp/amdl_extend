@@ -33,9 +33,15 @@
   <body>
     <header class="bar">
       <a class="brand" href="/">amd-hub</a>
+      {#
+        `aria-current` is written by the server from the request path, so the active item
+        is named for a screen reader and coloured for everyone else without a line of
+        script -- which is the whole premise of this template. Two nav links that look
+        identical cost a tap on a phone and are invisible to a reader entirely.
+      #}
       <nav>
-        <a href="/queue">Queue</a>
-        <a href="/library">Library</a>
+        <a href="/queue"{% if request.url.path.rstrip('/') in ('', '/queue') %} aria-current="page"{% endif %}>Queue</a>
+        <a href="/library"{% if request.url.path.rstrip('/') == '/library' %} aria-current="page"{% endif %}>Library</a>
       </nav>
       <form class="logout" method="post" action="/logout">
         <button type="submit" class="link">Log out</button>

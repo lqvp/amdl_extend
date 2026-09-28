@@ -38,6 +38,19 @@
       because neither is stored on the job, so the title names both rather than guessing.
     -#}
     {% if job.progress is not none %}
+      {#-
+        The bar is a position; the number is the value. `<progress>` already exposes the
+        ratio to a reader, but a sighted operator gets no number out of a bar, and "62%"
+        and "63%" are indistinguishable as widths.
+
+        The tie-break is deliberate and it is not `round(0)`: Jinja's `round` is Python's,
+        which is round-half-to-even, so 0.625 renders as 62 while `Math.round` in
+        `progressCell` gives 63 -- and `upsertRow` rebuilds this cell from JSON on every
+        stream frame, so the row would change value while nothing happened. `x + 0.5` then
+        truncate is round-half-up for the non-negative ratios a `progress` holds, which is
+        the rule the script already uses. Both sides, one rule.
+      -#}
+      <span class="pct">{{ (100 * job.progress + 0.5) | int }}%</span>
       <progress max="1" value="{{ job.progress }}"
                 title="{{ (100 * job.progress) | round(1) }}%"></progress>
     {% elif job.status == 'running' %}

@@ -155,20 +155,29 @@
     against the library on disk rather than against this list.
   </p>
 
-  <table id="queue-table">
-    <thead>
-      <tr>
-        <th>title</th><th>status</th><th>codec</th><th>progress</th>
-        <th>detail</th><th class="num">id</th><th></th>
-      </tr>
-    </thead>
-    <tbody id="queue-body">
-      {% for job in jobs %}
-        {% include "job_row.html" %}
-      {% endfor %}
-    </tbody>
-  </table>
-  <p class="muted small" id="stream-state">connecting&hellip;</p>
+  {#- Seven columns do not fit a phone, and the fix for a table that does not fit is to
+      move the table rather than reflow it: a queue whose columns wrap into a stack is
+      unreadable in a different way. `.table-wrap` scrolls sideways; nothing inside it
+      changes, so `#queue-body` and every selector and test that reaches it are untouched. -#}
+  <div class="table-wrap">
+    <table id="queue-table">
+      <thead>
+        <tr>
+          <th>title</th><th>status</th><th>codec</th><th>progress</th>
+          <th>detail</th><th class="num">id</th><th></th>
+        </tr>
+      </thead>
+      <tbody id="queue-body">
+        {% for job in jobs %}
+          {% include "job_row.html" %}
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {#- `data-state` is what the dot colours itself from in `app.css`; `app.js` sets the
+      attribute alongside the label, because it writes the label with `textContent` and a
+      `<span>` in here would be deleted on the first frame. -#}
+  <p class="muted small" id="stream-state" data-state="connecting">connecting&hellip;</p>
 </section>
 
 <section class="card">

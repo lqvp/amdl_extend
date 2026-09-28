@@ -1,13 +1,17 @@
-/* amd-hub's client, in one file and about a hundred lines.
+/* amd-hub's client, in one file and about four hundred and fifty lines.
  *
  * No HTMX. The brief named server-rendered HTMX templates, and the server-rendered half is
  * what is here -- every page arrives complete from Jinja2 and every action is a form that
  * works without this file. What is missing is the HTMX *runtime*: htmx's SSE extension is
  * what the live queue would use, and a ~3 KB script fetched from a CDN at page load is a
- * worse trade for a tool on a home LAN than 100 lines that use the platform's own
+ * worse trade for a tool on a home LAN than a script this size that uses the platform's own
  * `EventSource`. So the interactive half is native, and the templates use `data-action`
  * attributes rather than `hx-*` ones -- a `hx-post` on a page with no htmx silently does
  * nothing, which is the worst of both.
+ *
+ * (This line used to say "about a hundred lines", and said so for long enough that it had
+ * become the file's least accurate statement. A header that understates the file is not
+ * harmless: it is the number someone quotes when deciding whether to read it.)
  *
  * The two things this file must not get wrong:
  *
@@ -39,9 +43,20 @@
     return node;
   }
 
+  /* The progress cell, as `job_row.html` renders it: a percentage first and the bar
+   * second. The number is text and the bar is a position, and the two together are what a
+   * reader needs -- a bar alone cannot distinguish 62% from 63%, and `<progress>` with no
+   * `value` is an indeterminate bar that claims progress it does not have.
+   *
+   * `Math.round` is round-half-up, which is what the template's `100 * progress + 0.5` then
+   * truncate gives too. The two have to agree because `upsertRow` rebuilds this cell from
+   * JSON on every stream frame: Jinja's own `round(0)` is round-half-to-even, so 0.625
+   * would have rendered 62 on first paint and 63 one frame later, a percentage that moves
+   * with no progress behind it. */
   function progressCell(job) {
     var td = el("td", "progress");
     if (job.progress !== null && job.progress !== undefined) {
+      td.appendChild(el("span", "pct", Math.round(100 * job.progress) + "%"));
       var done = el("progress");
       done.max = 1;
       done.value = job.progress;
@@ -77,8 +92,17 @@
       td.appendChild(ul);
     } else if (job.error) {
       td.appendChild(el("span", "error-text", job.error));
-    } else {
-      td.appendChild(el("span", "muted", job.parent_url || ""));
+    } else if (job.parent_url) {
+      // The template renders `<a class="muted small" ...>source</a>` here; the script used to
+      // render a `<span>` holding the raw URL, so every row's source link silently became a
+      // long unprominent URL the moment the first stream frame arrived -- and only then,
+      // which is the whole reason `test_the_scripts_row_builder_agrees_with_the_template`
+      // exists. `href` is set as a property, never concatenated into markup: the URL came
+      // from the server, and a string built here is a string nobody has escaped.
+      var link = el("a", "muted small", "source");
+      link.href = job.parent_url;
+      link.rel = "noreferrer noopener";
+      td.appendChild(link);
     }
     return td;
   }
@@ -151,10 +175,41 @@
 
   // -- the stream ---------------------------------------------------------
 
+  /* The log pane is `aria-live`, and it is also the only thing on the page that grows
+   * without bound. A hub left open across a week of ripping appends a line per job, per
+   * wrapper hiccup and per re-queue; `textContent +=` reallocations the whole string every
+   * time, so without a ceiling the pane gets slower to append to and slower to repaint, on
+   * a node a screen reader re-reads on every change. 2,000 lines is the last 2,000, kept
+   * as whole lines -- trimming by length would leave a half-line at the top forever. */
+  var LOG_LIMIT = 2000;
+  var logLines = 0;
+
   function log(line) {
     if (!logPane) return;
     logPane.textContent += line + "\n";
+    logLines += 1;
+    if (logLines > LOG_LIMIT) {
+      var text = logPane.textContent;
+      var drop = logLines - LOG_LIMIT;
+      for (var i = 0; i < drop; i++) {
+        var newline = text.indexOf("\n");
+        if (newline === -1) break;
+        text = text.slice(newline + 1);
+      }
+      logPane.textContent = text;
+      logLines = LOG_LIMIT;
+    }
     logPane.scrollTop = logPane.scrollHeight;
+  }
+
+  /* `data-state` is what `#stream-state`'s dot colours itself from; the label is what a
+   * reader gets. Setting the attribute rather than adding a `<span>` matters because the
+   * label is written with `textContent`, which would delete a child node on the first
+   * frame -- and the dot is then the one thing that survives a reconnect. */
+  function setStreamState(name, label) {
+    if (!state) return;
+    state.dataset.state = name;
+    state.textContent = label;
   }
 
   function handle(event) {
@@ -195,13 +250,13 @@
 
   var source = new EventSource("/api/jobs/stream");
   source.addEventListener("open", function () {
-    if (state) state.textContent = "live";
+    setStreamState("live", "live");
   });
   source.addEventListener("message", handle);
   source.addEventListener("error", function () {
     // EventSource reconnects on its own and the stream's first frame is a fresh snapshot, so
     // a drop is a resync rather than a gap. Saying so is better than a spinner that lies.
-    if (state) state.textContent = "reconnecting…";
+    setStreamState("reconnecting", "reconnecting…");
   });
 
   // -- actions ------------------------------------------------------------

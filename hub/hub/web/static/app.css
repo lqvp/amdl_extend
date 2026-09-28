@@ -5,37 +5,91 @@
  * scripting disabled -- which is the right default for something that runs on one person's
  * LAN behind whatever their router does to it.
  *
- * Dark by default with `prefers-color-scheme: light` as the alternative, because a page
- * that is white in a dark room at 2am is a page about a download that has been running for
- * two hours. Both are checked for contrast on the text colours used against the surfaces.
+ * LIGHT by default -- a pale sakura wash on white -- because this is a page read in a room
+ * with the lights on. `prefers-color-scheme: dark` is the alternative for the 2am case, and
+ * both palettes are declared here as exactly two `:root` blocks: one plain, one inside the
+ * media query. `test_every_button_rule_is_legible_against_the_background_it_lands_on` reads
+ * that count and then resolves the button rules against the values, so a third block would
+ * fail the count and a missing block would mean the contrast below checks one theme only.
+ *
+ * TWO TOKENS PER HUE, AND THAT IS THE WHOLE COLOUR SCHEME.
+ *
+ * A pastel is right as a fill and unreadable as text; a deep rose is right as text and too
+ * heavy as a fill. So one hue is split in two and never asked to do the other's job:
+ *
+ *   --accent      the fill.  pastel. buttons, progress, tinted surfaces.
+ *   --accent-ink  the text/line weight. links, running, the active nav item, focus rings.
+ *   --on-accent   what sits ON --accent, so a filled button never paints its own label out.
+ *
+ * The same split gives --bad / --on-bad. Everything read directly as text (--text, --muted,
+ * --ok, --warn, --bad, --accent-ink) is mixed to clear 4.5:1 against --bg, --surface AND
+ * --surface-2 in both themes; the three filled rules are what the test measures mechanically.
+ *
+ * Shape has exactly three values and they mean one thing each:
+ *   --radius       8px   containers (cards)
+ *   --radius-sm    6px   controls (inputs, buttons, the log)
+ *   --radius-pill  999px things that label rather than hold (pills, counts, status chips)
+ * A control that is round in a square layout, or vice versa, is the bug that rule prevents.
  */
 
 :root {
-  --bg: #14161a;
-  --surface: #1c1f26;
-  --surface-2: #23262f;
-  --line: #31353f;
-  --text: #e6e8ec;
-  --muted: #9aa1ad;
-  --accent: #7aa2f7;
-  --ok: #86c06c;
-  --warn: #e0af68;
-  --bad: #f7768e;
+  color-scheme: light;
+
+  --bg: #fdf6f8;
+  --surface: #ffffff;
+  --surface-2: #fbeef2;
+  --line: #f0dbe3;
+
+  --text: #2b1f24;
+  --muted: #6f6169;
+
+  --accent: #f9b8cd;
+  --accent-ink: #a83e63;
+  --on-accent: #2b1f24;
+
+  --ok: #35704a;
+  --warn: #8a5a00;
+  --bad: #b03057;
+  --on-bad: #fff8fa;
+
   --radius: 8px;
+  --radius-sm: 6px;
+  --radius-pill: 999px;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.0625rem;
+  --text-xl: 1.25rem;
+
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.25rem;
+  --sp-6: 1.5rem;
 }
 
-@media (prefers-color-scheme: light) {
+@media (prefers-color-scheme: dark) {
   :root {
-    --bg: #f6f7f9;
-    --surface: #ffffff;
-    --surface-2: #eef0f4;
-    --line: #d8dce3;
-    --text: #1a1d23;
-    --muted: #5b6472;
-    --accent: #2f5fd0;
-    --ok: #2f7a1f;
-    --warn: #8a5a00;
-    --bad: #b02a3f;
+    color-scheme: dark;
+
+    --bg: #191417;
+    --surface: #201a1e;
+    --surface-2: #292126;
+    --line: #3a3037;
+
+    --text: #f0e6ea;
+    --muted: #a2949c;
+
+    --accent: #f2a9c2;
+    --accent-ink: #f4aac3;
+    --on-accent: #24181d;
+
+    --ok: #86c06c;
+    --warn: #e0af68;
+    --bad: #f7768e;
+    --on-bad: #24181d;
   }
 }
 
@@ -45,15 +99,27 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP",
-        sans-serif;
+  font: var(--text-base)/1.5 system-ui, -apple-system, "Segoe UI", "Hiragino Sans",
+        "Noto Sans JP", sans-serif;
 }
 
+/* Focus is drawn for the keyboard and not for the mouse, and it was drawn nowhere at all
+ * before: `:focus-visible` had no rule in this file, so tabbing through the queue moved an
+ * invisible ring around a page whose whole purpose is buttons. One rule, one colour, one
+ * offset so the ring never sits on top of the control it is describing. */
+:focus-visible {
+  outline: 2px solid var(--accent-ink);
+  outline-offset: 2px;
+}
+
+/* `.bar` is the only positioned thing in this file, so it carries the only `z-index`.
+ * Nothing else needs one: an arbitrary layer number on a control is how two layers end up
+ * fighting over a dropdown or a dialog that arrives later. */
 .bar {
   display: flex;
   align-items: center;
-  gap: 1.25rem;
-  padding: 0.75rem 1.25rem;
+  gap: var(--sp-5);
+  padding: var(--sp-3) var(--sp-5);
   background: var(--surface);
   border-bottom: 1px solid var(--line);
   position: sticky;
@@ -62,32 +128,40 @@ body {
 }
 
 .bar .brand { font-weight: 700; letter-spacing: 0.02em; text-decoration: none; color: var(--text); }
-.bar nav { display: flex; gap: 1rem; }
+.bar nav { display: flex; gap: var(--sp-4); }
 .bar nav a { color: var(--muted); text-decoration: none; }
 .bar nav a:hover { color: var(--text); }
+/* The current page is named by the server (`aria-current`, set from the request path), so
+ * it works with scripting off. Two nav items that look the same is a small thing until the
+ * hub is on a phone and "which of these am I on" costs a tap. */
+.bar nav a[aria-current="page"] { color: var(--accent-ink); font-weight: 600; }
 .bar .logout { margin-left: auto; }
 
 main {
   max-width: 68rem;
   margin: 0 auto;
-  padding: 1.25rem;
+  padding: var(--sp-5);
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: var(--sp-4);
 }
 
 .card {
   background: var(--surface);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 1rem 1.25rem;
+  padding: var(--sp-5) var(--sp-6);
 }
 
-.card.narrow { max-width: 26rem; margin: 3rem auto; }
-.card h1 { font-size: 1.25rem; margin: 0 0 0.5rem; }
-.card h2 { font-size: 1.05rem; margin: 0 0 0.5rem; }
+.card.narrow { max-width: 26rem; margin: var(--sp-6) auto; }
+.card h1 { font-size: var(--text-xl); line-height: 1.25; letter-spacing: -0.01em; margin: 0 0 var(--sp-2); }
+.card h2 { font-size: var(--text-lg); line-height: 1.25; letter-spacing: -0.01em; margin: 0 0 var(--sp-2); }
 
-label { display: block; margin: 0.6rem 0 0.2rem; font-size: 0.85rem; color: var(--muted); }
+/* Prose gets a measure; a paragraph of explanation that runs the full 68rem is a paragraph
+ * nobody finishes. The counts row is excluded because it is a flex list, not prose. */
+.card > p:not(.summary) { max-width: 65ch; }
+
+label { display: block; margin: var(--sp-2) 0 var(--sp-1); font-size: var(--text-sm); color: var(--muted); }
 label.inline { display: inline-flex; align-items: center; gap: 0.35rem; margin: 0; }
 
 input, select, textarea {
@@ -96,34 +170,71 @@ input, select, textarea {
   background: var(--surface-2);
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font: inherit;
 }
 
 input[type="checkbox"] { width: auto; }
 
+/* The base `button` used to carry `margin-top: 0.75rem`, which is a form's spacing written
+ * as a property of every button on the page -- and then had to be undone three times, in
+ * `td.actions`, in `.row.bulk`, and by accident in the wrapper's Start/Stop/Restart row,
+ * which sat inside a `<p>` and picked the gap up for free. The margin now lives where the
+ * gap is wanted: a submit that follows a field. Everything else starts at zero. */
 button {
-  margin-top: 0.75rem;
+  margin: 0;
   padding: 0.45rem 0.9rem;
   background: var(--accent);
-  color: #0b0d12;
+  color: var(--on-accent);
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+  transition: filter 0.12s ease, transform 0.12s ease;
 }
 
-button:hover { filter: brightness(1.08); }
-button.link { background: none; color: var(--muted); margin: 0; font-weight: 400; padding: 0; }
+.card form:not(.inline-form) > button { margin-top: var(--sp-3); }
+
+button:not(.link):hover { filter: brightness(0.95); }
+/* Pressed, not tapped: a 1px drop is the whole of the acknowledgement, and `transform` is
+ * the one property here that does not trigger layout. */
+button:not(.link):active { transform: translateY(1px); }
+button.link { background: none; color: var(--muted); margin: 0; font-weight: 400; padding: 0; transition: color 0.12s ease; }
 button.link:hover { color: var(--text); }
 
-.row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+.row { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
 .row > label { margin: 0; }
-.row input, .row select { width: auto; min-width: 8rem; }
+/* The checkbox is excluded on purpose: `input` inside `.row` would otherwise hand it the
+ * 8rem a text field needs to be usable, and a checkbox that is 8rem wide pushes its own
+ * label half a row away. It has no width of its own to give up either -- `width: auto` is
+ * all it asks for. */
+.row input:not([type="checkbox"]), .row select { width: auto; min-width: 8rem; }
+
+/* Below ~44rem the enqueue line runs out of room, and a flex row that runs out leaves
+ * whatever still fits at the end of one line -- which is how `Language` came to sit on its
+ * own with its input beneath it, naming a control that is not next to it. A grid keeps a
+ * label in the column *beside* its control, so wrapping moves the pair together instead of
+ * splitting it. Only the enqueue row: `.row.bulk` is a list of independent controls with
+ * no label to keep company, and stacking it would break the re-queue form away from its
+ * button. */
+@media (max-width: 44rem) {
+  .row:not(.bulk) {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: center;
+    column-gap: var(--sp-3);
+    row-gap: var(--sp-2);
+  }
+  .row:not(.bulk) input:not([type="checkbox"]),
+  .row:not(.bulk) select { width: 100%; min-width: 0; }
+  /* The checkbox is a control, not a caption, so it joins the control column rather than
+   * sitting under `Language` where a reader scanning that column would not look for it. */
+  .row:not(.bulk) > label.inline { grid-column: 2; }
+}
 
 .muted { color: var(--muted); }
-.small { font-size: 0.82rem; }
+.small { font-size: var(--text-sm); }
 .error, .error-text { color: var(--bad); }
 .ok { color: var(--ok); }
 .warn { color: var(--warn); }
@@ -132,39 +243,99 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
 
 pre#log {
   margin: 0;
+  /* Empty, this is a strip of `--surface-2` about 8px tall -- which reads as a rendering
+   * fault rather than as "nothing has been logged yet". The pane keeps its shape so the
+   * first line lands in a place the eye already knows. */
+  min-height: 3.5rem;
   max-height: 16rem;
   overflow: auto;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 0.6rem;
-  font-size: 0.8rem;
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font-size: var(--text-xs);
   white-space: pre-wrap;
   word-break: break-word;
 }
 
+/* Seven columns of title, status, codec, progress, detail, id and actions do not fit a
+ * phone, and the fix for a table that does not fit is to move the table rather than to
+ * reflow it: a queue whose columns wrap into a stack is unreadable in a different way. The
+ * wrapper scrolls, the table keeps its widths, and `#queue-body` is still a descendant so
+ * every selector below is unaffected. */
+.table-wrap { overflow-x: auto; }
+
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-th { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+th { font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.actions { white-space: nowrap; }
-td.actions button { margin: 0; padding: 0.2rem 0.5rem; font-size: 0.8rem; }
+td.actions button { padding: 0.2rem 0.5rem; font-size: var(--text-xs); }
+
+/* Tracking a value across seven columns is the one thing a table makes hard that a list
+ * does not, and a hover is the cheapest thing that fixes it. */
+#queue-body tr:hover { background: var(--surface-2); }
 
 .status { font-weight: 600; }
 .status-queued .status { color: var(--muted); }
 .status-waiting .status { color: var(--warn); }
-.status-running .status { color: var(--accent); }
+.status-running .status { color: var(--accent-ink); }
 .status-done .status { color: var(--ok); }
 .status-skipped .status { color: var(--warn); }
 .status-failed .status, .status-cancelled .status { color: var(--bad); }
 
-progress { width: 8rem; height: 0.5rem; }
+/* A colour on its own is a signal a red-green operator cannot read, and this table is all
+ * colour. The chip carries the same hue as a background and keeps the label, so the state
+ * survives greyscale, low vision and a phone in sunlight. The tint is mixed from
+ * `currentColor`, so each status tints itself from the colour above -- and on a browser
+ * with no `color-mix` the declaration is dropped whole and the coloured label remains,
+ * which is the state this page shipped in before. */
+.status {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+.status-running { font-weight: 700; }
+.status-failed, .status-cancelled { text-decoration: underline; text-decoration-thickness: 1px; }
+
+/* The UA paints these green and blue, which are the only two colours on the page that are
+ * not in the palette -- and on a pink track a green fill is also the least legible choice
+ * available. Both engines are named because neither reads the other's pseudo-element. */
+progress {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 8rem;
+  height: 0.5rem;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  overflow: hidden;
+}
+progress::-webkit-progress-bar { background: var(--surface-2); border-radius: var(--radius-pill); }
+progress::-webkit-progress-value { background: var(--accent-ink); border-radius: var(--radius-pill); }
+progress::-moz-progress-bar { background: var(--accent-ink); border-radius: var(--radius-pill); }
+
+td.progress { white-space: nowrap; }
+/* The bar alone is a position with no scale; the number is what makes it a percentage, and
+ * it is text so it is also what a screen reader gets that `<progress>` without a value
+ * does not give. */
+.pct {
+  margin-left: 0.35rem;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
 
 .paths { margin: 0.25rem 0 0; padding-left: 1.1rem; }
 .paths li { word-break: break-all; }
 
-.roots { margin: 0.4rem 0; padding-left: 1.1rem; }
-.roots li.bad { color: var(--bad); }
+/* `.roots` used to be one selector serving both a `<ul>` in the queue and a `<table>` in
+ * the library, so the table got `padding-left: 1.1rem` -- an indent borrowed from a list
+ * marker neither of its columns has. Scoped to the list, which is the only thing it was
+ * ever written for. */
+ul.roots { margin: 0.4rem 0; padding-left: 1.1rem; }
+ul.roots li.bad { color: var(--bad); }
 
 .pill {
   display: inline-block;
@@ -172,8 +343,8 @@ progress { width: 8rem; height: 0.5rem; }
   padding: 0.05rem 0.45rem;
   background: var(--surface-2);
   border: 1px solid var(--line);
-  border-radius: 999px;
-  font-size: 0.78rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
   color: var(--muted);
 }
 
@@ -182,17 +353,19 @@ progress { width: 8rem; height: 0.5rem; }
  * A queue that only grows is a queue you scroll. Three things keep it readable: the
  * counts above the table, so the state is knowable without reading it; the two bulk
  * controls, because there is otherwise no way to remove a row at all; and collapsing
- * the finished ones, which on a busy library are almost all of them.
+ * the finished ones, which on a busy library is almost all of them.
  *
  * `status-*` colours are on the cell rather than the row because the row background is
- * how a selection would read, and this table has no selection.
+ * how a selection would read, and this table has no selection. Note that the row hover
+ * above is also a background -- the two do not collide because the status colour is
+ * painted on the cell, not the row.
  */
 
 .summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 0 0 0.75rem;
+  gap: var(--sp-1);
+  margin: 0 0 var(--sp-3);
 }
 
 .count {
@@ -201,8 +374,8 @@ progress { width: 8rem; height: 0.5rem; }
   gap: 0.3rem;
   padding: 0.15rem 0.5rem;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  font-size: 0.8rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--text-xs);
   color: var(--muted);
   background: var(--surface-2);
 }
@@ -213,35 +386,28 @@ progress { width: 8rem; height: 0.5rem; }
  * worth noticing gets the colour its rows use, which is one fewer thing to learn. */
 .count[data-count="failed"] .count-n,
 .count[data-count="cancelled"] .count-n { color: var(--bad); }
-.count[data-count="running"] .count-n { color: var(--accent); }
+.count[data-count="running"] .count-n { color: var(--accent-ink); }
 .count[data-count="queued"] .count-n,
 .count[data-count="waiting"] .count-n { color: var(--muted); }
 .count[data-count="done"] .count-n,
 .count[data-count="skipped"] .count-n { color: var(--ok); }
 
-.row.bulk { margin: 0 0 0.4rem; }
-.row.bulk .inline-form { display: inline-flex; align-items: center; gap: 0.4rem; }
+.row.bulk { margin: 0 0 var(--sp-1); }
+.row.bulk .inline-form { display: inline-flex; align-items: center; gap: var(--sp-2); }
 .row.bulk .inline-form label { margin: 0; }
 
-/* Both of these set a `background` of their own rather than only a `color`. The base
- * `button` is a filled `var(--accent)`, so a rule that recoloured the label alone painted it
- * onto that fill -- and at `var(--accent)` on `var(--accent)` the label disappeared, which is
- * what the first screenshot of this page showed. The pressed state is an *inset* button
- * rather than a tint, because a tint of a filled button is the same colour as the button. */
-button.danger { background: var(--bad); color: #0b0d12; }
-button.danger:hover { filter: brightness(1.08); }
+/* `button.danger` gives itself BOTH the fill and the label, because the base `button` is
+ * now a pastel fill with an ink label and a rule that recoloured only one of the two would
+ * paint that label onto the wrong ground. Same for the pressed toggle below. Both are what
+ * `test_every_button_rule_is_legible_against_the_background_it_lands_on` resolves. */
+button.danger { background: var(--bad); color: var(--on-bad); }
+button.danger:not(.link):hover { filter: brightness(0.95); }
 
 [data-action="queue-toggle-finished"][aria-pressed="true"] {
   background: var(--surface-2);
   color: var(--text);
-  border: 1px solid var(--accent);
+  border: 1px solid var(--accent-ink);
 }
-
-/* The status cell carries the weight as well as the colour, so the state is legible
- * without relying on hue -- which is the one thing a colour-only signal gets wrong. */
-.status { font-weight: 600; }
-.status-running { font-weight: 700; }
-.status-failed, .status-cancelled { text-decoration: underline; text-decoration-thickness: 1px; }
 
 /* The two status cards are <details>, so they are closed when there is nothing to say.
  * A closed card is one line; the marker is styled rather than removed so it still reads
@@ -251,20 +417,44 @@ details.card > summary {
   list-style: none;
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: var(--sp-2);
 }
 details.card > summary::-webkit-details-marker { display: none; }
 details.card > summary::before {
   content: "▸";
   color: var(--muted);
-  font-size: 0.8rem;
+  font-size: var(--text-xs);
 }
 details.card[open] > summary::before { content: "▾"; }
 details.card > summary h1, details.card > summary h2 { margin: 0; }
-details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--accent); }
+details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--accent-ink); }
+
+/* The stream state is the page's one live indicator, so it is the page's one dot. It is
+ * here as a `::before` keyed on `data-state` rather than a span, because `app.js` writes
+ * the label with `textContent` and would otherwise delete it on the first frame. */
+#stream-state::before {
+  content: "";
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-right: 0.35rem;
+  border-radius: var(--radius-pill);
+  background: var(--muted);
+  vertical-align: baseline;
+}
+#stream-state[data-state="live"]::before { background: var(--ok); }
+#stream-state[data-state="reconnecting"]::before { background: var(--warn); }
 
 /* `row.hidden = true` relies on the UA's `[hidden] { display: none }`, and a `<tr>` is
  * exactly the element where that is unreliable: a single author rule giving `tr` a display
  * value outranks the UA sheet, and the row then stays visible while the script believes it
  * is hidden. Said once, here, so no future rule can undo it by accident. */
 #queue-body tr[hidden] { display: none; }
+
+/* Motion above feedback -- a hover, a press, a focus ring arriving -- has no business on a
+ * tool someone leaves open all day, and the page does not claim any. This is the switch for
+ * the two transitions that do exist, for the operator who has asked the OS for less. */
+@media (prefers-reduced-motion: reduce) {
+  button { transition: none; }
+  button:not(.link):active { transform: none; }
+}
