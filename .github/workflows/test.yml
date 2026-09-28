@@ -196,7 +196,20 @@ jobs:
       # timing number on a shared runner is noise.
       - name: test
         working-directory: hub-go
-        run: go test ./... -timeout 5m
+        # Failures name themselves as annotations. The step log is not always fetchable --
+        # some networks cannot reach the log blob store at all -- and a red run whose only
+        # visible output is "Process completed with exit code 1" is the least actionable
+        # thing CI can produce. `::error::` lines surface on the run's front page, which
+        # is the one place every network can read.
+        run: |
+          set -o pipefail
+          if go test ./... -timeout 5m 2>&1 | tee /tmp/go-test.log; then
+            exit 0
+          fi
+          grep -E '^(--- FAIL|FAIL|panic:)|^ +[^ ]+\.go:[0-9]+:' /tmp/go-test.log | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
+          exit 1
 
       # The entry point the image's `CMD` runs. `go test` compiles every package but links
       # them as a test binary; what the container needs is `amdhub`, and the cgo link

@@ -270,7 +270,16 @@ WORKDIR /src/hub-go
 # the worker script among them is copied into the runtime stage on its own -- and copying
 # the whole directory would put the golden files and the synthetic library in a layer
 # nothing reads.
-COPY hub-go/go.mod hub-go/cmd hub-go/internal /src/hub-go/
+#
+# **One COPY per destination, and that is not tidiness.** `COPY a b dest/` copies the
+# *contents* of each source directory into dest -- so `COPY hub-go/cmd hub-go/internal
+# /src/hub-go/` produced `/src/hub-go/amdhub` and `/src/hub-go/app`, no `cmd/` and no
+# `internal/` at all, and `go build ./cmd/amdhub` failed with a pattern that matched no
+# packages. The first build of this stage found it; the three lines below are the layout
+# the module's import paths describe.
+COPY hub-go/go.mod /src/hub-go/go.mod
+COPY hub-go/cmd /src/hub-go/cmd
+COPY hub-go/internal /src/hub-go/internal
 
 # **`GOPROXY=off` is the point rather than a workaround for a sandbox.** The module has no
 # third-party dependencies at all -- standard library plus cgo -- so a build that wants to
