@@ -374,9 +374,17 @@ func (s *State) handleLibraryPage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleEnqueueForm is the `POST /enqueue` the queue form names: the no-JS path to
-// queueing a URL, which redirects back to the queue with the problems in the log
+// handleEnqueueForm is the `POST /enqueue` the queue form names: the path a browser
+// without scripting takes, which redirects back to the queue with the problems in the log
 // rather than in the address bar.
+//
+// **Not a route the Python hub has, and the difference is deliberate.** `app.js`
+// intercepts the form's submit and posts JSON to `/api/jobs`, so the `action` attribute is
+// only reached when scripting is off -- where the Python hub answers 404, and the form's
+// own action attribute turns out to name nothing. Serving it is a small superset of the
+// Python surface rather than a change to it: the same request body, the same handler, and
+// a redirect instead of a JSON reply, so a no-JS browser can queue a URL rather than
+// landing on an error page.
 func (s *State) handleEnqueueForm(w http.ResponseWriter, r *http.Request) {
 	form := readForm(r)
 	body := jobsBody{
