@@ -278,7 +278,13 @@ COPY hub-go/go.mod hub-go/cmd hub-go/internal /src/hub-go/
 # cheapest place to find out. `-trimpath` keeps `/src/hub-go/...` out of the binary's
 # stack traces, and there is no `-ldflags` version string: a version that can disagree with
 # the image tag is worse than no version at all.
+# `mkdir -p /out` is not decoration. `go build -o` writes its output file but does not
+# create the directory above it, so the first real build of this stage -- which is the
+# first real build of anything, since the stage is new -- died with `open /out/amdhub: no
+# such file or directory` before compiling a line. The runtime stage copies /out/amdhub out
+# of here, and that name is the only contract between the two.
 RUN set -eux; \
+    mkdir -p /out; \
     CGO_ENABLED=1 GOFLAGS=-mod=mod GOPROXY=off GOTOOLCHAIN=local \
         go build -trimpath -o /out/amdhub ./cmd/amdhub; \
     test -x /out/amdhub
