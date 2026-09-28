@@ -90,6 +90,15 @@ jobs:
       # two would disagree the day `requires-python` moves.
       - uses: astral-sh/setup-uv@v10.2.0
         with:
+          # Pinned, not left to uv's resolver, and the pin is the image's own: the Dockerfile
+          # is `FROM python:3.13-slim`, and the suite was written and has always been run
+          # against 3.13. Left alone uv takes the runner's `/usr/bin/python3` -- which is
+          # 3.12 here, and 3.12 here means the run never ends: `asyncio.Server.close()` still
+          # counts active connections as an integer, so the accepted connection in
+          # `test_a_port_held_by_a_non_wrapper_fails_fast` wedges its `finally` forever and
+          # the job burns its whole `timeout-minutes` at 89%. Testing a Python the image
+          # does not ship would also have been the wrong thing to be green on.
+          python-version: "3.13"
           enable-cache: true
           # Keyed on the one file that can invalidate this environment. A repo-wide glob
           # would also fire on a comment edit anywhere, which is a cache miss nobody asked
