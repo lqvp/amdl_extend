@@ -787,6 +787,12 @@ func (s *Store) Requeue(statuses []string) (RequeueResult, error) {
 // Get is one job by id, or nil. nil rather than an error, because
 // `GET /api/jobs/{id}` for an id the caller made up is a 404 and not a bug in the
 // caller.
+// Get is one row, or `(nil, nil)` when there is no such row.
+//
+// **A missing row is not an error, and that is the Python behaviour** (`JobStore.get`
+// returns `None`) -- so a caller has to check the job and not only the error. A handler
+// that does not is a nil dereference in the request goroutine, which reaches the client
+// as a closed connection with no response rather than as the 404 the API promises.
 func (s *Store) Get(jobID int64) (*Job, error) {
 	rows, err := s.conn.Query("SELECT * FROM job WHERE id = ?", jobID)
 	if err != nil {

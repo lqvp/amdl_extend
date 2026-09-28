@@ -237,7 +237,7 @@ func (s *State) rememberLeaves(leaves []jobs.Leaf, createdIDs []int64) {
 	}
 	for _, jobID := range createdIDs {
 		job, err := s.Store.Get(jobID)
-		if err != nil {
+		if err != nil || job == nil {
 			continue
 		}
 		key := derefString(job.AdamID) + "\x00" + job.Codec
@@ -294,6 +294,22 @@ func (s *State) handleJobsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobDictList(rows, true)})
 }
 
+// jobOr404 reads a row and answers 404 itself when there is not one.
+//
+// **The nil check is the whole reason this exists.** `Store.Get` returns `(nil, nil)` for
+// a row that does not exist -- Python's `get()` returning `None`, which is the shape the
+// store was ported from -- so a caller that only checks the error dereferences nil, and
+// the symptom is a panic in the HTTP handler and a connection closed with no response
+// rather than the 404 the client contract promises.
+func (s *State) jobOr404(w http.ResponseWriter, jobID int64) (*jobs.Job, bool) {
+	job, err := s.Store.Get(jobID)
+	if err != nil || job == nil {
+		fail(w, http.StatusNotFound, fmt.Sprintf("no job with id %d.", jobID))
+		return nil, false
+	}
+	return job, true
+}
+
 // handleJobGet is one row, or a 404 naming the id.
 func (s *State) handleJobGet(w http.ResponseWriter, r *http.Request, params map[string]string) {
 	jobID, ok := jobIDFrom(params)
@@ -301,9 +317,8 @@ func (s *State) handleJobGet(w http.ResponseWriter, r *http.Request, params map[
 		fail(w, http.StatusBadRequest, fmt.Sprintf("no job with id %s.", params["jobID"]))
 		return
 	}
-	job, err := s.Store.Get(jobID)
-	if err != nil {
-		fail(w, http.StatusNotFound, fmt.Sprintf("no job with id %d.", jobID))
+	job, ok := s.jobOr404(w, jobID)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, JobDict(job))
@@ -321,9 +336,8 @@ func (s *State) handleJobDelete(w http.ResponseWriter, r *http.Request, params m
 		fail(w, http.StatusNotFound, fmt.Sprintf("no job with id %s.", params["jobID"]))
 		return
 	}
-	job, err := s.Store.Get(jobID)
-	if err != nil {
-		fail(w, http.StatusNotFound, fmt.Sprintf("no job with id %d.", jobID))
+	job, ok := s.jobOr404(w, jobID)
+	if !ok {
 		return
 	}
 	if job.Status == "running" {
@@ -338,9 +352,8 @@ func (s *State) handleJobDelete(w http.ResponseWriter, r *http.Request, params m
 	}
 	s.Leaves.Forget(jobID)
 	s.PublishJob(jobID)
-	current, err := s.Store.Get(jobID)
-	if err != nil {
-		fail(w, http.StatusNotFound, fmt.Sprintf("no job with id %d.", jobID))
+	current, ok := s.jobOr404(w, jobID)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, JobDict(current))
@@ -362,9 +375,8 @@ func (s *State) handleJobRetry(w http.ResponseWriter, r *http.Request, params ma
 		fail(w, http.StatusNotFound, fmt.Sprintf("no job with id %s.", params["jobID"]))
 		return
 	}
-	job, err := s.Store.Get(jobID)
-	if err != nil {
-		fail(w, http.StatusNotFound, fmt.Sprintf("no job with id %d.", jobID))
+	job, ok := s.jobOr404(w, jobID)
+	if !ok {
 		return
 	}
 	switch job.Status {
@@ -378,9 +390,8 @@ func (s *State) handleJobRetry(w http.ResponseWriter, r *http.Request, params ma
 		return
 	}
 	s.PublishJob(jobID)
-	current, err := s.Store.Get(jobID)
-	if err != nil {
-		fail(w, http.StatusNotFound, fmt.Sprintf("no job with id %d.", jobID))
+	current, ok := s.jobOr404(w, jobID)
+	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, JobDict(current))
@@ -486,10 +497,12 @@ func (s *State) handleJobsStream(w http.ResponseWriter, r *http.Request) {
 	// untouched.
 	seenSnapshot := false
 	for {
-		if r.Context().Err() != nil {
-			return
-		}
-		message, err, ok := subscription.Next()
+		// **The context, not a bare `Next`.** A browser tab that closes leaves the
+		// request context cancelled and this call returns: without it the handler would
+		// block on a channel nobody publishes to, and one dead subscriber would stay
+		// subscribed for the life of the process -- the leak `finally: aclose()`
+		// prevents on the Python side. The `defer` above then does the removing.
+		message, err, ok := subscription.NextContext(r.Context())
 		if !ok {
 			return
 		}

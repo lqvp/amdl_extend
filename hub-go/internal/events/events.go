@@ -48,6 +48,7 @@
 package events
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -259,6 +260,45 @@ func (s *Subscription) Next() (Message, error, bool) {
 			return nil, nil, false
 		}
 		return message, nil, true
+	}
+}
+
+// NextContext is `Next`, but it also gives up when the caller's context is done.
+//
+// **This is what keeps a closed tab from holding a subscriber for the life of the
+// process.** The request context is cancelled when the client goes away, and the SSE
+// handler blocks here between frames -- without this it would block forever on a channel
+// nobody happens to publish to, and the hub would accumulate one dead subscriber per tab
+// ever opened. That is the leak `finally: aclose()` prevents on the Python side, and the
+// reason the handler can rely on `defer subscription.Close()` being reached.
+//
+// The overrun check is `Next`'s, and it stays before the receive for the same reason.
+func (s *Subscription) NextContext(ctx context.Context) (Message, error, bool) {
+	for {
+		s.broker.mu.Lock()
+		pending := s.sub.overruns
+		s.sub.overruns = 0
+		closed := s.sub.closed
+		s.broker.mu.Unlock()
+		if closed {
+			return nil, nil, false
+		}
+		if pending > 0 {
+			return nil, &OverrunError{
+				Channel: s.channel,
+				Depth:   pending,
+				Limit:   SubscriberQueueSize,
+			}, true
+		}
+		select {
+		case message, ok := <-s.sub.queue:
+			if !ok {
+				return nil, nil, false
+			}
+			return message, nil, true
+		case <-ctx.Done():
+			return nil, ctx.Err(), false
+		}
 	}
 }
 

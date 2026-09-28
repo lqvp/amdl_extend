@@ -544,7 +544,10 @@ func (s *State) mark(job *jobs.Job, status string, fields jobs.MarkFields) {
 // with.
 func (s *State) PublishJob(jobID int64) {
 	current, err := s.Store.Get(jobID)
-	if err != nil {
+	if err != nil || current == nil {
+		// A row that is gone is not an error to publish: `delete_finished` removes rows
+		// while the scheduler may still be holding an id, and `JobDict(nil)` would be a
+		// nil dereference in a background goroutine, which is the worst place for one.
 		return
 	}
 	s.Broker.Publish(events.JobsChannel, events.Message{
