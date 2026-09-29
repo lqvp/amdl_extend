@@ -384,6 +384,11 @@ class WrapperSupervisor:
         self._watch: asyncio.Task | None = None
         self._spawn_lock = asyncio.Lock()
         self._stopping = False
+        # Set as soon as the serving wrapper becomes unavailable, including during the
+        # supervisor's automatic restart window. Active downloads wait on this signal so
+        # they can stop promptly instead of remaining `running` through client retries.
+        self._unavailable = asyncio.Event()
+        self._unavailable.set()
         # Automatic restarts spent since the last `start()`, shared by the start-up retry
         # loop and the crash watcher. One budget for one epoch, so the total number of
         # spawns the supervisor will make without being asked is bounded.
@@ -483,6 +488,7 @@ class WrapperSupervisor:
                 raise not_ready  # noqa: TRY201
 
             self._stopping = False
+            self._unavailable.clear()
             self._emit(
                 f"the wrapper is ready on {self._status_url()} "
                 f"(pid {self.pid}, port {self._bound_port})"
@@ -500,6 +506,7 @@ class WrapperSupervisor:
         zombie. The HTTP client is closed.
         """
         self._stopping = True
+        self._unavailable.set()
         if self._watch is not None:
             self._watch.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -541,6 +548,25 @@ class WrapperSupervisor:
                 f"{probe.detail}"
             )
         return probe.data
+
+    async def wait_until_unavailable(self) -> Readiness:
+        """Wait for the serving wrapper to stop being usable.
+
+        Owned launcher exits are signalled directly by `_watch_service`; an adopted wrapper
+        has no child process to observe, so its `/status` endpoint is probed until it stops
+        serving. The returned observation is carried through the scheduler so a fast
+        automatic restart cannot hide the interruption from the job that was using it.
+        """
+        if not self._adopted:
+            await self._unavailable.wait()
+            return Readiness(kind="down", regions=(), detail="the wrapper process exited")
+
+        while not self._unavailable.is_set():
+            readiness = await observe_readiness(self)
+            if readiness.kind != "serving":
+                return readiness
+            await asyncio.sleep(POLL_INTERVAL)
+        return Readiness(kind="down", regions=(), detail="the supervisor stopped")
 
     # -- login --------------------------------------------------------------
 
@@ -914,6 +940,7 @@ class WrapperSupervisor:
                     f"AMD_WRAPPER_PORT somewhere else or enable adoption"
                 )
             self._adopted = True
+            self._unavailable.clear()
             self._bound_port = self._port
             self._emit(
                 f"adopted the wrapper already serving on {self._status_url()}; logins have "
@@ -1064,6 +1091,7 @@ class WrapperSupervisor:
             return
         if self._stopping or child is not self._service:
             return
+        self._unavailable.set()
         self._emit(
             f"the wrapper exited unexpectedly with code {child.proc.returncode}; it is no "
             f"longer running.{self._diagnose_tail(child)}"
@@ -1098,6 +1126,7 @@ class WrapperSupervisor:
                 self._emit(f"automatic restart {attempt} did not work: {exc}")
                 await self._shutdown_service()
                 continue
+            self._unavailable.clear()
             self._emit(
                 f"the wrapper is serving again on {self._status_url()} "
                 f"(pid {self.pid}, port {self._bound_port})"
@@ -1341,6 +1370,7 @@ class WrapperSupervisor:
         child.pump = None
 
     async def _shutdown_service(self) -> None:
+        self._unavailable.set()
         child, self._service = self._service, None
         if child is None:
             return

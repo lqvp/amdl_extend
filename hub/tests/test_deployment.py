@@ -619,37 +619,60 @@ def test_the_clients_write_root_is_contained_in_the_scanned_roots():
         r"AMD_DOWNLOAD_ROOT:\s*(\S+)", COMPOSE.read_text(encoding="utf-8")
     ).group(1) == write_root
 
-def test_the_containment_check_is_owed_and_its_todo_names_where_it_belongs():
-    """The gap is real, so it is written down with enough detail to be picked up.
-
-    The rule above is checked for the values that ship and cannot be checked for an operator's
-    own `.env`, because `AMD_LIBRARY_ROOTS` is read at runtime. That leaves exactly one way this
-    configuration can be wrong, silently, and it is about ten lines of boot assertion away from
-    being caught.
-
-    This asserts the TODO exists *and* names the check, the file it belongs in, and the two
-    values an error would have to mention. A TODO saying "add validation somewhere" is a TODO
-    that gets rediscovered from scratch, which is the cost this is here to avoid.
-    """
+def test_runtime_write_root_validation_replaces_the_documented_todo():
+    """The operator-edited roots are guarded in the actual startup path now."""
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
-    assert "TODO(spec \u00a78.1, Phase 2)" in text, (
-        "the one unchecked way AMD_LIBRARY_ROOTS can be wrong needs a dated TODO in "
-        ".env.example, which is where an operator editing the list will read it"
-    )
-    for needed in ("contain", "create_app", "dirPathFormat", "AMD_LIBRARY_ROOTS"):
-        assert needed in text, f"the TODO should name {needed!r} so it need not be re-derived"
+    assert "TODO(spec §8.1, Phase 2)" not in text
+    source = (REPO_ROOT / "hub" / "hub" / "app.py").read_text(encoding="utf-8")
+    assert "validate_download_root(state.ripper_config_path, state.settings.library_roots)" in source
+    assert source.index("validate_download_root(state.ripper_config_path") < source.index(
+        "await state.supervisor.start()"
+    ), "the root check must happen before starting the wrapper"
 
-    # And the false rationale must be gone from both files that carried it. `KEEP ... FIRST`
-    # is the exact string, because a test that only checked for the word "reorder" would pass
-    # on a rewording that kept the same wrong claim.
+    # The false rationale must remain gone from both files that carried it.
     for path in (COMPOSE, ENV_EXAMPLE):
         body = path.read_text(encoding="utf-8")
-        assert "KEEP /library/a FIRST" not in body, (
-            f"{path.name} still states the ordering rule, which is false"
-        )
-        assert "so /library comes first" not in body, (
-            f"{path.name} still states the reordering trigger, which is false"
-        )
+        assert "KEEP /library/a FIRST" not in body
+        assert "so /library comes first" not in body
+
+
+def test_vendor_download_root_uses_only_the_static_format_prefix():
+    from hub.app import download_root_from_format
+
+    assert download_root_from_format("/library/{artist}/{album}") == Path("/library")
+    assert download_root_from_format("/library/music") == Path("/library/music")
+    with pytest.raises(ValueError, match="absolute"):
+        download_root_from_format("library/{artist}/{album}")
+    with pytest.raises(ValueError, match="contain"):
+        download_root_from_format("/library/{artist}/../outside")
+
+
+def test_vendor_download_root_must_be_inside_one_scan_root(tmp_path):
+    from hub.app import validate_download_root
+
+    config = tmp_path / "config.toml"
+    config.write_text('[download]\ndirPathFormat = "/library/{artist}/{album}"\n', encoding="utf-8")
+    validate_download_root(config, (Path("/archive"), Path("/library")))
+
+    config.write_text('[download]\ndirPathFormat = "/elsewhere/{artist}/{album}"\n', encoding="utf-8")
+    with pytest.raises(RuntimeError) as error:
+        validate_download_root(config, (Path("/library"),))
+    assert "/elsewhere/{artist}/{album}" in str(error.value)
+    assert "/library" in str(error.value)
+
+
+def test_vendor_download_root_comparison_does_not_resolve_symlinks(tmp_path):
+    from hub.app import validate_download_root
+
+    real = tmp_path / "real"
+    (real / "music").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+    config = tmp_path / "config.toml"
+    value = f"{alias}/music/{{album}}"
+    config.write_text(f'[download]\ndirPathFormat = "{value}"\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="alias"):
+        validate_download_root(config, (real / "music",))
 
 
 def test_the_operator_is_told_a_separate_drive_is_not_required():
@@ -1039,7 +1062,7 @@ def test_only_8080_is_published_and_the_wrapper_never_is():
 def test_one_process_and_the_setting_is_not_reachable_from_compose():
     """`--workers 1` lives in `hub.app.main()`, and that is deliberate.
 
-    Everything the app owns is on `app.state` -- the SSE broker, the job store, the leaf
+    Everything the app owns is on `app.state` -- the WebSocket broker, the job store, the leaf
     registry, the scheduler, the session generation. Two workers would be two of each: two
     schedulers racing `claim_next` (atomic, so no double rip, but two leaf registries, so a
     job could be claimed by a worker that never expanded it) and two session generations, so

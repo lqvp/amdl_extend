@@ -38,6 +38,7 @@ DECLARED = frozenset(
         "leaves",
         "loop",
         "pending_2fa",
+        "queue_paused",
         "ripper",
         "ripper_config_path",
         "ripping_adam_ids",
@@ -137,6 +138,7 @@ def test_runtime_fields_start_at_their_declared_empty(app) -> None:
     assert app.state.scheduler is None
     assert app.state.current_job is None
     assert app.state.cached_problem is None
+    assert app.state.queue_paused is False
     assert app.state.startup_error is None
     assert app.state.pending_2fa is None
     assert app.state.degraded_roots == ()

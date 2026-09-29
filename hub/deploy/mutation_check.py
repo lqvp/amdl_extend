@@ -76,8 +76,10 @@ MUTATIONS = {
     "resolved given a default so a caller can omit it": (
         DEDUP, lambda t: t.replace(
             "    resolved: tuple[str, ...]\n", "    resolved: tuple[str, ...] = ()\n")),
-    "the containment TODO removed from .env.example": (
-        ENV, lambda t: t.replace("TODO(spec \u00a78.1, Phase 2)", "later")),
+    "the startup containment check removed": (
+        APP, lambda t: t.replace(
+            "                validate_download_root(state.ripper_config_path, state.settings.library_roots)\n",
+            "")),
     "a host-specific library default reinstated in compose.yaml": (
         C, lambda t: t.replace(
             "source: ${AMD_LIBRARY_HOST:?set AMD_LIBRARY_HOST in .env to the host directory that holds your music library}",

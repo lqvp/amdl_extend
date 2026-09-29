@@ -1,7 +1,7 @@
 {#
   base.html -- the layout every page extends.
 
-  No client framework. The queue's live updates use the platform's own `EventSource` (see
+  No client framework. The queue's live updates use the platform's native WebSocket (see
   app.js) and every other action is a plain form post, so the hub works with scripting
   turned off, which matters for something that runs on a home LAN behind whatever the
   operator's router does to it.

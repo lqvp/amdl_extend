@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.requests import HTTPConnection
 
 # Imported under a qualified name, and the reason is a real trap: a bare
 # `from hub import auth` binds the *name* `auth` on this package to `hub.auth`, and a later
@@ -118,7 +119,7 @@ def client_ip(request: Request) -> str:
     return client.host if client is not None and client.host else "unknown"
 
 
-def session_generation(request: Request) -> int:
+def session_generation(request: HTTPConnection) -> int:
     """The generation this request is judged against: the app's, or 0 with no app state.
 
     Read from `app.state` on every check rather than captured once, because bumping it is
@@ -137,7 +138,7 @@ def session_generation(request: Request) -> int:
     return int(getattr(request.app.state, "session_generation", 0))
 
 
-def is_authenticated(request: Request) -> bool:
+def is_authenticated(request: HTTPConnection) -> bool:
     """Whether this request carries a session this process issued, and still honours.
 
     "Still honours" is the `generation` argument, and it is what makes `POST
@@ -297,7 +298,7 @@ def install(app: FastAPI) -> None:
 
         A middleware rather than headers on each response class, because the responses that
         matter here are the ones nobody thinks to add headers to: the 401, the 303 from a page,
-        the SSE stream, the static files and the 502 from a collaborator. A `StaticFile`
+        the job stream response, the static files and the 502 from a collaborator. A `StaticFile`
         response in particular is built inside Starlette and cannot be decorated from a route.
 
         **Including the ones an exception handler produced**, which was the doubt when this
@@ -352,6 +353,9 @@ def install(app: FastAPI) -> None:
         library_routes.router,
     ):
         app.include_router(router)
+    # WebSockets use an explicit cookie/origin check because the HTTP dependency guard
+    # cannot turn an unauthorized handshake into the close code the browser needs.
+    app.include_router(job_routes.websocket_router)
 
     app.include_router(pages_router)
     # Guarded, because a `Mount` is not an `APIRoute` and so is outside every `guarded()`
@@ -503,16 +507,22 @@ async def _queue_page(request: Request):
     if not await page_session(request):
         return _redirect_to_login()
     state = request.app.state
+    wrapper = await wrapper_state(state)
+    library = await _library_summary(state)
+    queue_window = state.jobs.queue_window()
+    queue_counts = state.jobs.counts()
     return templates(request).TemplateResponse(
         request,
         "queue.html",
         _page_context(
             request,
             settings=state.settings,
-            wrapper=await wrapper_state(state),
-            library=await _library_summary(state),
-            jobs=[job_to_dict(job) for job in state.jobs.list()],
-            queue_counts=state.jobs_counts(),
+            wrapper=wrapper,
+            library=library,
+            jobs=[job_to_dict(job) for job in queue_window["jobs"]],
+            queue_counts=queue_counts,
+            queue_paused=state.queue_paused,
+            history=queue_window,
         ),
     )
 

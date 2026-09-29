@@ -26,22 +26,25 @@ therefore always empty in this response, and it is here because the contract abo
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import suppress
 from dataclasses import asdict
 from typing import Any
+from urllib.parse import urlsplit
 
-from fastapi import Request
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from pydantic import BaseModel
+from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
 
-from hub.api import fail, guarded
+from hub.api import fail, guarded, is_authenticated
 from hub.events import SubscriberOverrun
 from hub.jobs import Job, Leaf
 from hub.resolver import ResolveError, expand
 from hub.vendor import parse_apple_music_url
 
 router = guarded()
+websocket_router = APIRouter()
 
 #: The channel every job event and every wrapper log line is published on. One channel, not
 #: two, because the stream has to deliver both in the order they happened and a snapshot
@@ -152,7 +155,7 @@ class LeafRegistry:
 # POST /api/jobs
 # --------------------------------------------------------------------------- #
 class _JobsBody(BaseModel):
-    urls: list[str] = []
+    urls: list[str] = Field(default_factory=list)
     codec: str = ""
     language: str = ""
     force: bool = False
@@ -443,13 +446,16 @@ def _publish_batch(state, *, url: str, created: list[int], deduplicated: list[in
 # --------------------------------------------------------------------------- #
 @router.get("/api/jobs")
 async def list_jobs(request: Request, status: str | None = None, parent: str | None = None) -> dict:
-    """The queue, oldest first, optionally filtered by `?status=` and `?parent=`.
-
-    `parent` is a *url*, matching what `create_batch` wrote. The `parent_id` self-reference
-    is populated by nothing, so a filter on it would be a filter on nothing --
-    see the module docstring.
-    """
+    """The bounded queue window; terminal history continues at `/history?before_id=`."""
     state = request.app.state
+    if status is None and parent is None:
+        window = state.jobs.queue_window()
+        return {
+            "jobs": [job_to_dict(job) for job in window["jobs"]],
+            "history_has_more": window["history_has_more"],
+            "history_before_id": window["history_before_id"],
+            "counts": state.jobs.counts(),
+        }
     try:
         jobs = state.jobs.list(status=status, parent_url=parent)
     except ValueError as exc:
@@ -457,105 +463,161 @@ async def list_jobs(request: Request, status: str | None = None, parent: str | N
     return {"jobs": [job_to_dict(job) for job in jobs]}
 
 
-@router.get("/api/jobs/stream")
-async def stream(request: Request) -> StreamingResponse:
-    """Server-sent events: a snapshot, then every change.
+@router.get("/api/jobs/counts")
+async def job_counts(request: Request) -> dict:
+    return {"counts": request.app.state.jobs.counts()}
 
-    Plain `text/event-stream` with one `data:` field per frame, which is what
-    `EventBroker.frame` produces. A named `event:` is not used: a browser's default
-    `onmessage` handler is the one that has to work without configuration, and
-    `EventSource` reconnects on its own when the stream ends -- which is what an overrun
-    below relies on.
-    """
+
+@router.post("/api/jobs/pause")
+async def pause_queue(request: Request) -> dict:
     state = request.app.state
-    return StreamingResponse(
-        _job_frames(state),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache, no-transform",
-            # nginx buffers a proxied response by default, which turns a live stream into
-            # one 4 KB block delivered whenever the buffer happens to fill.
-            "X-Accel-Buffering": "no",
-        },
-    )
+    state.queue_paused = True
+    state.broker.publish(JOBS_CHANNEL, {"kind": "queue-control", "paused": True})
+    return {"paused": True}
 
 
-async def _job_frames(state):
-    """The snapshot, then the live stream, with nothing before the snapshot and none after.
+@router.post("/api/jobs/resume")
+async def resume_queue(request: Request) -> dict:
+    state = request.app.state
+    state.queue_paused = False
+    state.broker.publish(JOBS_CHANNEL, {"kind": "queue-control", "paused": False})
+    return {"paused": False}
 
-    **The ordering problem.** `EventBroker.subscribe` deliberately replays the channel's
-    backlog so a tab opened late renders the current queue -- and that backlog is up to 50
-    frames of *history*, which here describes a queue that has moved on. Emitting it would
-    render a stale state and then correct it; emitting the snapshot and then the backlog
-    would render it twice.
 
-    So the first frame out is the first `{"kind": "snapshot"}` and everything before it is
-    dropped, and everything after it is delivered untouched. The snapshot is published
-    *after* the iterator is created, so the subscription is already registered when the
-    publish happens: `subscribe` reads its backlog and registers with no `await` between
-    them, so on one event loop no message can fall between the two halves. That is the
-    broker's own invariant; this only has to not break it.
+@router.get("/api/jobs/history")
+async def job_history(
+    request: Request,
+    before_id: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict:
+    page = request.app.state.jobs.history_page(before_id=before_id, limit=limit)
+    return {
+        "jobs": [job_to_dict(job) for job in page["jobs"]],
+        "has_more": page["has_more"],
+        "before_id": page["before_id"],
+    }
 
-    `SubscriberOverrun` ends the response rather than being swallowed. The broker's frames
-    are stale by the time it raises, and its own docstring says the decision belongs here:
-    `EventSource` reconnects, the client gets a fresh snapshot, and nothing is delivered
-    half-out-of-order.
+
+@router.get("/api/jobs/lookup")
+async def lookup_jobs(request: Request, ids: list[int] = Query(default=[])) -> dict:
+    """Hydrate only IDs mentioned by a live event or a previously loaded history page."""
+    if len(ids) > 500:
+        return fail(400, "at most 500 job ids may be hydrated at once.")
+    return {"jobs": [job_to_dict(job) for job in request.app.state.jobs.get_many(ids)]}
+
+
+@websocket_router.websocket("/api/jobs/ws")
+async def stream(websocket: WebSocket) -> None:
+    """Stream queue events as JSON messages over an authenticated WebSocket.
+
+    Every connection starts with a fresh database snapshot. If a subscriber overruns its
+    bounded queue, the socket closes with 1013 so the browser can reconnect and resync.
     """
-    # A short reconnect delay, as an SSE field rather than as a comment, so a client that
-    # drops does not come back in the browser's default 3 s and re-take the snapshot.
-    yield "retry: 2000\n\n"
+    origin = websocket.headers.get("origin")
+    host = websocket.headers.get("host", "")
+    if origin and urlsplit(origin).netloc.casefold() != host.casefold():
+        await websocket.close(code=4403, reason="cross-origin WebSocket refused")
+        return
 
-    messages = state.broker.subscribe(JOBS_CHANNEL)
-    state.broker.publish(JOBS_CHANNEL, _snapshot(state))
+    # Accept before closing an expired session so browsers receive the private close code
+    # and stop reconnecting to a session that cannot recover without a page reload.
+    await websocket.accept()
+    if not is_authenticated(websocket):
+        await websocket.close(code=4401, reason="authentication required")
+        return
 
-    seen_snapshot = False
+    state = websocket.app.state
+    messages = _job_payloads(state)
+    message_task = asyncio.create_task(messages.__anext__())
+    disconnect_task = asyncio.create_task(websocket.receive())
     try:
-        async for frame in messages:
-            if not seen_snapshot:
-                if _kind_of(frame) != SNAPSHOT_KIND:
-                    continue
-                seen_snapshot = True
-            yield frame
-    except SubscriberOverrun:
-        # The connection is closed, not kept open with stale frames in it. EventSource
-        # reconnects on its own and gets a new snapshot from the top of this function.
+        while True:
+            done, _ = await asyncio.wait(
+                (message_task, disconnect_task),
+                timeout=WEBSOCKET_HEARTBEAT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not is_authenticated(websocket):
+                await websocket.close(code=4401, reason="authentication expired")
+                return
+            if not done:
+                await websocket.send_json({"kind": "heartbeat"})
+                continue
+
+            if disconnect_task in done:
+                incoming = disconnect_task.result()
+                if incoming["type"] == "websocket.disconnect":
+                    return
+                disconnect_task = asyncio.create_task(websocket.receive())
+
+            if message_task in done:
+                try:
+                    payload = message_task.result()
+                except StopAsyncIteration:
+                    return
+                except SubscriberOverrun:
+                    await websocket.close(code=1013, reason="event backlog exceeded")
+                    return
+                await websocket.send_json(payload)
+                message_task = asyncio.create_task(messages.__anext__())
+    except WebSocketDisconnect:
         return
     finally:
-        # `async for` does not close the iterator it is abandoned on, and the broker's
-        # unsubscribe lives in the inner generator's `finally`. Without this a closed tab
-        # would stay a subscriber for the life of the process, and
-        # `broker.subscriber_count` -- the only thing that can see it -- would climb.
+        for task in (message_task, disconnect_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(message_task, disconnect_task, return_exceptions=True)
         with suppress(Exception):
             await messages.aclose()
 
 
-def _kind_of(frame: str) -> str | None:
-    """The `kind` of an SSE frame, or `None` if it is not one of ours.
+#: Keep the socket alive through idle periods and common reverse-proxy timeouts.
+WEBSOCKET_HEARTBEAT_SECONDS = 20.0
 
-    Decoded rather than string-matched, because the frames are JSON built by
-    `EventBroker.frame` and a substring test on them would break the day a job title
-    contained the text being matched.
-    """
-    if not frame.startswith("data: "):
-        return None
+
+async def _job_payloads(state):
+    """Yield one current snapshot, then live JSON payloads in broker order."""
+    # A reconnect must not replay an earlier connection's snapshot. The broker registers
+    # this subscriber first, then evaluates the snapshot only for this connection; updates
+    # after that point are queued behind it without being broadcast as another tab's snapshot.
+    messages = state.broker.subscribe(
+        JOBS_CHANNEL, replay=False, initial=lambda: _snapshot(state)
+    )
+
+    seen_snapshot = False
     try:
-        payload = json.loads(frame[len("data: ") :].strip())
-    except ValueError:
-        return None
-    return payload.get("kind") if isinstance(payload, dict) else None
+        async for frame in messages:
+            try:
+                payload = json.loads(frame)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if not seen_snapshot:
+                if payload.get("kind") != SNAPSHOT_KIND:
+                    continue
+                seen_snapshot = True
+            yield payload
+    finally:
+        with suppress(Exception):
+            await messages.aclose()
 
 
 def _snapshot(state) -> dict:
-    """The queue as it is right now, from a real `list()`.
+    """All active jobs plus a bounded recent terminal window, from the live store.
 
-    **Not a fabricated empty queue.** A tab that connects to a channel nothing has been
-    published on would otherwise be handed `{"jobs": []}`, which is indistinguishable from
-    a real "the queue is empty" and reads as good news. `subscribe` waits rather than
-    inventing, and the one snapshot in this stream comes from the table.
+    Active jobs are never hidden by history pagination. Terminal rows beyond the recent
+    window have an ID cursor in the payload. Counts still cover the full table, so summary
+    buttons remain accurate without sending the entire history over the socket.
     """
+    window = state.jobs.queue_window()
     return {
         "kind": SNAPSHOT_KIND,
-        "jobs": [job_to_dict(job) for job in state.jobs.list()],
+        "jobs": [job_to_dict(job) for job in window["jobs"]],
+        "history_has_more": window["history_has_more"],
+        "history_before_id": window["history_before_id"],
+        "counts": state.jobs.counts(),
+        "queue_paused": state.queue_paused,
     }
 
 
@@ -633,7 +695,8 @@ async def delete_finished_jobs(request: Request) -> Response:
     deleted = state.jobs.delete_finished()
     for job_id in deleted:
         state.leaves.forget(job_id)
-    return {"deleted": len(deleted)}
+    state.broker.publish(JOBS_CHANNEL, {"kind": "deleted", "ids": deleted})
+    return {"deleted": len(deleted), "ids": deleted}
 
 
 @router.get("/api/jobs/{job_id}")

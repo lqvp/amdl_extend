@@ -1,4 +1,4 @@
-"""The HTTP surface: auth, `POST /api/jobs`, the queue, and the SSE stream.
+"""The HTTP API and authenticated WebSocket queue stream.
 
 Everything here runs against `httpx`'s ASGI transport, so there is no live server, no
 wrapper binary and no network. The three collaborators the app owns -- the supervisor, the
@@ -188,14 +188,13 @@ async def test_every_route_but_health_requires_a_session(running):
     table = _route_table(running)
     assert table, "the schema is empty, so this test would pass by checking nothing"
     assert len(table) == len(set(table))
-    # 26, and the number is the point. The hand-copied list this replaced said 15 while the
-    # real table had 18, which is exactly the drift the derivation removes; the count here
-    # makes "a route was added" a loud event rather than a silent one, and it is derived from
-    # the app so it cannot itself go stale.
-    assert len(table) == 28, (
-        f"the route table has {len(table)} entries, not 26: {table}. A new route is expected "
-        f"to change this number -- add it to OPEN_WITHOUT_A_SESSION only if it genuinely has "
-        f"to be reachable without a session."
+    # WebSocket endpoints are not represented in OpenAPI; the `/api/jobs/stream` HTTP route
+    # was removed when the queue moved to `/api/jobs/ws`; the new queue history/control
+    # endpoints bring the HTTP inventory to 32.
+    assert len(table) == 32, (
+        f"the route table has {len(table)} entries, not 32: {table}. A new HTTP route is "
+        f"expected to change this number -- add it to OPEN_WITHOUT_A_SESSION only if it "
+        f"genuinely has to be reachable without a session."
     )
     # And the two that the hand-copied list missed, named so their absence is remembered.
     assert ("POST", "/api/library/scan") in table
@@ -582,7 +581,7 @@ async def test_a_two_url_request_queues_both_and_reports_them_per_url(
     `app.js`'s "queued job #N" log correct.
     """
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         # The snapshot first, as always, and the request *after* it so the two batch frames
         # are live rather than backlog -- a backlog frame is correctly dropped by the
         # snapshot filter, so a request made before the stream opened would produce no frames
@@ -624,7 +623,7 @@ async def test_the_frames_of_a_two_url_request_do_not_overlap(running, authed):
     the first.
     """
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         await stream.read_data()  # the snapshot
         await authed.post(
             "/api/jobs", json={"urls": [ALBUM_URL, ALBUM2_URL], "codec": "alac"}
@@ -846,7 +845,13 @@ async def test_the_dedup_check_is_given_the_rendered_file_name_not_the_tag_title
     album.mkdir(parents=True)
     (album / "1-01 1 a.m. (feat. shinoだす。).m4a").write_bytes(b"")
 
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    leaf = Leaf(
+        adam_id="501", title="1 a.m. (feat. shinoだす。)", album_name="4pi",
+        artist_name="toe", codec="alac", language="ja", url=ALBUM_URL,
+        storefront="jp",
+    )
+    job_id = running.state.jobs.create_batch(ALBUM_URL, "album", [leaf], force=False).created[0]
+    running.state.leaves.put(job_id, leaf)
     await running.state.run_one()
 
     assert _store(settings).get(1).status == "skipped"
@@ -1100,7 +1105,7 @@ async def test_run_one_reports_that_the_queue_was_empty(running):
 async def test_progress_reaches_the_store_and_the_stream(
     running, authed, settings, progress_ripper
 ):
-    """The "SSE: 転送速度" requirement, end to end, and with no polling in the test.
+    """The live transfer progress requirement, end to end, and with no polling in the test.
 
     The three pieces the ruling named, all of which were missing in round 0: the seam's
     callback, the `mark` that writes it, and the `publish` that puts the row on the stream.
@@ -1115,7 +1120,7 @@ async def test_progress_reaches_the_store_and_the_stream(
 
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         await stream.read_data()  # the snapshot
         assert await running.state.run_one() is True
 
@@ -1179,7 +1184,7 @@ async def test_an_unknown_total_is_reported_as_none_and_not_as_zero(
 
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         await stream.read_data()
         assert await running.state.run_one() is True
         # The last of the three readings, which is the one that carries 1234 -- behind the
@@ -1563,6 +1568,111 @@ async def test_the_library_scan_endpoint_also_reports_per_root(authed, settings,
     assert body["per_root"] == [0, 0]
     assert body["roots"] == [str(tmp_path / "drive-a"), str(empty)]
 
+
+
+async def test_startup_rejects_a_download_root_outside_scan_roots_before_starting_services(
+    settings, supervisor, ripper, tmp_path
+):
+    config = tmp_path / "vendor.toml"
+    config.write_text(
+        '[download]\ndirPathFormat = "/unscanned/{artist}/{album}"\n',
+        encoding="utf-8",
+    )
+    candidate = create_app(
+        settings,
+        supervisor=supervisor,
+        ripper=ripper,
+        autostart=True,
+        ripper_config_path=config,
+    )
+
+    with pytest.raises(RuntimeError) as error:
+        async with candidate.router.lifespan_context(candidate):
+            raise AssertionError("unsafe config must refuse startup")
+
+    message = str(error.value)
+    assert "/unscanned/{artist}/{album}" in message
+    assert str(settings.library_roots[0]) in message
+    assert "start" not in supervisor.log
+    assert ripper.started is False
+
+
+async def test_library_search_filters_albums_through_the_api(authed, library):
+    (library / "Artist Name" / "Quiet Album").mkdir(parents=True)
+    (library / "Artist Name" / "Quiet Album" / "opening song.m4a").write_bytes(b"")
+    (library / "Other Artist" / "Loud Album").mkdir(parents=True)
+    (library / "Other Artist" / "Loud Album" / "finale.m4a").write_bytes(b"")
+
+    response = await authed.get("/api/library/albums", params={"q": "quiet album"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_albums"] == 2
+    assert [album["name"] for album in body["albums"]] == ["Quiet Album"]
+    assert body["search"] == "quiet album"
+
+
+async def test_duplicate_report_is_read_only_and_names_all_candidate_directories(
+    authed, library
+):
+    first = library / "Artist One" / "Echoes"
+    second = library / "Artist Two" / "Echoes"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    first_track = first / "01 Same Song.m4a"
+    second_track = second / "same song.flac"
+    first_track.write_bytes(b"one")
+    second_track.write_bytes(b"two")
+    unrelated = library / "Other Artist" / "Different Release"
+    unrelated.mkdir(parents=True)
+    (unrelated / "same song.m4a").write_bytes(b"three")
+
+    response = await authed.get("/api/library/duplicates")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["candidate_count"] == 1
+    candidate = body["candidates"][0]
+    assert candidate["album_name"] == "Echoes"
+    assert candidate["directory_count"] == 2
+    assert {item["path"] for item in candidate["directories"]} == {str(first), str(second)}
+    assert "do not " in body["warning"]
+    assert first_track.exists() and second_track.exists()
+
+
+async def test_queue_api_window_keeps_active_rows_and_pages_terminal_history(authed, running):
+    leaves = [
+        Leaf(
+            adam_id=f"history-{index}",
+            title=f"history track {index}",
+            album_name="History",
+            artist_name="artist",
+            codec="alac",
+            language="ja",
+            url=ALBUM_URL,
+            storefront="jp",
+        )
+        for index in range(1, 104)
+    ]
+    created = running.state.jobs.create_batch(ALBUM_URL, "album", leaves, force=False).created
+    for job_id in created[:101]:
+        running.state.jobs.mark(job_id, "done")
+
+    response = await authed.get("/api/jobs")
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["jobs"]) == 102  # all two active plus the newest 100 terminal rows
+    assert body["history_has_more"] is True
+    assert body["counts"]["total"] == 103
+    assert {job["status"] for job in body["jobs"][-2:]} == {"queued"}
+
+    history = await authed.get(
+        "/api/jobs/history", params={"before_id": body["history_before_id"], "limit": 10}
+    )
+    assert history.status_code == 200
+    assert [job["id"] for job in history.json()["jobs"]] == [created[0]]
+    assert history.json()["has_more"] is False
+
+    hydrated = await authed.get("/api/jobs/lookup", params=[("ids", created[0]), ("ids", created[-1])])
+    assert [job["id"] for job in hydrated.json()["jobs"]] == [created[0], created[-1]]
 
 async def test_status_reports_the_two_unready_states_differently(authed, supervisor):
     """`regions: []` and "not running" need different things from the user.
@@ -1974,9 +2084,97 @@ async def test_a_genuine_download_failure_is_not_parked(running, authed, setting
     assert "quota" in job.error
 
 
-async def test_a_wrapper_that_is_not_running_polls_the_job_instead_of_failing_it(
-    running, authed, settings, ripper, supervisor
+async def test_a_wrapper_dying_during_a_rip_parks_and_retries_the_running_job(
+    running, settings, ripper, supervisor
 ):
+    """An in-flight client call is cancelled, persisted as waiting, then retried on recovery."""
+    from hub.wrapper_supervisor import Readiness
+
+    leaf = Leaf(
+        adam_id="501", title="track", album_name="album", artist_name="artist",
+        codec="alac", language="ja", url=ALBUM_URL, storefront="jp",
+    )
+    store = _store(settings)
+    store.create_batch(ALBUM_URL, "album", [leaf], force=True)
+    job = store.claim_next()
+    assert job is not None and job.status == "running"
+    running.state.leaves.put(job.id, leaf)
+
+    rip_started = asyncio.Event()
+    wrapper_lost = asyncio.Event()
+
+    async def wait_until_unavailable():
+        await wrapper_lost.wait()
+        return Readiness(kind="down", regions=(), detail="child exited")
+
+    async def blocked_rip(_leaf, *, force):
+        rip_started.set()
+        await asyncio.Event().wait()
+
+    supervisor.wait_until_unavailable = wait_until_unavailable
+    ripper.run_song = blocked_rip
+    execution = asyncio.create_task(live_app_module._execute(running.state, job))
+    await asyncio.wait_for(rip_started.wait(), 1.0)
+    wrapper_lost.set()
+    await asyncio.wait_for(execution, 1.0)
+
+    parked = store.get(job.id)
+    assert parked.status == "waiting"
+    assert "resumes on its own" in parked.error
+    assert running.state.current_job is None
+
+    calls = []
+
+    async def recovered_rip(_leaf, *, force):
+        calls.append(force)
+
+    supervisor._running = True
+    wrapper_lost.clear()
+    ripper.run_song = recovered_rip
+    async with _scheduler_running(running):
+        assert await _wait_until(lambda: store.get(job.id).status == "done", 3.0)
+    assert calls == [True]
+
+
+async def test_a_wrapper_exit_wins_a_simultaneous_rip_failure(
+    running, settings, ripper, supervisor
+):
+    """The wrapper watcher gets a turn before an exit-shaped rip error is classified."""
+    from hub.wrapper_supervisor import Readiness
+
+    leaf = Leaf(
+        adam_id="501", title="track", album_name="album", artist_name="artist",
+        codec="alac", language="ja", url=ALBUM_URL, storefront="jp",
+    )
+    store = _store(settings)
+    store.create_batch(ALBUM_URL, "album", [leaf], force=False)
+    job = store.claim_next()
+    assert job is not None
+    running.state.leaves.put(job.id, leaf)
+
+    wrapper_lost = asyncio.Event()
+
+    async def wait_until_unavailable():
+        await wrapper_lost.wait()
+        return Readiness(kind="down", regions=(), detail="child exited")
+
+    async def failing_rip(_leaf, *, force):
+        wrapper_lost.set()
+        raise RipperHostError("connection reset after wrapper exit")
+
+    supervisor.wait_until_unavailable = wait_until_unavailable
+    ripper.run_song = failing_rip
+    await live_app_module._execute(running.state, job)
+
+    parked = store.get(job.id)
+    assert parked.status == "waiting"
+    assert "resumes on its own" in parked.error
+
+
+async def test_a_wrapper_that_is_not_running_polls_the_job_instead_of_failing_it(
+    running, authed, settings, ripper, supervisor, monkeypatch
+):
+
     """A crashed wrapper is not an expired token, and parking is still the right answer.
 
     The park rules say a stopped wrapper fails jobs with `wrapper_unavailable`; its *other*
@@ -1988,6 +2186,8 @@ async def test_a_wrapper_that_is_not_running_polls_the_job_instead_of_failing_it
     them nothing and the supervisor's own 3-restart budget will bring the wrapper back
     on its own.
     """
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
     await authed.post("/api/wrapper/start")
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
 
@@ -2177,7 +2377,7 @@ async def test_the_wrapper_log_reaches_the_stream_through_the_sink_it_was_given(
         async with await _client(app) as client:
             await client.post("/api/auth/login", json={"password": PASSWORD})
             token = await _token(client)
-            async with _ASGIStream(app, token=token) as stream:
+            async with _ASGIWebSocket(app, token=token) as stream:
                 await stream.read_data()  # the snapshot
 
                 # A line exactly as the supervisor's pump would hand one over.
@@ -2199,7 +2399,7 @@ async def test_create_app_hands_the_seam_a_live_progress_callback(settings, supe
     The round-1 tests called `app_module._on_progress(app.state)` themselves and assigned the
     result to the fake -- so the suite exercised the *callback* and never the thing that
     installs it. Passing `on_progress=None` at `app.py:628` left all 539 tests green, so the
-    "SSE: … 転送速度" requirement was not shown to be satisfied by the app a user actually
+    "… 転送速度" requirement was not shown to be satisfied by the app a user actually
     runs.
 
     So this builds the app through the real `create_app` with **no injected ripper**, which is
@@ -2210,7 +2410,7 @@ async def test_create_app_hands_the_seam_a_live_progress_callback(settings, supe
     Three assertions, because "a callable was passed" is the weakest of them:
       1. the seam was constructed and something was passed -- not `None`;
       2. invoking it drives `mark(...)` on the store, which is the half a live queue needs;
-      3. invoking it publishes a `job` frame, which is the half the SSE stream needs.
+      3. invoking it publishes a `job` frame, which is the half the WebSocket stream needs.
     """
     from hub import app as app_module
 
@@ -2310,7 +2510,7 @@ async def test_create_app_hands_the_seam_a_live_progress_callback(settings, supe
 # B1 -- a parked job must have an exit, and must say which one it needs
 # --------------------------------------------------------------------------- #
 async def test_a_crash_parked_job_is_released_when_the_wrapper_comes_back(
-    running, authed, settings, ripper, supervisor
+    running, authed, settings, ripper, supervisor, monkeypatch
 ):
     """**B1a, and no login is involved anywhere in this test.**
 
@@ -2329,6 +2529,10 @@ async def test_a_crash_parked_job_is_released_when_the_wrapper_comes_back(
     is the class rather than the instance: the scheduler resumes on *any* ready probe, and
     `_has_actionable` counts `waiting` so the probe happens at all.
     """
+    fake_expand = _expansion_with_three_usable_leaves()
+    monkeypatch.setattr("hub.api.jobs.expand", fake_expand)
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
+    monkeypatch.setattr("hub.resolver.expand", fake_expand)
     supervisor.regions = ["jp"]
     await authed.post("/api/wrapper/start")
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
@@ -2371,13 +2575,12 @@ async def test_a_hub_that_starts_holding_parked_jobs_releases_them(
     store = _store(settings)
     supervisor.regions = ["jp"]
     supervisor._running = True
-    store.create_batch(
-        ALBUM_URL,
-        "album",
-        [Leaf(adam_id="1", title="t", album_name="A", artist_name="X", codec="alac",
-              language="ja", url=ALBUM_URL, storefront="jp")],
-        force=False,
+    leaf = Leaf(
+        adam_id="1", title="t", album_name="A", artist_name="X", codec="alac",
+        language="ja", url=ALBUM_URL, storefront="jp",
     )
+    store.create_batch(ALBUM_URL, "album", [leaf], force=False)
+    live_app.state.leaves.put(1, leaf)
     # A row that was already parked when this process came up -- a container restart during a
     # token expiry, say.
     store.mark(1, "waiting", error="the Apple account signed out while this was downloading")
@@ -2584,106 +2787,86 @@ def _post_2fa(client, code: str):
 
 
 # --------------------------------------------------------------------------- #
-# The SSE stream
+# The WebSocket stream
 # --------------------------------------------------------------------------- #
-class _ASGIStream:
-    """Run the real app and read the frames it sends, with no server and no socket.
+class _ASGIWebSocket:
+    """Run the real app's WebSocket route and read its JSON messages without a server."""
 
-    **`httpx.ASGITransport` cannot read an SSE stream at all**, and the reason is worth
-    stating because it otherwise looks like a bug in this file:
-    `handle_async_request` does `await self.app(scope, receive, send)` and only then builds
-    the response (`httpx/_transports/asgi.py`). A stream that by design never finishes --
-    which is exactly what `GET /api/jobs/stream` is -- means that `await` never returns, so
-    the `client.stream(...)` context manager never even yields. Every other route here is a
-    complete response and goes through `httpx` normally.
-
-    So this is the level below: the actual `FastAPI` object, the actual router, the actual
-    session dependency, and a `send` callable that receives each `http.response.body` message
-    as the app produces it. Every frame asserted below was produced by the production code
-    path; only the socket is missing.
-
-    `__aexit__` cancels the app task, which is what a browser's `EventSource` does when the
-    tab closes -- so the subscription-release assertion is made against the same teardown a
-    real client performs.
-    """
-
-    def __init__(self, app, path: str = "/api/jobs/stream", token: str | None = None) -> None:
+    def __init__(
+        self,
+        app,
+        path: str = "/api/jobs/ws",
+        token: str | None = None,
+        origin: str = "http://hub.test",
+    ) -> None:
         self._app = app
         self._started = asyncio.Event()
-        self._arrived = asyncio.Event()
-        self._buffer = bytearray()
+        self._closed = asyncio.Event()
+        self._incoming: asyncio.Queue[dict] = asyncio.Queue()
+        self._messages: asyncio.Queue[dict] = asyncio.Queue()
         self._task: asyncio.Task | None = None
-        self.status: int | None = None
-        self.headers: dict[str, str] = {}
+        self.accepted = False
+        self.close_code: int | None = None
+        headers = [(b"host", b"hub.test"), (b"origin", origin.encode())]
+        if token:
+            headers.append((b"cookie", f"amd_hub_session={token}".encode()))
         self._scope = {
-            "type": "http",
+            "type": "websocket",
             "asgi": {"version": "3.0", "spec_version": "2.3"},
             "http_version": "1.1",
-            "method": "GET",
-            "scheme": "http",
+            "scheme": "ws",
             "path": path,
             "raw_path": path.encode(),
             "query_string": b"",
             "root_path": "",
-            "headers": [(b"host", b"hub.test")]
-            + ([(b"cookie", f"amd_hub_session={token}".encode())] if token else []),
+            "headers": headers,
             "client": ("127.0.0.1", 51234),
             "server": ("hub.test", 80),
+            "subprotocols": [],
         }
 
-    async def __aenter__(self) -> _ASGIStream:
+    async def __aenter__(self) -> _ASGIWebSocket:
         self._task = asyncio.create_task(self._app(self._scope, self._receive, self._send))
+        await self._incoming.put({"type": "websocket.connect"})
         await asyncio.wait_for(self._started.wait(), 5.0)
         return self
 
     async def __aexit__(self, *_exc) -> None:
-        if self._task is not None and not self._task.done():
+        if self._task is None or self._task.done():
+            return
+        await self._incoming.put({"type": "websocket.disconnect", "code": 1000})
+        try:
+            await asyncio.wait_for(self._task, 1.0)
+        except TimeoutError:
             self._task.cancel()
             with contextlib.suppress(BaseException):
                 await self._task
 
     async def _receive(self) -> dict:
-        # Never a body, and never a disconnect: the stream is what is under test here, and a
-        # client that hangs up is the other test.
-        await asyncio.sleep(3600)
-        return {"type": "http.disconnect"}
+        return await self._incoming.get()
 
     async def _send(self, message: dict) -> None:
-        if message["type"] == "http.response.start":
-            self.status = message["status"]
-            self.headers = {
-                key.decode().lower(): value.decode() for key, value in message["headers"]
-            }
+        if message["type"] == "websocket.accept":
+            self.accepted = True
             self._started.set()
-        elif message["type"] == "http.response.body":
-            chunk = message.get("body", b"")
-            if chunk:
-                self._buffer += chunk
-                self._arrived.set()
+        elif message["type"] == "websocket.send":
+            text = message.get("text")
+            if text is None:
+                text = message.get("bytes", b"").decode("utf-8")
+            self._messages.put_nowait(json.loads(text))
+        elif message["type"] == "websocket.close":
+            self.close_code = message.get("code", 1000)
+            self._closed.set()
+            self._started.set()
 
     async def read_data(self, timeout: float = 5.0) -> dict:
-        """The next `data:` payload, decoded. Fails loudly rather than hanging.
+        try:
+            return await asyncio.wait_for(self._messages.get(), timeout)
+        except TimeoutError as exc:
+            raise AssertionError(f"no further WebSocket message within {timeout}s") from exc
 
-        The consuming loop is a `for` over the buffer's lines with the front removed as each
-        frame is taken, so a partially-arrived frame is simply not there yet and the wait
-        continues -- which is what a real `EventSource` does with a chunk boundary in the
-        middle of a JSON document.
-        """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
-            for index, line in enumerate(bytes(self._buffer).split(b"\n")):
-                if line.startswith(b"data: "):
-                    del self._buffer[: index + len(line) + 1]
-                    return json.loads(line[len(b"data: ") :].decode("utf-8"))
-            self._arrived.clear()
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise AssertionError(
-                    f"no further SSE frame within {timeout}s; buffer so far: "
-                    f"{bytes(self._buffer)!r}"
-                )
-            await asyncio.wait_for(self._arrived.wait(), remaining)
+    async def wait_closed(self, timeout: float = 5.0) -> None:
+        await asyncio.wait_for(self._closed.wait(), timeout)
 
 
 async def _token(client) -> str:
@@ -2691,20 +2874,11 @@ async def _token(client) -> str:
     return client.cookies.get("amd_hub_session", "")
 
 
-async def test_the_stream_route_is_a_server_sent_event_stream(running, authed):
-    """The framing, read through the real app.
-
-    One `data:` field per frame, `text/event-stream`, and `no-cache` -- a cached snapshot is a
-    queue that never updates and looks fine. `X-Accel-Buffering: no` is for the nginx in
-    front of somebody's setup, which buffers a proxied response by default and would turn the
-    stream into one 4 KB block delivered whenever the buffer happened to fill.
-    """
+async def test_the_websocket_stream_sends_a_fresh_json_snapshot(running, authed):
+    """A WebSocket connection starts with the current database snapshot."""
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
-        assert stream.status == 200
-        assert stream.headers["content-type"].startswith("text/event-stream")
-        assert "no-cache" in stream.headers["cache-control"]
-        assert stream.headers["x-accel-buffering"] == "no"
+    async with _ASGIWebSocket(running, token=token) as stream:
+        assert stream.accepted
         assert (await stream.read_data())["kind"] == "snapshot"
 
 
@@ -2732,7 +2906,7 @@ async def test_a_pool_frame_names_the_pool_around_a_rip(running, authed):
                 chunk = await asyncio.wait_for(agen.__anext__(), 1.0)
         except (TimeoutError, StopAsyncIteration):
             break
-        frame = json.loads(chunk[len("data: ") :])
+        frame = json.loads(chunk)
         kinds.append(frame["kind"])
         if frame["kind"] == "pool":
             pools.append(frame)
@@ -2742,6 +2916,46 @@ async def test_a_pool_frame_names_the_pool_around_a_rip(running, authed):
     assert "pool" in kinds, kinds
     assert pools[0]["ripping"] == 1 and pools[-1]["ripping"] == 0
     assert all(frame["limit"] == 4 for frame in pools)
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "expected_calls", "expected_result"),
+    [([False, False], 2, False), ([False, True], 2, True), ([True], 1, True)],
+)
+async def test_webhook_retries_once_until_it_succeeds(
+    monkeypatch, outcomes, expected_calls, expected_result
+):
+    """A failed announcement gets one retry, and a successful one gets no extra POST."""
+    calls = []
+
+    class Response:
+        def __init__(self, is_success):
+            self.is_success = is_success
+
+    class Client:
+        def __init__(self, *, timeout):
+            assert timeout == 5.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return None
+
+        async def post(self, url, *, json):
+            calls.append((url, json))
+            return Response(outcomes[len(calls) - 1])
+
+    monkeypatch.setattr(live_app_module.httpx, "AsyncClient", Client)
+
+    result = await live_app_module._post_notification(
+        "http://notify.test/hook", {"event": "queue-idle"}
+    )
+
+    assert result is expected_result
+    assert calls == [
+        ("http://notify.test/hook", {"event": "queue-idle"})
+    ] * expected_calls
 
 
 async def test_an_idle_queue_announces_itself_once(running, authed, monkeypatch):
@@ -2784,19 +2998,34 @@ async def test_the_stream_sends_a_snapshot_and_then_live_updates(running, authed
     frame out is the first `{"kind": "snapshot"}`, nothing comes before it, and everything
     after it is delivered untouched.
     """
-    # A batch published *before* the stream opens: it is in the backlog, and it must not be
-    # delivered. This is the frame an unfiltered implementation replays.
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    # An event published *before* the stream opens must not be replayed as stale history.
+    running.state.broker.publish("jobs", {"kind": "job", "job": {"id": 999}})
+    running.state.jobs.create_batch(
+        ALBUM_URL,
+        "album",
+        [Leaf(adam_id="501", title="first", album_name="album", artist_name="artist",
+              codec="alac", language="ja", url=ALBUM_URL, storefront="jp")],
+        force=False,
+    )
     assert running.state.broker.subscriber_count("jobs") == 0
 
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         first = await stream.read_data()
         assert first["kind"] == "snapshot"
         assert [job["id"] for job in first["jobs"]] == [1]
 
         # A live change, published while the stream is open.
-        await authed.post("/api/jobs", json={"urls": [ALBUM2_URL], "codec": "alac"})
+        running.state.jobs.create_batch(
+            ALBUM2_URL,
+            "album",
+            [Leaf(adam_id="502", title="second", album_name="album", artist_name="artist",
+                  codec="alac", language="ja", url=ALBUM2_URL, storefront="jp")],
+            force=False,
+        )
+        running.state.broker.publish(
+            "jobs", {"kind": "batch", "url": ALBUM2_URL, "created": [2], "deduplicated": []}
+        )
         second = await stream.read_data()
         assert second["kind"] == "batch"
         assert second["created"] == [2]
@@ -2821,7 +3050,7 @@ async def test_the_stream_delivers_nothing_lost_across_the_handover(running, aut
     message published after the stream opened arrives, in order, exactly once.
     """
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         assert (await stream.read_data())["kind"] == "snapshot"
 
         for job_id in (1, 2, 3):
@@ -2835,16 +3064,41 @@ async def test_the_stream_delivers_nothing_lost_across_the_handover(running, aut
 async def test_the_snapshot_reflects_the_queue_as_it_is(running, authed, settings):
     """The snapshot is a real `list()`, so a tab opened after the last event is not empty.
 
-    Nothing publishes a snapshot by itself -- `EventBroker.subscribe` deliberately hands a
-    late subscriber only what is in the channel's backlog -- so a stream that did not publish
-    one would render an empty queue for a tab that connected after the queue was already
-    full. That failure is closed here.
+    The snapshot is from the database, independently of the broker's recent history. The
+    stream also ignores earlier connections' snapshot frames when it subscribes.
     """
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
-    _store(settings).mark(1, "done")
+    leaf = Leaf(
+        adam_id="501", title="track", album_name="album", artist_name="artist",
+        codec="alac", language="ja", url=ALBUM_URL, storefront="jp",
+    )
+    running.state.jobs.create_batch(ALBUM_URL, "album", [leaf], force=False)
+    running.state.jobs.mark(1, "done")
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         snapshot = await stream.read_data()
+    assert snapshot["kind"] == "snapshot"
+    assert [(job["id"], job["status"]) for job in snapshot["jobs"]] == [(1, "done")]
+
+
+async def test_a_reconnected_websocket_gets_a_fresh_snapshot(running, authed, settings):
+    """A dropped connection reconnects from current queue state, not an event gap."""
+    store = _store(settings)
+    store.create_batch(
+        ALBUM_URL,
+        "album",
+        [Leaf(adam_id="501", title="track", album_name="album", artist_name="artist",
+              codec="alac", language="ja", url=ALBUM_URL, storefront="jp")],
+        force=False,
+    )
+    token = await _token(authed)
+
+    async with _ASGIWebSocket(running, token=token) as first:
+        assert (await first.read_data())["jobs"][0]["status"] == "queued"
+    assert running.state.broker.subscriber_count("jobs") == 0
+
+    store.mark(1, "done")
+    async with _ASGIWebSocket(running, token=token) as reconnected:
+        snapshot = await reconnected.read_data()
     assert snapshot["kind"] == "snapshot"
     assert [(job["id"], job["status"]) for job in snapshot["jobs"]] == [(1, "done")]
 
@@ -2861,11 +3115,17 @@ async def test_a_skipped_jobs_matched_paths_reach_a_reconnecting_tab(running, au
     album.mkdir(parents=True)
     (album / "1-01 1 a.m. (feat. shinoだす。).m4a").write_bytes(b"")
 
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    leaf = Leaf(
+        adam_id="501", title="1 a.m. (feat. shinoだす。)", album_name="4pi",
+        artist_name="toe", codec="alac", language="ja", url=ALBUM_URL,
+        storefront="jp",
+    )
+    job_id = running.state.jobs.create_batch(ALBUM_URL, "album", [leaf], force=False).created[0]
+    running.state.leaves.put(job_id, leaf)
     await running.state.run_one()
 
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         snapshot = await stream.read_data()
     job = snapshot["jobs"][0]
     assert job["status"] == "skipped"
@@ -2874,9 +3134,14 @@ async def test_a_skipped_jobs_matched_paths_reach_a_reconnecting_tab(running, au
 
 async def test_a_terminated_job_reaches_the_stream(running, authed, settings, ripper):
     """The live half of the contract: what the scheduler does is what the tab shows."""
-    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    leaf = Leaf(
+        adam_id="501", title="track", album_name="album", artist_name="artist",
+        codec="alac", language="ja", url=ALBUM_URL, storefront="jp",
+    )
+    job_id = running.state.jobs.create_batch(ALBUM_URL, "album", [leaf], force=False).created[0]
+    running.state.leaves.put(job_id, leaf)
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         await stream.read_data()  # the snapshot
         await running.state.run_one()
         # The pool opens and closes the rip; the row's own frame is the truth between them.
@@ -2892,11 +3157,31 @@ async def test_a_terminated_job_reaches_the_stream(running, authed, settings, ri
     assert event["job"]["finished_at"] == _store(settings).get(1).finished_at
 
 
-async def test_the_stream_needs_a_session(running):
-    """401 -- and a *complete* response, so this one really can go through httpx."""
-    async with await _client(running) as http:
-        response = await http.get("/api/jobs/stream")
-    assert response.status_code == 401
+async def test_the_websocket_stream_needs_a_session(running):
+    async with _ASGIWebSocket(running) as stream:
+        assert stream.accepted
+        await stream.wait_closed()
+    assert stream.close_code == 4401
+
+
+async def test_an_open_websocket_closes_when_its_session_is_revoked(
+    running, authed, monkeypatch
+):
+    monkeypatch.setattr("hub.api.jobs.WEBSOCKET_HEARTBEAT_SECONDS", 0.01)
+    token = await _token(authed)
+    async with _ASGIWebSocket(running, token=token) as stream:
+        await stream.read_data()
+        response = await authed.post("/api/auth/logout")
+        assert response.status_code == 200
+        await stream.wait_closed()
+    assert stream.close_code == 4401
+
+
+async def test_the_websocket_stream_refuses_a_cross_origin_handshake(running):
+    async with _ASGIWebSocket(running, origin="https://attacker.example") as stream:
+        await stream.wait_closed()
+    assert not stream.accepted
+    assert stream.close_code == 4403
 
 
 async def test_a_subscription_is_released_when_the_client_goes_away(running, authed):
@@ -2907,7 +3192,7 @@ async def test_a_subscription_is_released_when_the_client_goes_away(running, aut
     app task, which is what a browser does when the tab closes.
     """
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         await stream.read_data()
         assert running.state.broker.subscriber_count("jobs") == 1
     assert running.state.broker.subscriber_count("jobs") == 0
@@ -2923,7 +3208,7 @@ async def test_the_wrapper_log_reaches_the_same_stream(running, authed, supervis
     from hub.app import _log
 
     token = await _token(authed)
-    async with _ASGIStream(running, token=token) as stream:
+    async with _ASGIWebSocket(running, token=token) as stream:
         await stream.read_data()  # the snapshot
         _log(running.state, "the wrapper is ready on http://127.0.0.1:12340/status")
         event = await stream.read_data()
@@ -2934,7 +3219,7 @@ async def test_the_wrapper_log_reaches_the_same_stream(running, authed, supervis
 async def test_the_single_worker_rule_is_real_and_not_just_a_comment():
     """`main()` serves with one worker, and the reason is not "it seemed safer".
 
-    Everything the app owns is on `app.state`: the broker (so an SSE subscriber would see
+    Everything the app owns is on `app.state`: the broker (so a WebSocket subscriber would see
     only its own worker's events), the scheduler (two would race `claim_next` -- atomic, so no
     double rip, but each with its own leaf registry), and the session generation (a logout on
     one worker would not revoke a session minted by another). The last of those is a security
@@ -2981,7 +3266,18 @@ def live_app(settings, supervisor, ripper):
     `run_one()` one step at a time without racing a background task -- and the shutdown
     ordering is only observable when the loop is the one that started the work.
     """
-    return create_app(settings, supervisor=supervisor, ripper=ripper, autostart=True)
+    config = settings.db_path.parent / "vendor-config.toml"
+    config.write_text(
+        f'[download]\ndirPathFormat = "{settings.library_roots[0]}/{{artist}}/{{album}}"\n',
+        encoding="utf-8",
+    )
+    return create_app(
+        settings,
+        supervisor=supervisor,
+        ripper=ripper,
+        autostart=True,
+        ripper_config_path=config,
+    )
 
 
 def _queue_one(settings, *, adam_id: str = "1", album: str = ALBUM_URL) -> None:
@@ -3571,6 +3867,7 @@ async def test_delete_finished_removes_the_rows_and_forgets_their_leaves(
 ):
     """The leaf registry is in memory, so deleting rows without forgetting leaks it."""
     monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     store = _store(settings)
     store.mark(1, "done")
@@ -3583,12 +3880,35 @@ async def test_delete_finished_removes_the_rows_and_forgets_their_leaves(
     response = await authed.delete("/api/jobs/finished")
 
     assert response.status_code == 200
-    assert response.json() == {"deleted": 2}
+    assert response.json() == {"deleted": 2, "ids": [1, 2]}
     assert store.get(1) is None
     assert store.get(2) is None
     assert store.get(3) is not None, "a running row must survive"
     assert leaves.get(1) is None, "the leaf outlived its row"
     assert leaves.get(2) is None, "the leaf outlived its row"
+
+
+async def test_bulk_delete_publishes_the_exact_removed_job_ids(running, authed):
+    leaf = Leaf(
+        adam_id="501", title="track", album_name="album", artist_name="artist",
+        codec="alac", language="ja", url=ALBUM_URL, storefront="jp",
+    )
+    second = Leaf(
+        adam_id="502", title="next", album_name="album", artist_name="artist",
+        codec="alac", language="ja", url=ALBUM_URL, storefront="jp",
+    )
+    running.state.jobs.create_batch(ALBUM_URL, "album", [leaf, second], force=False)
+    running.state.jobs.mark(1, "done")
+    token = await _token(authed)
+
+    async with _ASGIWebSocket(running, token=token) as stream:
+        await stream.read_data()  # snapshot
+        response = await authed.delete("/api/jobs/finished")
+        event = await stream.read_data()
+
+    assert response.json() == {"deleted": 1, "ids": [1]}
+    assert event == {"kind": "deleted", "ids": [1]}
+    assert running.state.jobs.get(2).status == "queued"
 
 
 async def test_both_bulk_routes_need_a_session(client):
@@ -4042,3 +4362,54 @@ async def test_a_worker_that_dies_in_its_claim_loop_does_not_strand_the_others(
         f"{statuses}. A store error is worth reporting, but not at the price of two jobs left "
         f"`running` with nothing running them -- the pool has to settle its workers first."
     )
+
+
+async def test_pause_blocks_the_next_claim_but_lets_an_inflight_rip_finish(
+    running, authed, settings, ripper, supervisor
+):
+    settings.rip_concurrency = 1
+    await supervisor.start()
+    leaves = [
+        Leaf(
+            adam_id=adam_id,
+            title=f"track {index}",
+            album_name="Pause test",
+            artist_name="artist",
+            codec="alac",
+            language="ja",
+            url=ALBUM_URL,
+            storefront="jp",
+        )
+        for index, adam_id in enumerate(("pause-1", "pause-2"), start=1)
+    ]
+    created = running.state.jobs.create_batch(ALBUM_URL, "album", leaves, force=True).created
+    for job_id, leaf in zip(created, leaves, strict=True):
+        running.state.leaves.put(job_id, leaf)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    completed = []
+
+    async def blocked_rip(leaf, *, force):
+        if leaf.adam_id == leaves[0].adam_id:
+            started.set()
+            await release.wait()
+        completed.append(leaf.adam_id)
+
+    ripper.run_song = blocked_rip
+    pool = asyncio.create_task(running.state.run_pool())
+    await asyncio.wait_for(started.wait(), timeout=2)
+
+    paused = await authed.post("/api/jobs/pause")
+    assert paused.status_code == 200 and paused.json()["paused"] is True
+    assert (await authed.get("/api/status")).json()["queue_paused"] is True
+    release.set()
+    assert await asyncio.wait_for(pool, timeout=2) == 1
+    assert running.state.jobs.get(created[0]).status == "done"
+    assert running.state.jobs.get(created[1]).status == "queued"
+    assert completed == [leaves[0].adam_id]
+
+    resumed = await authed.post("/api/jobs/resume")
+    assert resumed.status_code == 200 and resumed.json()["paused"] is False
+    assert await running.state.run_pool() == 1
+    assert running.state.jobs.get(created[1]).status == "done"

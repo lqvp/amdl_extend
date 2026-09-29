@@ -14,7 +14,7 @@
   not to wait.
 
   The queue table is rendered server-side from a real `list()` and patched in place by
-  `EventSource` frames. Three things were added because a queue that only ever grows is a
+  WebSocket messages. Three things were added because a queue that only ever grows is a
   queue you scroll: the counts (`queue_counts`) so the state is readable without reading the
   table; the two bulk controls, because there is otherwise no way to remove a row at all --
   `DELETE /api/jobs/{id}` only marks a job `cancelled`; and `data-finished` on terminal rows
@@ -27,26 +27,42 @@
 {% block title %}Queue &middot; amd-hub{% endblock %}
 
 {% block content %}
-<section class="card">
-  <h2>Queue something</h2>
+<section class="card enqueue-card">
+  <div class="section-heading">
+    <div>
+      <h2>Queue music</h2>
+      <p class="muted small">Paste one or more Apple Music links, one per line.</p>
+    </div>
+    <span class="eyebrow">DOWNLOADS</span>
+  </div>
   <form id="enqueue" method="post" action="/enqueue">
     <label for="urls">Apple Music links</label>
     <textarea id="urls" name="urls" rows="3" required
+              aria-describedby="urls-help"
               placeholder="https://music.apple.com/jp/album/...&#10;https://music.apple.com/jp/song/..."></textarea>
-    <div class="row">
-      <label for="codec">Codec</label>
-      <select id="codec" name="codec">
-        {% for codec in ['alac', 'aac', 'aac-legacy', 'ec3', 'ac3', 'aac-binaural', 'aac-downmix'] %}
-          <option value="{{ codec }}"{% if codec == 'alac' %} selected{% endif %}>{{ codec }}</option>
-        {% endfor %}
-      </select>
-      <label for="language">Language</label>
-      <input id="language" name="language" placeholder="from the client's own config">
-      <label class="inline"><input type="checkbox" name="force" value="1"> force</label>
+    <p class="field-hint" id="urls-help">Albums, songs, playlists and music videos are supported.</p>
+    <div class="enqueue-options">
+      <div class="field">
+        <label for="codec">Audio format</label>
+        <select id="codec" name="codec">
+          {% for codec in ['alac', 'aac', 'aac-legacy', 'ec3', 'ac3', 'aac-binaural', 'aac-downmix'] %}
+            <option value="{{ codec }}"{% if codec == 'alac' %} selected{% endif %}>{{ codec }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label for="language">Metadata language <span class="optional">optional</span></label>
+        <input id="language" name="language" placeholder="Use the client's default">
+      </div>
+      <label class="check-option">
+        <input type="checkbox" name="force" value="1">
+        <span>Download again even if already in the library</span>
+      </label>
     </div>
-    <button type="submit">Queue</button>
+    <button type="submit" class="queue-submit">Add to queue</button>
   </form>
   <p class="error" id="enqueue-error" role="alert" hidden></p>
+  <p class="success" id="enqueue-feedback" role="status" aria-live="polite" hidden></p>
 </section>
 
 <details class="card" id="wrapper-state"
@@ -124,9 +140,11 @@
       summary to disagree with the table because it is the same numbers. -#}
   <p id="queue-summary" class="summary">
     {%- for status, count in queue_counts.items() if status != 'total' and count %}
-      <span class="count" data-count="{{ status }}">
+      <button type="button" class="count" data-count="{{ status }}"
+              data-action="filter-status" data-status="{{ status }}" aria-pressed="false"
+              title="Filter the queue to {{ status }} jobs">
         <span class="count-n">{{ count }}</span> {{ status }}
-      </span>
+      </button>
     {%- endfor %}
   </p>
 
@@ -134,6 +152,29 @@
       /api/jobs/{id}` only marks a job `cancelled`, so a queue could only grow. The scope is
       a choice rather than a constant because "everything not done" includes `skipped`, which
       on a dedup-heavy library is the largest group and re-skips the moment it runs. -#}
+  <div class="queue-tools" id="queue-tools" role="search" aria-label="Find queue jobs" hidden>
+    <label class="search-field" for="queue-search">
+      <span>Search jobs</span>
+      <input id="queue-search" type="search" placeholder="Title, status, codec or ID"
+             autocomplete="off" aria-controls="queue-body">
+    </label>
+    <label class="status-filter" for="queue-status-filter">
+      <span>Status</span>
+      <select id="queue-status-filter" aria-controls="queue-body">
+        <option value="all">All statuses</option>
+        <option value="queued">Queued</option>
+        <option value="waiting">Waiting</option>
+        <option value="running">Running</option>
+        <option value="done">Done</option>
+        <option value="skipped">Skipped</option>
+        <option value="failed">Failed</option>
+        <option value="cancelled">Cancelled</option>
+      </select>
+    </label>
+    <button type="button" data-action="queue-clear-filters" class="secondary">Clear filters</button>
+    <span class="visible-count" id="queue-visible-count" role="status" aria-live="polite"></span>
+  </div>
+
   <div class="row bulk">
     <form data-action="queue-requeue" class="inline-form">
       <label for="requeue-scope">Scope</label>
@@ -149,6 +190,15 @@
     <button type="button" data-action="queue-toggle-finished" aria-pressed="false">
       Show finished
     </button>
+    <button type="button" id="queue-pause" data-action="queue-pause"{% if queue_paused %} hidden{% endif %}>
+      Pause queue
+    </button>
+    <button type="button" id="queue-resume" data-action="queue-resume"{% if not queue_paused %} hidden{% endif %}>
+      Resume queue
+    </button>
+    <span id="queue-pause-state" class="muted small" role="status" aria-live="polite">
+      {% if queue_paused %}Paused — running downloads will finish.{% endif %}
+    </span>
   </div>
   <p class="muted small">
     Deleting removes the rows and nothing else. The files stay, and duplicates are found
@@ -159,7 +209,11 @@
       move the table rather than reflow it: a queue whose columns wrap into a stack is
       unreadable in a different way. `.table-wrap` scrolls sideways; nothing inside it
       changes, so `#queue-body` and every selector and test that reaches it are untouched. -#}
-  <div class="table-wrap">
+  <p id="queue-empty" class="empty-state"{% if jobs %} hidden{% endif %}>
+    <strong>Your queue is clear.</strong>
+    <span>Add a link above and your downloads will appear here.</span>
+  </p>
+  <div class="table-wrap" id="queue-table-wrap"{% if not jobs %} hidden{% endif %}>
     <table id="queue-table">
       <thead>
         <tr>
@@ -174,10 +228,25 @@
       </tbody>
     </table>
   </div>
+  <p id="queue-no-results" class="empty-state compact" hidden>
+    No visible jobs match those filters. <button type="button" class="link"
+      data-action="queue-clear-filters">Clear filters</button>
+  </p>
+  <div class="history-tools" id="queue-history-tools"
+       data-before-id="{{ history.history_before_id or '' }}"
+       data-has-more="{{ 'true' if history.history_has_more else 'false' }}"
+       {% if not history.history_has_more %}hidden{% endif %}>
+    <button type="button" id="queue-load-history" data-action="queue-load-history">
+      Load older finished jobs
+    </button>
+    <span id="queue-history-state" class="muted small"></span>
+  </div>
   {#- `data-state` is what the dot colours itself from in `app.css`; `app.js` sets the
       attribute alongside the label, because it writes the label with `textContent` and a
       `<span>` in here would be deleted on the first frame. -#}
-  <p class="muted small" id="stream-state" data-state="connecting">connecting&hellip;</p>
+  <p class="stream-state" id="stream-state" data-state="connecting" role="status" aria-live="polite">
+    Connecting to live updates&hellip;
+  </p>
 </section>
 
 <section class="card">

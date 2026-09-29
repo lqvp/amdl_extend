@@ -1,37 +1,37 @@
-"""The in-process broker the API layer streams to the browser over SSE.
+"""The in-process broker the API layer streams to the browser over WebSocket.
 
-The hub has one consumer of live state -- `GET /api/jobs/stream` -- and it is a browser that
+The hub has one consumer of live state -- `/api/jobs/ws` -- and it is a browser that
 was not connected when the interesting thing happened. A download takes minutes; a tab opened
 mid-transfer has to render the queue as it is, and the cheapest correct way to do that is to
 hand it the recent past before handing it the future.
 
-So `subscribe` is two phases, and the order between them is the whole design:
+By default, `subscribe` has two phases, and the order between them is the whole design:
 
-1. **the backlog** -- the last `HISTORY` messages on this channel, oldest first, so a
-   late subscriber renders the current queue rather than an empty one;
+1. **the backlog** -- the last `HISTORY` messages on this channel, oldest first;
 2. **the live stream** -- every message published from now on.
 
-**The gap between the two phases is the bug this module exists to avoid.** A subscriber that
+**The gap between those phases is the bug this module exists to avoid.** A subscriber that
 reads the backlog and *then* registers has a window in which a message is delivered to
-nobody: the queue silently loses one update, with no error and no way to notice, and the UI
-sits on stale state until some unrelated event wakes it. Registering and reading the backlog
-are therefore one synchronous step with no `await` between them, and `publish` is synchronous
-and never blocks on a subscriber -- so on one event loop no interleaving is possible at all.
-`test_a_message_published_after_the_backlog_and_before_the_live_wait_is_not_lost` pins the
-window from the outside.
+nobody. Registering and reading the backlog are therefore one synchronous step with no
+`await` between them, and `publish` is synchronous and never blocks on a subscriber -- so on
+one event loop no interleaving is possible. `test_a_message_published_after_the_backlog_and_before_the_live_wait_is_not_lost`
+pins the window from the outside.
 
-**Nothing is invented for a quiet channel.** A subscriber to a channel nothing has been
-published on waits, and is not handed an empty snapshot: a fabricated `{"kind": "snapshot",
-"jobs": []}` would be indistinguishable from a real one, and it would be a lie that looks like
-good news. The snapshot is the API layer's to publish, from a real `list()`.
+The WebSocket queue does not replay that history: it subscribes with `replay=False` and an
+`initial` callback. The broker registers that client first, evaluates the callback without an
+`await`, and sends the resulting database snapshot only to that client, before any queued live
+updates. This avoids replaying another connection's stale snapshot, broadcasting a new tab's
+snapshot to tabs already open, or dropping a change between the snapshot and live stream.
 
-**Frames.** A message is one `data: <json>` line closed by a blank line, per the SSE grammar.
-That is only safe because `json.dumps` escapes every character that could end the line --
-`\n`, `\r` -- inside a string, and because `ensure_ascii=False` leaves a Japanese album name
-as itself rather than as `\\uXXXX`. A payload that broke that assumption would be delivered
-as two fields, one of which the client would drop, and the drop would look like a lost
-update. `test_a_frame_is_one_sse_data_field_whatever_the_payload_contains` holds the payloads
-that would break it.
+**Nothing is invented for a quiet channel.** Without an explicit `initial` callback, a
+subscriber to a channel nothing has been published on waits. A fabricated empty snapshot
+would be indistinguishable from a real one and would be a lie that looks like good news. The
+queue snapshot is built by the API layer from a real `list()`.
+
+**Encoding.** Messages are compact JSON text, encoded once at publish time. That keeps the
+broker independent of the wire protocol and makes serialization errors point to the publisher,
+not a connected client. `ensure_ascii=False` preserves Japanese text without expanding it into
+`\\uXXXX`; newline and carriage-return characters remain safely escaped inside JSON strings.
 
 **Two limits, both deliberate.** `HISTORY` bounds what a late subscriber is replayed; it does
 not bound what a *connected* one can fall behind by either. A browser tab that stops reading
@@ -39,8 +39,8 @@ not bound what a *connected* one can fall behind by either. A browser tab that s
 measured at 200,000 retained frames, about 8 MB, for one subscriber, with no signal to
 anything. So a subscriber that cannot keep up is **told**, by a `SubscriberOverrun` raised
 from inside its own stream, and the choice of what to do about it belongs to the layer that
-owns the connection -- the API layer's SSE handler, which can let the client reconnect and
-re-read a snapshot. The broker deliberately does not make that choice, because it cannot
+owns the connection -- the WebSocket handler, which closes with a retryable code so the client reconnects and
+re-reads a snapshot. The broker deliberately does not make that choice, because it cannot
 know whether the stream is a snapshot (where a dropped message costs nothing) or a log line
 (where it is the entire point), and it will not quietly hand over the stale frames on the
 way out.
@@ -51,7 +51,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 
 # How many past messages a late subscriber is replayed. Enough for a queue of a few hundred
@@ -93,14 +93,9 @@ class SubscriberOverrun(RuntimeError):
         )
 
 
-def frame(data: dict) -> str:
-    """One SSE frame: a single `data:` line, terminated by a blank line.
-
-    Compact separators because this is a stream, and `ensure_ascii=False` because a Japanese
-    album name arrives as itself -- the client declares UTF-8, and escaping it would make
-    every message three times the bytes for no reader's benefit.
-    """
-    return f"data: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
+def encode_message(data: dict) -> str:
+    """Encode one broker payload as compact UTF-8-friendly JSON text."""
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
 @dataclass(eq=False)
@@ -165,9 +160,9 @@ class EventBroker:
         subscriber -- a `Path` or an unconverted `Job` is a bug in the publisher, and naming
         it there is the only way the traceback points at the code that made it. Raising
         inside a subscriber instead would look like a broken browser connection and would take
-        the SSE stream down with it.
+        the WebSocket connection down with it.
         """
-        message = frame(data)
+        message = encode_message(data)
         state = self._state(channel)
         state.history.append(message)
         # Copied because a subscriber that closes while a message is in flight removes
@@ -179,14 +174,22 @@ class EventBroker:
                 continue
             subscriber.queue.put_nowait(message)
 
-    async def subscribe(self, channel: str) -> AsyncIterator[str]:
-        """Yield this channel's backlog, then every message published from now on.
+    async def subscribe(
+        self,
+        channel: str,
+        *,
+        replay: bool = True,
+        initial: Callable[[], dict] | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield an optional per-subscriber initial message, backlog, then live messages.
 
         An async generator, so nothing happens until the caller asks for the first chunk:
         subscription is established on the first read, not on the call. That is deliberate --
         a request handler that built the iterator and was then dropped by the client before
         it iterated would otherwise leak a subscriber for the life of the process, and its
-        queue with it.
+        queue with it. `initial` is evaluated after registration and is only valid when
+        `replay=False`; this lets a caller create a fresh snapshot without replaying or
+        broadcasting it to other subscribers.
 
         The two halves are established without an `await` between them, so on one event loop
         there is no window in which a published message could reach neither. See the module
@@ -197,13 +200,17 @@ class EventBroker:
         queue describe a queue state that has already moved on, and delivering them would be
         worse than saying so.
         """
+        if initial is not None and replay:
+            raise ValueError("an initial message requires replay=False")
         state = self._state(channel)
-        backlog = tuple(state.history)
+        backlog = tuple(state.history) if replay else ()
         subscriber = _Subscriber(
             channel=channel, queue=asyncio.Queue(maxsize=self._queue_size), limit=self._queue_size
         )
         state.subscribers.add(subscriber)
         try:
+            if initial is not None:
+                yield encode_message(initial())
             for message in backlog:
                 yield message
             while True:

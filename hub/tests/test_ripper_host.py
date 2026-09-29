@@ -1747,7 +1747,7 @@ async def test_run_song_reports_progress_to_a_real_callback(started_host):
     which is why `_read_progress` returning `None` for the first second is
     correct rather than a zero. So this test seeds the task upstream would
     have created, and asserts the *shape* of what the callback is handed --
-    which is the part the hub's SSE frames depend on.
+    which is the part the hub's WebSocket messages depend on.
     """
     ripper = _SlowRecordingRipper()
     host = _attach(started_host, ripper, _RecordingMvRipper())

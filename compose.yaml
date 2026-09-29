@@ -161,10 +161,9 @@ services:
       # -- upstream's example is relative, and a relative value resolves against
       # AppleMusicDecrypt/ instead of the mount -- so the client always writes to /library.
       # Name a different root here and downloads land in a tree nothing ever scans: every
-      # track re-downloads, forever, with no error. No build can catch it, because this
-      # variable is read at runtime. TODO(Phase 2): assert the containment at boot,
-      # in `create_app`'s lifespan, and refuse to start naming both values. See `.env.example`
-      # for where the check is meant to live and why it is not here.
+      # track re-downloads, forever, with no error. No build can catch an operator-edited
+      # value, so `create_app`'s lifespan checks containment at boot and refuses to start,
+      # naming both this write path and the configured scan roots.
       #
       # There is only one root, so nothing about a drive being absent applies. An unreadable
       # root is reported as degraded, but a root that is a silently empty mount point is
@@ -214,7 +213,7 @@ services:
     # `--workers 1` is deliberately absent from this file and must not be added to it. It
     # lives inside `hub.app.main()`, which passes `workers=1` to uvicorn, so a second worker
     # cannot be requested by editing compose -- which matters, because everything the app
-    # owns lives on `app.state`: the SSE broker, the job store, the leaf registry, the
+    # owns lives on `app.state`: the event broker, the job store, the leaf registry, the
     # scheduler and the session generation. Two workers would be two of each -- two
     # schedulers racing `claim_next` (which is atomic, so no double rip, but two leaf
     # registries, so a job could be claimed by a worker that never expanded it) and two

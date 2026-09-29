@@ -164,9 +164,27 @@ async def test_the_library_page_does_not_warn_about_a_populated_root(authed, lib
 
 
 
-async def test_the_queue_page_renders_the_rows(authed, settings, library):
+async def test_the_queue_page_renders_the_rows(authed, settings, library, monkeypatch):
     (library / "toe/4pi").mkdir(parents=True)
     (library / "toe/4pi/1-01 1 a.m. (feat. shinoだす。).m4a").write_bytes(b"")
+    from hub.jobs import Leaf
+
+    async def fake_expand(url, *, codec, language, web_api):
+        return [
+            Leaf(
+                adam_id="501",
+                title="1 a.m. (feat. shinoだす。)",
+                album_name="4pi",
+                artist_name="toe",
+                codec=codec,
+                language=language,
+                url=url,
+                storefront="jp",
+            )
+        ]
+
+    monkeypatch.setattr("hub.api.jobs.expand", fake_expand)
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
 
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     store = _store(settings)
@@ -234,6 +252,27 @@ async def test_the_library_api_lists_albums_and_artists(authed, library):
     assert [(album["name"], album["artist"]) for album in albums] == [("4pi", "toe")]
     artists = (await authed.get("/api/library/artists")).json()["artists"]
     assert artists == ["toe"]
+
+
+def test_library_page_exposes_search_and_a_read_only_duplicate_report():
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/library.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    for control in ("library-search", "library-albums", "library-duplicates-toggle", "duplicate-report"):
+        assert f'id="{control}"' in template
+    assert '"/api/library/albums?q="' in script
+    assert '"/api/library/duplicates"' in script
+    assert "never deletes files" in (root.parent / "api/library.py").read_text(encoding="utf-8")
+
+
+def test_queue_page_offers_pause_and_cursor_history_controls():
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/queue.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    for control in ("queue-pause", "queue-resume", "queue-history-tools", "queue-load-history"):
+        assert f'id="{control}"' in template
+    assert '"/api/jobs/history?before_id="' in script
+    assert '"/api/jobs/lookup?"' in script
 
 
 async def test_the_login_page_never_leaks_whether_a_password_was_tried(client):
@@ -315,7 +354,7 @@ def _strip_jinja_comments(source: str) -> str:
         index = end + 2
 
 
-async def test_every_template_is_in_the_render_graph(client, authed, library):
+async def test_every_template_is_in_the_render_graph(client, authed, library, monkeypatch):
     """No template is unreachable, by output *or* by `{% extends %}`/`{% include %}`.
 
     Read from the *sources* rather than from the rendered pages, because a layout's own text
@@ -325,6 +364,8 @@ async def test_every_template_is_in_the_render_graph(client, authed, library):
     """
     (library / "toe/4pi").mkdir(parents=True)
     (library / "toe/4pi/t.m4a").write_bytes(b"")
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
 
     # Render all three pages anyway, so a template that *is* reached cannot be silently broken
@@ -514,6 +555,7 @@ async def test_the_queue_summarises_the_queue_without_reading_the_table(
 ):
     """The counts a user checks first, so the page does not have to be read to know them."""
     monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     store = _store(settings)
     store.mark(1, "done")
@@ -530,8 +572,43 @@ async def test_the_queue_summarises_the_queue_without_reading_the_table(
         assert f">{count}</span>" in body or f'>{count}<' in body, status
 
 
-async def test_finished_rows_are_marked_so_they_can_be_collapsed(running, authed, settings):
+def test_queue_count_buttons_and_live_rows_stay_in_sync():
+    """Status chips are filters and their counts follow socket/API row changes."""
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/queue.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+
+    assert 'data-action="filter-status" data-status="{{ status }}"' in template
+    assert "function updateQueueSummary()" in script
+    assert "queueSummary.appendChild(button)" in script
+    assert "function removeJobs(ids)" in script
+    assert 'case "deleted":' in script
+    assert "updateQueueSummary();" in script
+    assert "queueStatus.value = queueStatus.value === selectedStatus ? \"all\" : selectedStatus" in script
+
+
+def test_enqueue_and_queue_actions_patch_rows_without_reloading():
+    """Enqueue, retry, cancel, requeue and bulk-delete keep the current queue page live."""
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/queue.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+
+    assert 'id="enqueue-feedback"' in template
+    assert "return hydrateJobs(created)" in script
+    assert "upsertIfUnchanged(result.data, cancelRevision)" in script
+    assert "upsertIfUnchanged(result.data, retryRevision)" in script
+    assert 'requestJson("/api/jobs/finished", { method: "DELETE" })' in script
+    assert "removeJobs(ids);" in script
+    assert "result.data.requeued || []" in script
+    assert 'case "deleted":' in script
+
+
+async def test_finished_rows_are_marked_so_they_can_be_collapsed(
+    running, authed, settings, monkeypatch
+):
     """Terminal rows carry the hook; whether the browser acts on it is not claimed here."""
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     _store(settings).mark(1, "done")
 
@@ -560,6 +637,7 @@ async def test_every_status_gets_a_distinct_colour_hook(running, authed, setting
     makes it visible is a CSS question this file cannot answer.
     """
     monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     store = _store(settings)
     for job_id, status in ((1, "done"), (2, "failed"), (3, "queued")):
@@ -595,8 +673,47 @@ def test_the_script_handles_every_bulk_action_the_page_offers():
     than a missing button. Checked as source text on both sides -- again, not behaviour.
     """
     js = (Path(__file__).parent.parent / "hub/web/static/app.js").read_text(encoding="utf-8")
-    for action in ("queue-requeue", "queue-delete-finished", "queue-toggle-finished"):
+    for action in (
+        "queue-requeue",
+        "queue-delete-finished",
+        "queue-toggle-finished",
+        "queue-clear-filters",
+        "queue-pause",
+        "queue-resume",
+        "queue-load-history",
+    ):
         assert f'"{action}"' in js, f"the page offers {action} and the script does not handle it"
+
+
+def test_the_queue_uses_a_reconnecting_websocket_not_eventsource():
+    """Transport loss reconnects to a fresh snapshot; expired sessions stop retrying."""
+    js = (Path(__file__).parent.parent / "hub/web/static/app.js").read_text(encoding="utf-8")
+    assert 'new WebSocket(protocol + window.location.host + "/api/jobs/ws")' in js
+    assert "window.setTimeout(connectStream, delay" in js
+    assert "Math.pow(2, reconnectAttempt)" in js
+    assert "event.code === 4401 || event.code === 4403" in js
+    assert "new EventSource" not in js
+
+
+def test_the_queue_offers_search_and_status_filters():
+    """A long-running queue should be findable without scrolling through every row."""
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/queue.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    for control in (
+        'id="queue-search"',
+        'id="queue-status-filter"',
+        'id="queue-visible-count"',
+        'id="queue-empty"',
+        'id="queue-table-wrap"',
+        'id="queue-no-results"',
+    ):
+        assert control in template, f"the queue is missing its {control} affordance"
+    assert "function applyQueueFilters()" in script
+    assert "row.hidden = !(matchesFinished && matchesStatus && matchesSearch)" in script
+    assert "function clearQueueFilters()" in script
+    css = (root / "static/app.css").read_text(encoding="utf-8")
+    assert ".enqueue-options, .queue-tools, .library-tools { grid-template-columns: minmax(0, 1fr); }" in css
 
 
 def test_hidden_queue_rows_are_hidden_by_a_rule_not_by_the_user_agent():
@@ -616,7 +733,7 @@ def test_the_scripts_row_builder_agrees_with_the_template():
     The template had been given a `data-finished` hook, a `status-<status>` class on the cell
     and a column order with the id last. `buildRow` still produced the old row: no
     `data-finished`, a bare `status` span, and the id in the first column. So the page was
-    correct until the SSE stream sent its first snapshot, at which point every row on screen
+    correct until the WebSocket sent its first snapshot, at which point every row on screen
     silently reverted to the old markup -- and the "hide finished" filter, which selects
     `#queue-body tr[data-finished]`, matched nothing.
 
@@ -763,6 +880,7 @@ def test_every_button_rule_is_legible_against_the_background_it_lands_on():
         for selector in (
             "button",
             "button.danger",
+            "button.secondary",
             '[data-action="queue-toggle-finished"][aria-pressed="true"]',
         ):
             found = resolve(selector)
@@ -791,7 +909,7 @@ def test_every_button_rule_is_legible_against_the_background_it_lands_on():
                 f"matches its own background reads as a button with no text."
             )
             checked += 1
-    assert checked == 2 * 3
+    assert checked == 2 * 4
 
 
 # ---------------------------------------------------------------------------

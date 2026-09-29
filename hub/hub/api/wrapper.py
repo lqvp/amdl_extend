@@ -328,6 +328,7 @@ async def status(request: Request) -> dict:
         "wrapper": await wrapper_state(state),
         "library": await _library_summary(state),
         "queue": state.jobs_counts(),
+        "queue_paused": state.queue_paused,
         # The scheduler's live shape: who is mid-rip right now against the configured
         # ceiling. Uncached for the same reason as the library -- `2/4 ripping` read from
         # a cache is the number that misleads while a drive is actually moving.
