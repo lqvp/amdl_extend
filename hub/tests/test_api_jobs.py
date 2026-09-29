@@ -1115,6 +1115,9 @@ async def test_progress_reaches_the_store_and_the_stream(
     "something was called" -- a handler that fired once with zeroes would satisfy the weaker
     form and render as a bar that never moves.
     """
+    # Directly driving `run_one()` bypasses the scheduler's readiness gate, so put the fake
+    # wrapper into the same ready state production requires before a rip starts.
+    await running.state.supervisor.start()
     total = 400
     progress_ripper.progress_up_to = total
 
@@ -1252,6 +1255,9 @@ async def test_current_job_is_cleared_after_a_job_finishes(running, authed, sett
     the easy version to get wrong and the reason the parked and failed cases are here.
     """
     store = _store(settings)
+    # This test invokes `run_one()` directly, so it supplies the ready wrapper state that the
+    # production scheduler checks before claiming work.
+    await running.state.supervisor.start()
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
 
     # 1. success
@@ -4041,6 +4047,9 @@ async def test_the_same_track_in_two_codecs_is_not_ripped_twice_at_once(
         return Leaf(adam_id="1", title="t", album_name="A", artist_name="B", codec=codec,
                     language="ja", url=ALBUM_URL, storefront="jp")
 
+    # The pool is driven directly rather than through the scheduler's readiness gate.
+    await running.state.supervisor.start()
+
     # These rows are built through the store rather than the API, so no expansion is
     # registered in `state.leaves` and `_leaf_for` has to re-expand the parent URL to get the
     # album, artist and storefront -- which `job` stores none of. The requested codec is the
@@ -4250,6 +4259,7 @@ async def test_a_freed_slot_takes_more_work_without_waiting_for_the_slowest(
     monkeypatch.setattr(
         "hub.api.jobs.expand", _expansion_with_three_usable_leaves()
     )
+    await running.state.supervisor.start()
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
 
     running.state.settings = running.state.settings.model_copy(update={"rip_concurrency": 2})

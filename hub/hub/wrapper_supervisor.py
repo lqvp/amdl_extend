@@ -550,12 +550,14 @@ class WrapperSupervisor:
         return probe.data
 
     async def wait_until_unavailable(self) -> Readiness:
-        """Wait for the serving wrapper to stop being usable.
+        """Wait for the wrapper process or its status endpoint to become unavailable.
 
         Owned launcher exits are signalled directly by `_watch_service`; an adopted wrapper
         has no child process to observe, so its `/status` endpoint is probed until it stops
-        serving. The returned observation is carried through the scheduler so a fast
-        automatic restart cannot hide the interruption from the job that was using it.
+        answering. An answered `no-account` state is not process loss: an in-flight request
+        must be allowed to report its own failure and preserve its diagnosis. The returned
+        observation is carried through the scheduler so a fast automatic restart cannot hide
+        an actual interruption from the job that was using it.
         """
         if not self._adopted:
             await self._unavailable.wait()
@@ -563,7 +565,7 @@ class WrapperSupervisor:
 
         while not self._unavailable.is_set():
             readiness = await observe_readiness(self)
-            if readiness.kind != "serving":
+            if readiness.kind in {"down", "unreachable"}:
                 return readiness
             await asyncio.sleep(POLL_INTERVAL)
         return Readiness(kind="down", regions=(), detail="the supervisor stopped")

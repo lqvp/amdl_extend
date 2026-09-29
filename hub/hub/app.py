@@ -384,16 +384,28 @@ class _WrapperInterrupted(RipperHostError):
 
 
 async def _wait_for_wrapper_loss(supervisor) -> Readiness:
-    """Wait for the active wrapper to stop serving, using the supervisor's signal if any."""
+    """Wait for the wrapper process or its status endpoint to become unavailable.
+
+    `no-account` is deliberately not wrapper loss: the wrapper is still answering `/status`,
+    and the in-flight RPC must be allowed to return its own `RipperHostError`. That keeps the
+    actionable upstream diagnosis on the parked job instead of replacing it with a generic
+    cancellation just because the readiness probe noticed the same signed-out state first.
+    """
     wait_until_unavailable = getattr(supervisor, "wait_until_unavailable", None)
     if callable(wait_until_unavailable):
-        return await wait_until_unavailable()
+        while True:
+            readiness = await wait_until_unavailable()
+            if readiness.kind in {"down", "unreachable"}:
+                return readiness
+            # An adopted supervisor may report `no-account` immediately. Give the RPC time to
+            # finish before probing it again rather than spinning on the unchanged status.
+            await asyncio.sleep(WRAPPER_GUARD_POLL_SECONDS)
 
     # Small test doubles and third-party supervisors need not implement the optimized
     # process-exit signal. Probe those adapters while a job is active.
     while True:
         readiness = await observe_readiness(supervisor)
-        if readiness.kind != "serving":
+        if readiness.kind in {"down", "unreachable"}:
             return readiness
         await asyncio.sleep(WRAPPER_GUARD_POLL_SECONDS)
 
