@@ -1,7 +1,7 @@
 /* amd-hub
  *
  * No framework and no build step. The queue's live updates are the platform's
- * `EventSource`, and every other action is a plain form post, so the hub works with
+ * WebSockets, and every other action is a plain form post, so the hub works with
  * scripting disabled -- which is the right default for something that runs on one person's
  * LAN behind whatever their router does to it.
  *
@@ -23,7 +23,8 @@
  *
  * The same split gives --bad / --on-bad. Everything read directly as text (--text, --muted,
  * --ok, --warn, --bad, --accent-ink) is mixed to clear 4.5:1 against --bg, --surface AND
- * --surface-2 in both themes; the three filled rules are what the test measures mechanically.
+ * --surface-2 in both themes. The filled button variants are what the test measures
+ * mechanically.
  *
  * Shape has exactly three values and they mean one thing each:
  *   --radius       8px   containers (cards)
@@ -216,6 +217,47 @@ input, select, textarea {
 
 input[type="checkbox"] { width: auto; }
 
+/* The enqueue form is the primary action, so its controls read as a short workflow rather
+ * than one crowded line: links first, then the few optional choices, then one obvious CTA. */
+.section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+.section-heading h2 { margin-bottom: var(--sp-1); }
+.section-heading p { margin: 0; }
+.eyebrow {
+  padding: 0.18rem 0.55rem;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--accent-ink);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.07em;
+}
+textarea#urls { min-height: 7rem; resize: vertical; line-height: 1.55; }
+.field-hint { margin: var(--sp-1) 0 var(--sp-4); color: var(--muted); font-size: var(--text-xs); }
+.enqueue-options {
+  display: grid;
+  grid-template-columns: minmax(9rem, 0.8fr) minmax(14rem, 1.2fr) minmax(12rem, 1.2fr);
+  gap: var(--sp-4);
+  align-items: end;
+}
+.enqueue-options .field label { margin: 0 0 var(--sp-1); }
+.optional { color: var(--muted); font-weight: 400; }
+label.check-option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 2.5rem;
+  margin: 0;
+  color: var(--text);
+  line-height: 1.35;
+}
+label.check-option input { flex: 0 0 auto; accent-color: var(--accent-ink); }
+
 /* Placeholders are examples here, not labels, and the UA's grey fails AA on the tinted
  * field. --muted clears 4.5:1 on both field grounds in both themes. */
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
@@ -271,6 +313,8 @@ button.link:hover { color: var(--text); }
   .bar nav a { padding: 0.2rem 0.65rem; }
   main { padding: var(--sp-4); }
   .card { padding: var(--sp-4); }
+  .enqueue-options, .queue-tools, .library-tools { grid-template-columns: minmax(0, 1fr); }
+  .queue-tools .visible-count { justify-self: start; }
   .row:not(.bulk) {
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
@@ -288,7 +332,8 @@ button.link:hover { color: var(--text); }
 .muted { color: var(--muted); }
 .small { font-size: var(--text-sm); }
 .error, .error-text { color: var(--bad); }
-.ok { color: var(--ok); }
+.success, .ok { color: var(--ok); }
+button:disabled { cursor: wait; opacity: 0.68; }
 .warn { color: var(--warn); }
 
 code { font-family: var(--font-mono); font-size: 0.88em; }
@@ -471,6 +516,87 @@ button.copy:hover { color: var(--text); }
 }
 
 .count-n { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+button.count {
+  min-height: 1.8rem;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+button.count:hover { color: var(--text); border-color: var(--accent-ink); filter: none; }
+button.count[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--on-accent);
+  border: 1px solid var(--accent-ink);
+}
+button.count[aria-pressed="true"] .count-n { color: inherit; }
+
+.queue-tools {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) minmax(9rem, 12rem) auto auto;
+  gap: var(--sp-3);
+  align-items: end;
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.queue-tools[hidden] { display: none; }
+.queue-tools label { display: grid; gap: var(--sp-1); margin: 0; }
+.queue-tools label > span { color: var(--muted); font-size: var(--text-xs); }
+.library-tools {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) auto auto;
+  gap: var(--sp-3);
+  align-items: end;
+  margin-bottom: var(--sp-3);
+}
+.library-tools label { display: grid; gap: var(--sp-1); margin: 0; }
+#library-result-count { align-self: center; white-space: nowrap; }
+.duplicate-report {
+  margin: var(--sp-3) 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.duplicate-report[hidden] { display: none; }
+.duplicate-report .warning { color: var(--warn); }
+.duplicate-list, .duplicate-list ul { display: grid; gap: var(--sp-2); }
+.duplicate-list > li { overflow-wrap: anywhere; }
+.duplicate-list code { margin-right: var(--sp-2); }
+.history-tools { display: flex; gap: var(--sp-3); align-items: center; margin-top: var(--sp-3); }
+.history-tools[hidden] { display: none; }
+#queue-pause-state { align-self: center; color: var(--warn); }
+button.secondary {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+.visible-count {
+  align-self: center;
+  justify-self: end;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin: var(--sp-3) 0;
+  padding: var(--sp-5);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+  text-align: center;
+}
+.empty-state strong { color: var(--text); }
+.empty-state.compact { display: block; padding: var(--sp-3); }
+.empty-state[hidden] { display: none; }
 
 /* The counts are ordered by status name, so the eye cannot rely on position. A count
  * worth noticing gets the colour its rows use, which is one fewer thing to learn. */
@@ -534,6 +660,21 @@ details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--
 }
 #stream-state[data-state="live"]::before { background: var(--ok); }
 #stream-state[data-state="reconnecting"]::before { background: var(--warn); }
+.stream-state {
+  display: inline-flex;
+  align-items: center;
+  margin: var(--sp-4) 0 0;
+  padding: 0.25rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.stream-state[data-state="live"] { color: var(--ok); }
+.stream-state[data-state="reconnecting"] { color: var(--warn); }
+.stream-state[data-state="disconnected"] { color: var(--bad); }
 
 /* `row.hidden = true` relies on the UA's `[hidden] { display: none }`, and a `<tr>` is
  * exactly the element where that is unreliable: a single author rule giving `tr` a display

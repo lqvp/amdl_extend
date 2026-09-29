@@ -1,44 +1,31 @@
-"""What is on disk, right now.
+"""Read-only library discovery, search, and duplicate candidates.
 
-Phase 1 builds the *list*: the album directories across every root, and the artists derived
-from the structure. That is the whole of what this needs and the whole of what it does, and
-the restraint is deliberate rather than a stub:
-
-- **No tag reads.** The one cacheable thing here would be the tag read (a `mutagen`
-  parse per file, with a 300 s TTL), and nothing here needs one. An album list is a
-  directory listing.
-- **No file serving, no deletion, no duplicate report.** The route names are
-  `/api/library/files/{id}`, `/stream`, `DELETE`, and `/duplicates`, and every one of them
-  is Phase 2 ("FS ベースのライブラリ閲覧・検索・削除 ... 重複レポート").
-  Registering them as 501s would put a route table in the codebase that answers the wrong
-  thing; leaving them absent means `GET /api/library/files/1` is a 404, which is an honest
-  "this build has no such route".
-- **No cache.** The walk was measured at 0.06 s, and that is why: a stale
-  listing on a drive that was unplugged a minute ago is worse than a slow page, and there is
-  no staleness window to reason about because nothing is held.
-
-The artist is the *parent directory's* name, never one derived from `dirPathFormat`, because
-the two real libraries on this machine use different conventions and only one of them
-matches. That rule is `library_scan._artist`'s, and it is not restated here.
+Album directories are derived from a fresh filesystem walk; no tag reads or stale index
+are involved. Search matches artist, album, and absolute path. The duplicate report groups
+normalized album/title names across directories as *candidates*, includes every path for
+human review, and never mutates files. A name match is not proof that two releases are the
+same. The artist is the parent directory's name, following `library_scan._artist`.
 """
 
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
-from fastapi import Request
+from fastapi import Query, Request
 
-from hub.api import fail, guarded
-from hub.library_scan import scan_roots
+from hub.api import guarded
+from hub.library_scan import LibraryScan, album_key, scan_roots
+from hub.normalize import normalize
 
 router = guarded()
 
 
-async def library_listing(state) -> dict:
+async def library_listing(state, search: str | None = None) -> dict:
     """Every album scope across every root, plus which roots could not be read.
 
     One walk, in a worker thread. `os.walk` over a 341 GB external drive blocks for long
-    enough to stall the event loop, and the loop is what serves the SSE stream -- so a
+    enough to stall the event loop, and the loop is what serves WebSocket updates -- so a
     library page would otherwise stop the queue updating for everyone while it ran.
 
     `per_root` is positional with `roots` and is the answer to the question a total cannot
@@ -49,12 +36,25 @@ async def library_listing(state) -> dict:
     the page rather than only in a harness somebody has to remember to run.
     """
     scan = await asyncio.to_thread(scan_roots, state.settings.library_roots)
+    albums = [_album_dict(scan, album) for album in scan.albums]
+    query = (search or "").strip().casefold()
+    filtered = [
+        album
+        for album in albums
+        if not query
+        or any(
+            query in str(album[field] or "").casefold()
+            for field in ("name", "artist", "path")
+        )
+    ]
     return {
         "roots": [str(root) for root in scan.roots],
         "degraded_roots": [str(root) for root in scan.degraded],
         "per_root": list(scan.per_root()),
-        "albums": [_album_dict(scan, album) for album in scan.albums],
-        "artists": sorted({album.artist for album in scan.albums if album.artist}),
+        "total_albums": len(albums),
+        "search": search or "",
+        "albums": filtered,
+        "artists": sorted({album["artist"] for album in filtered if album["artist"]}),
     }
 
 
@@ -81,13 +81,13 @@ def _album_dict(scan, album) -> dict:
 
 
 @router.get("/api/library/albums")
-async def albums(request: Request) -> dict:
-    return await library_listing(request.app.state)
+async def albums(request: Request, q: str = Query(default="", max_length=200)) -> dict:
+    return await library_listing(request.app.state, search=q)
 
 
 @router.get("/api/library/artists")
-async def artists(request: Request) -> dict:
-    listing = await library_listing(request.app.state)
+async def artists(request: Request, q: str = Query(default="", max_length=200)) -> dict:
+    listing = await library_listing(request.app.state, search=q)
     return {"artists": listing["artists"]}
 
 
@@ -106,20 +106,83 @@ async def scan(request: Request) -> dict:
             "per_root": listing["per_root"], "albums": len(listing["albums"])}
 
 
+def duplicate_candidates(scan: LibraryScan) -> list[dict]:
+    """Group normalized album/title pairs that occur in multiple album directories.
+
+    This is a *candidate* report, not a destructive or definitive deduplication decision:
+    two different releases can share both names. Every hit carries all paths so a person
+    can adjudicate it. Empty normalized keys are ignored because they carry no identity.
+    """
+    groups: dict[tuple[str, str], dict[str, dict]] = {}
+    for album in scan.albums:
+        album_name_key = album_key(album.name)
+        if not album_name_key:
+            continue
+        path = str(scan.roots[album.root_index] / album.relpath)
+        display_by_key: dict[str, set[str]] = {}
+        for filename in album.track_names:
+            key = normalize(filename)
+            if key:
+                display_by_key.setdefault(key, set()).add(Path(filename).stem)
+        for title_key in album.track_keys:
+            if not title_key:
+                continue
+            entry = groups.setdefault((album_name_key, title_key), {})
+            existing = entry.setdefault(
+                path,
+                {
+                    "path": path,
+                    "album_name": album.name,
+                    "track_names": set(),
+                },
+            )
+            existing["track_names"].update(display_by_key.get(title_key, {title_key}))
+
+    candidates = []
+    for (album_name_key, title_key), directories in groups.items():
+        if len(directories) < 2:
+            continue
+        matches = [
+            {
+                "path": directory["path"],
+                "album_name": directory["album_name"],
+                "track_name": sorted(directory["track_names"])[0],
+            }
+            for directory in sorted(
+                directories.values(), key=lambda row: (row["path"].casefold(), row["path"])
+            )
+        ]
+        candidates.append(
+            {
+                "album_name": sorted(item["album_name"] for item in matches)[0],
+                "track_name": sorted(item["track_name"] for item in matches)[0],
+                "normalized_album": album_name_key,
+                "normalized_track": title_key,
+                "directories": matches,
+                "directory_count": len(matches),
+            }
+        )
+    return sorted(
+        candidates,
+        key=lambda item: (item["normalized_album"], item["normalized_track"]),
+    )
+
+
 @router.get("/api/library/duplicates")
 async def duplicates(request: Request) -> dict:
-    """Not in this build.
-
-    The read-only duplicate report is Phase 2. It is *not* the same thing as
-    `skip_reason`: that carries the paths a `loose` skip matched, for one track, so a human
-    can overrule it -- and the design refuses the cross-album group view outright, because a
-    title shared by 1,207 of 8,721 library keys is not evidence of a duplicate. A caller
-    reaching this gets an explanation rather than a 404.
-    """
-    return fail(
-        501,
-        "the read-only duplicate report is Phase 2. What this build does show is "
-        "the other half: a skipped job's `skip_reason` names every path its `loose` match "
-        "hit, in GET /api/jobs and in the queue page, which is what makes one skip "
-        "adjudicable by hand.",
+    scan = await asyncio.to_thread(scan_roots, request.app.state.settings.library_roots)
+    candidates = duplicate_candidates(scan)
+    warning = (
+        "Candidates are based on normalized album and track names. Matching names do not "
+        "prove that files are the same release; review the listed paths. This report is "
+        "read-only and never deletes files."
     )
+    if scan.degraded:
+        warning += " Unreadable roots were omitted: " + ", ".join(map(str, scan.degraded)) + "."
+    return {
+        "roots": [str(root) for root in scan.roots],
+        "degraded_roots": [str(root) for root in scan.degraded],
+        "warning": warning,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }

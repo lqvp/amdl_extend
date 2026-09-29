@@ -172,24 +172,17 @@ def main() -> int:
         settings.library_roots[0].as_posix()
     ):
         # This compares against the *image's* root, AMD_DOWNLOAD_ROOT, which is the right
-        # comparison at build time and is NOT the same thing as a check on the operator's
-        # configuration. `AMD_LIBRARY_ROOTS` is read at runtime, so an operator who edits it
-        # in `.env` -- naming a root the client does not write into, say -- is outside what
-        # this can see, and the result is the one failure this whole design is most careful
-        # about: the client writes to one tree while dedup reads another, and every track
-        # re-downloads forever with nothing red. The build gate cannot catch that; the TODO
-        # in `.env.example` names where it should be caught, and a test on the compose file
-        # is what guards the default in the meantime.
+        # comparison at build time and is NOT the operator's runtime configuration.
+        # `AMD_LIBRARY_ROOTS` can be edited in `.env`; the application lifespan's
+        # `validate_download_root` check rejects a mismatch before any service starts.
         fail(
             f"[download].dirPathFormat writes to "
             f"{upstream_config['download']['dirPathFormat'].split('/')[1]!r} but the first "
             f"library root is {settings.library_roots[0]}. Downloads would land outside "
             f"every tree the hub deduplicates against."
         )
-    # The reordering hazard this check cannot see -- `AMD_LIBRARY_ROOTS` is read at runtime,
-    # so an operator who reorders it in `.env` is outside anything a build can assert -- is
-    # stated in `.env.example` and in compose.yaml's `AMD_LIBRARY_ROOTS` comment, which is
-    # where somebody about to reorder a list is actually reading.
+    # Runtime root ordering is immaterial: the lifespan compares the static write root
+    # against every configured library root, not only the first one.
 
     # -- the bind address ---------------------------------------------------
     # Not 0.0.0.0 for the wrapper, ever: it is an unauthenticated HTTP API that serves

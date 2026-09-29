@@ -36,8 +36,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import sys
-from collections.abc import Callable
+import tomllib
+from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
 
@@ -52,13 +54,14 @@ from hub.jobs import (
     IllegalTransition,
     Job,
     JobNotFound,
+    JobStatus,
     JobStore,
     Leaf,
     Progress,
 )
 from hub.ripper_host import RipperHost, RipperHostError
 from hub.state import HubState
-from hub.wrapper_supervisor import WrapperSupervisor, observe_readiness
+from hub.wrapper_supervisor import Readiness, WrapperSupervisor, observe_readiness
 
 #: How long the loop waits between finds of an empty queue. Short enough that a job enqueued
 #: and cancelled in the same breath is noticed promptly, long enough that an idle hub is not
@@ -99,6 +102,60 @@ POST_JOB_POLL_SECONDS = 0.5
 #: cancellation is accepted rather than refused.
 DRAIN_TIMEOUT_SECONDS = 300.0
 
+#: Poll interval for injected/adopted supervisors without a process-exit signal. The real
+#: supervisor wakes a rip directly when its child exits, so normal downloads do no polling.
+WRAPPER_GUARD_POLL_SECONDS = 0.5
+
+
+def download_root_from_format(value: str) -> Path:
+    """Return the static absolute root before the first format field.
+
+    The vendor receives a path template such as ``/library/{album_artist}/{album}``.
+    Only the prefix before the first field is the fixed output root. Do not call
+    ``resolve()`` here: a symlink is an operator-selected mount path, not permission to
+    compare a different physical tree. Parent traversal is rejected even when it appears
+    after a format field, because the template must not be able to escape the root.
+    """
+    if not isinstance(value, str) or not value.startswith("/"):
+        raise ValueError("download.dirPathFormat must be an absolute path")
+    if ".." in value.split("/"):
+        raise ValueError("download.dirPathFormat must not contain '..'")
+
+    prefix = value.split("{", 1)[0].rstrip("/") or "/"
+    root = Path(prefix)
+    if not root.is_absolute():
+        raise ValueError("download.dirPathFormat has no absolute static root")
+    # normpath is lexical; unlike Path.resolve it neither follows nor checks symlinks.
+    return Path(os.path.normpath(root))
+
+
+def validate_download_root(config_path: Path, library_roots: Sequence[Path]) -> None:
+    """Refuse startup unless the vendor's write root is covered by a scanned root."""
+    config_value = "<unavailable>"
+    roots_text = ", ".join(str(root) for root in library_roots) or "<none>"
+    try:
+        with config_path.open("rb") as stream:
+            config = tomllib.load(stream)
+        config_value = config["download"]["dirPathFormat"]
+        write_root = download_root_from_format(config_value)
+        contained = any(
+            write_root == root or write_root.is_relative_to(root)
+            for root in library_roots
+        )
+        if contained:
+            return
+        reason = f"write root {write_root} is outside all configured library roots"
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError, ValueError) as exc:
+        reason = str(exc)
+
+    raise RuntimeError(
+        "unsafe vendor download path: "
+        f"[download].dirPathFormat={config_value!r}; "
+        f"Settings.library_roots=[{roots_text}]; "
+        f"config={config_path}: {reason}"
+    )
+
+
 #: The AppleMusicDecrypt config the seam reads. Derived from this file's own location, never
 #: from the working directory, for the reason in `ripper_host`'s own docstring: the hub's CWD
 #: is `/app` in the container and `hub/` in a checkout, and both are wrong. And it must be
@@ -111,7 +168,9 @@ def vendor_config_path() -> Path:
 # --------------------------------------------------------------------------- #
 # Scheduler
 # --------------------------------------------------------------------------- #
-async def _worker(state, running, declined, budget) -> int:
+async def _worker(
+    state: HubState, running: dict[str, int], declined: set[int], budget: int
+) -> int:
     """Claim and run jobs until there is nothing left to claim, or `budget` is spent.
 
     One worker, looping -- rather than a pass that claims N and waits for the slowest -- so a
@@ -127,6 +186,11 @@ async def _worker(state, running, declined, budget) -> int:
     """
     ran = 0
     while ran < budget:
+        # Pause is a claim barrier, not a rip interruption. A job already handed to this
+        # worker is allowed to finish; the next loop iteration observes the flag before
+        # claiming anything else.
+        if state.queue_paused:
+            return ran
         # `exclude`, not "claim it and put it back". Releasing a row makes it the lowest
         # eligible id again, so the next claim hands it straight back, and both this call and
         # the release that preceded it are synchronous -- a worker that kept re-claiming
@@ -173,7 +237,7 @@ async def _worker(state, running, declined, budget) -> int:
     return ran
 
 
-async def run_pool(state) -> int:
+async def run_pool(state: HubState) -> int:
     """Run the queue through `rip_concurrency` workers. How many jobs it ran.
 
     **Why more than one.** Measured on this machine, not estimated: a 41.8 MB ALAC track
@@ -219,7 +283,7 @@ async def run_pool(state) -> int:
     return sum(results)
 
 
-async def run_one(state) -> bool:
+async def run_one(state: HubState) -> bool:
     """Claim and run at most one job. `True` if it did.
 
     Split out of the loop so that a caller -- a test, or an operator's one-shot -- can drive
@@ -290,7 +354,7 @@ async def _announce_if_idle(state: HubState) -> None:
     )
 
 
-async def _post_notification(url: str, payload: dict) -> bool:
+async def _post_notification(url: str, payload: dict[str, object]) -> bool:
     """One POST, five seconds, one retry. Both outcomes belong to the log, not the queue.
 
     A timeout is the expected failure mode of a webhook on the same LAN as the hub: the
@@ -298,7 +362,7 @@ async def _post_notification(url: str, payload: dict) -> bool:
     ceiling is the whole of the reliability budget -- the retry is the second opinion,
     and the next real transition will announce again anyway.
     """
-    for attempt in (False, True):
+    for _ in range(2):
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 response = await client.post(url, json=payload)
@@ -306,11 +370,88 @@ async def _post_notification(url: str, payload: dict) -> bool:
                 return True
         except Exception:  # noqa: BLE001 - a mailbox that is down is not a failed rip
             pass
-        if attempt:
-            return False
     return False
 
-async def _execute(state, job: Job) -> None:
+class _WrapperInterrupted(RipperHostError):
+    """The wrapper became unavailable while a rip was awaiting it."""
+
+    def __init__(self, readiness: Readiness) -> None:
+        self.readiness = readiness
+        super().__init__(
+            f"the wrapper became unavailable during this download ({readiness.kind})"
+            + (f": {readiness.detail}" if readiness.detail else "")
+        )
+
+
+async def _wait_for_wrapper_loss(supervisor) -> Readiness:
+    """Wait for the wrapper process or its status endpoint to become unavailable.
+
+    `no-account` is deliberately not wrapper loss: the wrapper is still answering `/status`,
+    and the in-flight RPC must be allowed to return its own `RipperHostError`. That keeps the
+    actionable upstream diagnosis on the parked job instead of replacing it with a generic
+    cancellation just because the readiness probe noticed the same signed-out state first.
+    """
+    wait_until_unavailable = getattr(supervisor, "wait_until_unavailable", None)
+    if callable(wait_until_unavailable):
+        while True:
+            readiness = await wait_until_unavailable()
+            if readiness.kind in {"down", "unreachable"}:
+                return readiness
+            # An adopted supervisor may report `no-account` immediately. Give the RPC time to
+            # finish before probing it again rather than spinning on the unchanged status.
+            await asyncio.sleep(WRAPPER_GUARD_POLL_SECONDS)
+
+    # Small test doubles and third-party supervisors need not implement the optimized
+    # process-exit signal. Probe those adapters while a job is active.
+    while True:
+        readiness = await observe_readiness(supervisor)
+        if readiness.kind in {"down", "unreachable"}:
+            return readiness
+        await asyncio.sleep(WRAPPER_GUARD_POLL_SECONDS)
+
+
+async def _run_with_wrapper_guard(state: HubState, runner, leaf: Leaf, *, force: bool) -> None:
+    """Cancel a rip if its wrapper disappears, so the job can be parked and retried."""
+    rip = asyncio.create_task(runner(leaf, force=force))
+    wrapper_loss = asyncio.create_task(_wait_for_wrapper_loss(state.supervisor))
+    try:
+        done, _ = await asyncio.wait(
+            (rip, wrapper_loss), return_when=asyncio.FIRST_COMPLETED
+        )
+        if rip in done:
+            try:
+                return await rip
+            except Exception:
+                if not wrapper_loss.done():
+                    # Let the process watcher consume an exit that caused this very error.
+                    await asyncio.sleep(0)
+                if not wrapper_loss.done():
+                    raise
+                readiness = wrapper_loss.result()
+                raise _WrapperInterrupted(readiness) from None
+
+        readiness = wrapper_loss.result()
+        # A completion in the same event-loop turn wins: the file may have finished just as
+        # the process exited, in which case retrying could overwrite a complete download.
+        if rip.done():
+            try:
+                return await rip
+            except Exception:
+                # A failed RPC is not a completed download. If the wrapper went down in
+                # the same turn, retain the retryable wrapper-loss classification.
+                raise _WrapperInterrupted(readiness) from None
+        rip.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await rip
+        raise _WrapperInterrupted(readiness)
+    finally:
+        for task in (rip, wrapper_loss):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(rip, wrapper_loss, return_exceptions=True)
+
+
+async def _execute(state: HubState, job: Job) -> None:
     """One job: find its leaf, decide whether it is on disk, and rip it or skip it."""
     leaf = await _leaf_for(state, job)
     if leaf is None:
@@ -346,7 +487,7 @@ async def _execute(state, job: Job) -> None:
     # merely unlikely.
     state.current_job = job.id
     try:
-        await runner(leaf, force=job.force)
+        await _run_with_wrapper_guard(state, runner, leaf, force=job.force)
     except Exception as exc:  # noqa: BLE001 - one job's failure is not the loop's
         # A wrapper that stops serving *during* a rip parks the job in `waiting` rather
         # than failing it. The discriminator is the wrapper's own observable state, never the
@@ -359,9 +500,12 @@ async def _execute(state, job: Job) -> None:
         # bug -- is not a token question, and parking one of those in `waiting` would retry it
         # for ever on a schedule while never once showing a failure, because `waiting` is not
         # terminal. The same bug as a swallowed exception with a nicer message.
-        reason, detail = (
-            await _park_reason(state) if isinstance(exc, RipperHostError) else (None, "")
-        )
+        if isinstance(exc, _WrapperInterrupted):
+            reason, detail = _park_reason_from_readiness(exc.readiness)
+        elif isinstance(exc, RipperHostError):
+            reason, detail = await _park_reason(state)
+        else:
+            reason, detail = None, ""
         if reason is not None:
             _park_for(state, job, exc, reason, detail)
         else:
@@ -376,7 +520,9 @@ async def _execute(state, job: Job) -> None:
     _mark(state, job, "done")
 
 
-def _park_for(state, job: Job, exc: Exception, reason: str, detail: str = "") -> None:
+def _park_for(
+    state: HubState, job: Job, exc: Exception, reason: str, detail: str = ""
+) -> None:
     """Put the job in `waiting`, with a message that is true of *this* reason.
 
     The rule "走行中ジョブは fail せず `waiting` へ入れ" -- a job interrupted by the wrapper going
@@ -409,7 +555,7 @@ def _park_for(state, job: Job, exc: Exception, reason: str, detail: str = "") ->
     )
 
 
-async def _park_reason(state) -> tuple[str | None, str]:
+async def _park_reason(state: HubState) -> tuple[str | None, str]:
     """Why the wrapper cannot serve a download right now, and what the probe said about it.
 
     Returns `(reason, detail)`. `reason` is `None` when a download could run, which is the only
@@ -454,7 +600,11 @@ async def _park_reason(state) -> tuple[str | None, str]:
     A failed probe is still `not ready` for parking purposes: unknown is not ready, and
     `waiting` is re-checked before the next claim, so the safe direction is to wait.
     """
-    readiness = await observe_readiness(state.supervisor)
+    return _park_reason_from_readiness(await observe_readiness(state.supervisor))
+
+
+def _park_reason_from_readiness(readiness: Readiness) -> tuple[str | None, str]:
+    """Map one observed readiness result to the queue's park-reason vocabulary."""
     if readiness.kind == "serving":
         return None, ""
     if readiness.kind == "unreachable":
@@ -497,7 +647,7 @@ PARK_MESSAGES = {
 }
 
 
-def _on_progress(state) -> Callable[[Progress], None]:
+def _on_progress(state: HubState) -> Callable[[Progress], None]:
     """The seam's `on_progress`, wired to a `mark` and a publish.
 
     Called from a worker thread, so it hops to the loop with `call_soon_threadsafe` rather
@@ -519,7 +669,7 @@ def _on_progress(state) -> Callable[[Progress], None]:
     return report
 
 
-def _apply_progress(state, job_id: int, progress: Progress) -> None:
+def _apply_progress(state: HubState, job_id: int, progress: Progress) -> None:
     """Write one progress reading and publish it. Runs on the loop.
 
     **Two ways this can be refused, and both are expected rather than exceptional (B2).** The
@@ -553,7 +703,7 @@ def _apply_progress(state, job_id: int, progress: Progress) -> None:
     _publish_job(state, job_id)
 
 
-async def _leaf_for(state, job: Job) -> Leaf | None:
+async def _leaf_for(state: HubState, job: Job) -> Leaf | None:
     """The `Leaf` for `job`, or `None` if it cannot be described any more.
 
     Two sources, in order. The registry holds the expansion this process made, which is the
@@ -594,18 +744,18 @@ async def _leaf_for(state, job: Job) -> Leaf | None:
     return None
 
 
-async def _filesystem_duplicate(state, leaf: Leaf) -> DuplicateHit | None:
+async def _filesystem_duplicate(state: HubState, leaf: Leaf) -> DuplicateHit | None:
     """The filesystem duplicate check on a real walk, in a worker thread.
 
     The rendered file name is produced on the loop and the walk happens off it: `os.walk`
-    over a 341 GB drive blocks for long enough to stall every other request and the SSE
+    over a 341 GB drive blocks for long enough to stall every other request and the WebSocket
     stream, and the rendered name needs `creart`, whose cache is not thread-safe.
     """
     rendered = state.ripper.render_song_filename(leaf)
     return await asyncio.to_thread(_find_duplicate, state, leaf, rendered)
 
 
-def _find_duplicate(state, leaf: Leaf, rendered: str) -> DuplicateHit | None:
+def _find_duplicate(state: HubState, leaf: Leaf, rendered: str) -> DuplicateHit | None:
     """The pure part of the duplicate check, given its three inputs and a scan.
 
     `rendered` is the *file name* `rip_song` would write, and it is passed through
@@ -652,7 +802,7 @@ def _skip_reason(hit: DuplicateHit) -> str:
     return f"duplicate:{'|'.join(hit.resolved)}"
 
 
-def _warn_degraded(state, scan) -> None:
+def _warn_degraded(state: HubState, scan) -> None:
     """Say so, once per change, when a configured root cannot be read.
 
     An unmounted external drive must be **loud**. `loose` dedup against the surviving
@@ -664,27 +814,21 @@ def _warn_degraded(state, scan) -> None:
     if current == state.degraded_roots:
         return
     state.degraded_roots = current
+    detail = ""
     if current:
-        state.broker.publish(
-            JOBS_CHANNEL,
-            {
-                "kind": "library",
-                "degraded_roots": list(current),
-                "detail": (
-                    f"these library roots could not be read: {', '.join(current)}. Downloads "
-                    f"continue and duplicates are still detected against the roots that are "
-                    f"there, but a track that lived on a missing drive will be downloaded "
-                    f"again. Check that the drive is mounted."
-                ),
-            },
+        detail = (
+            f"these library roots could not be read: {', '.join(current)}. Downloads "
+            f"continue and duplicates are still detected against the roots that are "
+            f"there, but a track that lived on a missing drive will be downloaded "
+            f"again. Check that the drive is mounted."
         )
-    else:
-        state.broker.publish(
-            JOBS_CHANNEL, {"kind": "library", "degraded_roots": [], "detail": ""}
-        )
+    state.broker.publish(
+        JOBS_CHANNEL,
+        {"kind": "library", "degraded_roots": list(current), "detail": detail},
+    )
 
 
-def _mark(state, job: Job, status: str, **fields) -> None:
+def _mark(state: HubState, job: Job, status: JobStatus, **fields: object) -> None:
     """Write the terminal (or intermediate) status and tell every open tab.
 
     `store.get` afterwards rather than reusing the local `job`, because `mark` computes
@@ -693,13 +837,13 @@ def _mark(state, job: Job, status: str, **fields) -> None:
     seconds ago as still running.
     """
 
-    state.jobs.mark(job.id, status, **fields)  # type: ignore[arg-type]
+    state.jobs.mark(job.id, status, **fields)
     current = state.jobs.get(job.id)
     if current is not None:
         state.broker.publish(JOBS_CHANNEL, {"kind": "job", "job": job_to_dict(current)})
 
 
-async def scheduler_loop(state) -> None:
+async def scheduler_loop(state: HubState) -> None:
     """Claim, run, sleep; until the shutdown event is set.
 
     **The readiness probe happens immediately before every claim, not on a timer.** That is
@@ -721,6 +865,9 @@ async def scheduler_loop(state) -> None:
     """
     announced: str | None = None
     while not state.stopping.is_set():
+        if state.queue_paused:
+            await _sleep_or_stop(state, IDLE_POLL_SECONDS)
+            continue
         # A SQLite read, not an HTTP request, and that distinction is the whole fix. An idle
         # hub -- no `queued` and no `waiting` job -- is the only state in which readiness
         # cannot matter, so it asks the database and not the wrapper.
@@ -780,7 +927,7 @@ async def scheduler_loop(state) -> None:
         )
 
 
-def _has_actionable(state) -> bool:
+def _has_actionable(state: HubState) -> bool:
     """Whether the loop has anything to do at all: a `queued` or a `waiting` job.
 
     Two statuses, and **`waiting` is the one that was missing (B1a).** The check exists to
@@ -803,7 +950,7 @@ def _has_actionable(state) -> bool:
     )
 
 
-async def _wrapper_problem(state) -> str | None:
+async def _wrapper_problem(state: HubState) -> str | None:
     """`None` when a download could run, else `"no-account"` or `"unavailable"`.
 
     The supervisor's own `status()`, not the cached `state` this module keeps, because the
@@ -818,7 +965,7 @@ async def _wrapper_problem(state) -> str | None:
     return current["problem"]
 
 
-async def _sleep_or_stop(state, seconds: float) -> None:
+async def _sleep_or_stop(state: HubState, seconds: float) -> None:
     """Sleep, but wake immediately on shutdown so a `docker stop` is not a 0.5 s stall."""
     with contextlib.suppress(asyncio.TimeoutError):
         await asyncio.wait_for(state.stopping.wait(), timeout=seconds)
@@ -871,29 +1018,34 @@ def create_app(
         # some contexts (a sync test, a REPL), and the progress callback needs the loop that
         # is actually running the scheduler. It is read and closed-checked on every tick.
         state.loop = asyncio.get_running_loop()
-        if autostart:
-            # 1. The wrapper. A failure is recorded, not raised: a fresh install has no Apple
-            #    account, and the login page is how that gets fixed.
-            from hub.wrapper_supervisor import SupervisorError
-
-            try:
-                await state.supervisor.start()
-            except SupervisorError as exc:
-                state.startup_error = str(exc)
-                _log(state, f"the wrapper did not start: {exc}")
-            else:
-                state.startup_error = None
-
-            # 2. The client. A failure here *is* fatal for the process -- `creart` cannot
-            #    un-register a creator, so a half-finished registration turns every later
-            #    attempt into a `ValueError` about a duplicate target. The seam's own message
-            #    says so; letting it propagate is what makes the container restart.
-            await state.ripper.start()
-
-            # 3. The scheduler, last: it is the only thing that needs both.
-            state.scheduler = asyncio.create_task(scheduler_loop(state))
-
         try:
+            if autostart:
+                # The vendor's write target and the hub's scan roots must overlap before any
+                # long-lived process is started. Otherwise downloads can silently accumulate
+                # in a tree that deduplication never scans.
+                validate_download_root(state.ripper_config_path, state.settings.library_roots)
+
+                # 1. The wrapper. A failure is recorded, not raised: a fresh install has no Apple
+                #    account, and the login page is how that gets fixed.
+                from hub.wrapper_supervisor import SupervisorError
+
+                try:
+                    await state.supervisor.start()
+                except SupervisorError as exc:
+                    state.startup_error = str(exc)
+                    _log(state, f"the wrapper did not start: {exc}")
+                else:
+                    state.startup_error = None
+
+                # 2. The client. A failure here *is* fatal for the process -- `creart` cannot
+                #    un-register a creator, so a half-finished registration turns every later
+                #    attempt into a `ValueError` about a duplicate target. The seam's own message
+                #    says so; letting it propagate is what makes the container restart.
+                await state.ripper.start()
+
+                # 3. The scheduler, last: it is the only thing that needs both.
+                state.scheduler = asyncio.create_task(scheduler_loop(state))
+
             yield
         finally:
             if state.scheduler is not None:
@@ -999,7 +1151,7 @@ def create_app(
     return app
 
 
-async def _drain(state) -> None:
+async def _drain(state: HubState) -> None:
     """Stop the scheduler and wait for the job it is running.
 
     Awaiting, not cancelling. `RipperHost.close()` refuses while a rip is in flight and its
@@ -1028,26 +1180,21 @@ async def _drain(state) -> None:
         await task
 
 
-def _jobs_counts(state) -> dict:
+def _jobs_counts(state: HubState) -> dict[str, int]:
     """How many jobs are in each state. One table read, no cache.
 
     `total` is the sum rather than a separate `COUNT(*)`, so it cannot disagree with the
     parts if a status is ever added to the store's vocabulary without being added here.
     """
-    counts: dict[str, int] = {}
-    jobs = state.jobs.list()
-    for job in jobs:
-        counts[job.status] = counts.get(job.status, 0) + 1
-    counts["total"] = len(jobs)
-    return counts
+    return state.jobs.counts()
 
 
-def _log(state, line: str) -> None:
+def _log(state: HubState, line: str) -> None:
     """The wrapper's own output, onto the stream and onto stderr.
 
     **The supervisor scrubs this before it gets here** (R6: credentials and tokens are
     replaced before the line leaves the child's pipe), which is why the hub can display a
-    child's log lines at all. It is published on the jobs channel so one SSE stream carries
+    child's log lines at all. It is published on the jobs channel so one WebSocket carries
     the queue and the log together, in the order they happened.
     """
     state.broker.publish(JOBS_CHANNEL, {"kind": "log", "line": line})
@@ -1067,7 +1214,7 @@ def main() -> None:
     **Single worker, and it is not a default that can be overridden by accident.**
     Everything the app owns lives on `app.state`, and `app.state` is the declared
     `hub.state.HubState`: the broker, the job store, the leaf registry, the scheduler
-    and the session generation. Two workers would be two brokers (so an SSE
+    and the session generation. Two workers would be two brokers (so a WebSocket
     subscriber would see only its own worker's events), two schedulers racing `claim_next`
     (which is atomic, so no double rip -- but two leaf registries, so a job could be claimed
     by a worker that never expanded it), and two session generations, so a logout on one

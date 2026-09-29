@@ -50,6 +50,9 @@ class AlbumDir:
     name: str
     artist: str | None
     track_keys: frozenset[str]
+    # Original audio basenames, retained only so the read-only duplicate report can show
+    # human-readable examples alongside its normalized matching keys.
+    track_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,6 +255,7 @@ def _walk_root(root_index: int, root: Path) -> Iterator[AlbumDir]:
             name=name,
             artist=_artist(parts),
             track_keys=track_keys,
+            track_names=tuple(sorted(audio)),
         )
 
 

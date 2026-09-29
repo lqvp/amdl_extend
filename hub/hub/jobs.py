@@ -590,7 +590,7 @@ class JobStore:
             # re-queues the row the very next statement will hand out again, and a caller
             # looping over claims has no way to tell that apart from progress. Both are
             # synchronous, so a loop that keeps re-claiming never reaches an `await` and the
-            # whole event loop stops -- the SSE stream, every request and `docker stop`'s
+            # whole event loop stops -- the WebSocket stream, every request and `docker stop`'s
             # grace period with them. Excluding makes the loop's next claim return the *next*
             # eligible row, or `None`, which is the answer a loop can act on.
             #
@@ -821,6 +821,75 @@ class JobStore:
         for an id the caller made up is a 404 and not a bug in the caller."""
         row = self._conn.execute("SELECT * FROM job WHERE id = ?", (job_id,)).fetchone()
         return None if row is None else _job_from_row(row)
+
+    def get_many(self, job_ids: Sequence[int]) -> list[Job]:
+        """Fetch selected rows for browser hydration, never the entire job table."""
+        ids = tuple(dict.fromkeys(job_ids))
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        rows = self._conn.execute(
+            f"SELECT * FROM job WHERE id IN ({placeholders}) ORDER BY id", ids
+        ).fetchall()
+        return [_job_from_row(row) for row in rows]
+
+    def counts(self) -> dict[str, int]:
+        """Count all statuses in SQL so summaries do not materialize the queue."""
+        counts = {
+            row["status"]: row["n"]
+            for row in self._conn.execute(
+                "SELECT status, COUNT(*) AS n FROM job GROUP BY status"
+            ).fetchall()
+        }
+        counts["total"] = sum(counts.values())
+        return counts
+
+    def queue_window(self, terminal_limit: int = 100) -> dict:
+        """All active rows plus only the newest `terminal_limit` terminal rows.
+
+        Active work is never hidden behind history pagination. Finished rows use a stable id
+        cursor and the returned page is ordered oldest-first like the main queue table.
+        """
+        if not 1 <= terminal_limit <= 1000:
+            raise ValueError("terminal_limit must be between 1 and 1000")
+        active_rows = self._conn.execute(
+            "SELECT * FROM job WHERE status IN ('queued','waiting','running') ORDER BY id"
+        ).fetchall()
+        terminal_rows = self._conn.execute(
+            "SELECT * FROM job WHERE status IN ('done','failed','skipped','cancelled') "
+            "ORDER BY id DESC LIMIT ?", (terminal_limit + 1,)
+        ).fetchall()
+        has_more = len(terminal_rows) > terminal_limit
+        recent = terminal_rows[:terminal_limit]
+        all_jobs = [_job_from_row(row) for row in active_rows]
+        all_jobs.extend(_job_from_row(row) for row in reversed(recent))
+        all_jobs.sort(key=lambda job: job.id)
+        return {
+            "jobs": all_jobs,
+            "history_has_more": has_more,
+            "history_before_id": min((row["id"] for row in recent), default=None),
+        }
+
+    def history_page(self, *, before_id: int | None = None, limit: int = 100) -> dict:
+        """One older terminal-job page; active jobs are always served separately."""
+        if not 1 <= limit <= 500:
+            raise ValueError("history page limit must be between 1 and 500")
+        where = "status IN ('done','failed','skipped','cancelled')"
+        params: tuple[int, ...] = ()
+        if before_id is not None:
+            where += " AND id < ?"
+            params = (before_id,)
+        rows = self._conn.execute(
+            f"SELECT * FROM job WHERE {where} ORDER BY id DESC LIMIT ?",
+            (*params, limit + 1),
+        ).fetchall()
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        return {
+            "jobs": [_job_from_row(row) for row in reversed(page)],
+            "has_more": has_more,
+            "before_id": min((row["id"] for row in page), default=None),
+        }
 
     def list(
         self,

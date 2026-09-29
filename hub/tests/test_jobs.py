@@ -117,7 +117,7 @@ async def test_broker_delivers_to_a_late_subscriber_the_current_snapshot():
     async for chunk in broker.subscribe("jobs"):
         got.append(chunk)
         break
-    assert '"snapshot"' in got[0] and got[0].startswith("data: ")
+    assert json.loads(got[0]) == {"kind": "snapshot", "jobs": []}
 
 
 # --- the interfaces `ripper_host.py` and `resolver.py` import ---------------
@@ -1001,7 +1001,7 @@ def frame(payload: dict) -> str:
     Deliberately not the broker's own `frame()`: restating the contract means a change to the
     implementation fails the test that depends on it, rather than both moving together.
     """
-    return f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+    return json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
 
 
 # Long enough that a loaded machine does not cause a spurious failure, short enough that a
@@ -1029,6 +1029,9 @@ async def parked(agen):
     task = asyncio.ensure_future(
         asyncio.wait_for(agen.__anext__(), PARK_TIMEOUT)
     )
+    # `wait_for` wraps the generator read in its own task; one loop turn starts that
+    # wrapper, and the second actually enters `subscribe()` and registers the listener.
+    await asyncio.sleep(0)
     await asyncio.sleep(0)
     assert not task.done(), "the subscriber answered before anything was published"
     return task
@@ -1037,7 +1040,7 @@ async def parked(agen):
 async def unpark(task):
     """Cancel a parked read and let it settle, so `aclose()` is not called on a running
     generator. A client that disconnects mid-stream is exactly this: the request task is
-    cancelled while the SSE generator sits in `await queue.get()`."""
+    cancelled while the WebSocket event generator sits in `await queue.get()`."""
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
@@ -1054,6 +1057,33 @@ async def test_a_live_message_reaches_a_subscriber_that_is_already_waiting():
     task = await parked(agen)
     broker.publish("jobs", {"kind": "progress", "id": 1})
     assert await settle(task) == frame({"kind": "progress", "id": 1})
+    await agen.aclose()
+
+
+async def test_a_per_subscriber_initial_message_is_not_broadcast_or_replayed():
+    broker = EventBroker()
+    first = broker.subscribe(
+        "jobs", replay=False, initial=lambda: {"kind": "snapshot", "jobs": []}
+    )
+    assert await next_chunk(first) == frame({"kind": "snapshot", "jobs": []})
+
+    second = broker.subscribe("jobs")
+    second_task = await parked(second)
+
+    broker.publish("jobs", {"kind": "job", "id": 1})
+    assert await next_chunk(first) == frame({"kind": "job", "id": 1})
+    assert await settle(second_task) == frame({"kind": "job", "id": 1})
+    await first.aclose()
+    await second.aclose()
+
+
+async def test_a_live_only_subscriber_skips_historical_messages():
+    broker = EventBroker()
+    broker.publish("jobs", {"kind": "job", "id": "stale"})
+    agen = broker.subscribe("jobs", replay=False)
+    task = await parked(agen)
+    broker.publish("jobs", {"kind": "job", "id": "fresh"})
+    assert await settle(task) == frame({"kind": "job", "id": "fresh"})
     await agen.aclose()
 
 
@@ -1113,7 +1143,7 @@ async def test_the_backlog_is_the_last_fifty_messages_and_no_more():
     agen = broker.subscribe("jobs")
     try:
         got = await read(agen, HISTORY)
-        assert [json.loads(chunk[6:])["n"] for chunk in got] == list(range(10, HISTORY + 10))
+        assert [json.loads(chunk)["n"] for chunk in got] == list(range(10, HISTORY + 10))
         with pytest.raises(TimeoutError):
             await next_chunk(agen, 0.05)
     finally:
@@ -1201,7 +1231,7 @@ async def test_a_subscriber_that_falls_too_far_behind_is_told_rather_than_fed():
     Unbounded, a browser tab that stopped reading grew its queue for the life of the process --
     measured at 200,000 retained frames, about 8 MB, for one subscriber. What the broker does
     *not* do is choose the policy: it counts what the subscriber missed and raises
-    `SubscriberOverrun` on its next turn, so the API layer's SSE handler decides whether its
+    `SubscriberOverrun` on its next turn, so the API layer's WebSocket handler decides whether its
     client reconnects, re-reads a snapshot, or renders "connection lost". The broker cannot
     know
     whether the stream is a queue state (where a lost message costs nothing) or a log line
@@ -1241,7 +1271,7 @@ async def test_publishing_to_a_full_subscriber_does_not_raise_and_does_not_grow(
     replay = broker.subscribe("jobs")
     try:
         replayed = await read(replay, published)
-        assert [json.loads(chunk[len("data: ") :])["n"] for chunk in replayed] == list(
+        assert [json.loads(chunk)["n"] for chunk in replayed] == list(
             range(published)
         )
     finally:
@@ -1261,7 +1291,7 @@ async def test_a_subscriber_within_its_queue_is_never_told_it_overran():
     for n in range(3):
         broker.publish("jobs", {"n": n})
     delivered = await settle(task)
-    assert json.loads(delivered[len("data: ") :]) == {"n": 0}
+    assert json.loads(delivered) == {"n": 0}
     assert broker.subscriber_count("jobs") == 1
     await agen.aclose()
 
@@ -1269,7 +1299,7 @@ async def test_a_subscriber_within_its_queue_is_never_told_it_overran():
 async def test_the_default_queue_takes_a_whole_burst_without_complaint():
     """The default capacity is a capacity, and it is large enough to be invisible.
 
-    `EventBroker()` with no arguments is what the SSE handler will write, so the default is
+    `EventBroker()` with no arguments is what the WebSocket handler will write, so the default is
     what has to be right: a subscriber that is keeping up must never see
     `SubscriberOverrun`, or the signal becomes noise and the handler learns to ignore it. A
     full default queue's worth of messages --
@@ -1283,7 +1313,7 @@ async def test_the_default_queue_takes_a_whole_burst_without_complaint():
         broker.publish("jobs", {"n": n})
     first = await settle(task)
     got = await read(agen, SUBSCRIBER_QUEUE_SIZE - 1)
-    assert [json.loads(chunk[len("data: ") :])["n"] for chunk in [first, *got]] == list(
+    assert [json.loads(chunk)["n"] for chunk in [first, *got]] == list(
         range(SUBSCRIBER_QUEUE_SIZE)
     )
     assert broker.subscriber_count("jobs") == 1
@@ -1314,16 +1344,8 @@ async def test_a_subscriber_that_is_never_started_receives_nothing():
     assert broker.subscriber_count("jobs") == 0
 
 
-async def test_a_frame_is_one_sse_data_field_whatever_the_payload_contains():
-    """SSE framing is the one thing here that fails silently if it is wrong.
-
-    A payload carrying a newline, a carriage return, or a leading `data:` would break the
-    stream if it were interpolated raw: the client would see two fields, and the second one
-    would be dropped or shown as a separate message. `json.dumps` escapes all three inside
-    strings, so a frame is always a single `data:` line closed by exactly one blank line, and
-    this holds the payloads that would break it -- including a real Japanese album name, which
-    must not be escaped into `\\uXXXX` either.
-    """
+async def test_a_message_is_one_json_document_whatever_the_payload_contains():
+    """Newlines stay inside JSON strings, and Japanese text stays readable."""
     broker = EventBroker()
     payload = {
         "line": "a\nb\r\nc",
@@ -1338,11 +1360,9 @@ async def test_a_frame_is_one_sse_data_field_whatever_the_payload_contains():
         chunk = await next_chunk(agen)
     finally:
         await agen.aclose()
-    assert chunk.startswith("data: ") and chunk.endswith("\n\n")
-    assert chunk.count("\n\n") == 1
-    assert chunk[:-2].count("\n") == 0
-    assert json.loads(chunk[len("data: ") : -2]) == payload
+    assert json.loads(chunk) == payload
     assert "薄塩指数" in chunk
+    assert "\\n" in chunk and "\\r" in chunk
 
 
 def test_a_payload_that_is_not_json_fails_at_publish_time():
@@ -1350,7 +1370,7 @@ def test_a_payload_that_is_not_json_fails_at_publish_time():
 
     A message that cannot be serialised is a bug in the publisher -- a `Path` or a `Job` that
     was not converted. Surfacing it there names the caller; raising it inside the subscriber
-    would instead look like a broken browser connection and would take the SSE stream down
+    would instead look like a broken browser connection and would take the WebSocket down
     with it.
     """
     broker = EventBroker()
@@ -1358,11 +1378,11 @@ def test_a_payload_that_is_not_json_fails_at_publish_time():
         broker.publish("jobs", {"when": object()})
 
 
-# --- what the SSE layer will serialise -------------------------------------
+# --- what the WebSocket layer will serialise -------------------------------
 
 
 def test_every_public_object_survives_a_json_round_trip(tmp_path):
-    """The SSE layer puts these straight into an SSE payload and into a JSON response.
+    """The WebSocket layer puts these straight into a JSON payload and into a response.
 
     `asdict` is the call it will make, and `force` is the field most likely to break it: a
     `bool` in Python and an INTEGER in the row, where a `1` in place of a `true` is a silent
@@ -1528,3 +1548,26 @@ def test_requeue_does_not_count_a_row_that_is_already_queued(tmp_path):
     assert result.requeued == [ids["failed"]]
     assert ids["queued"] not in result.requeued
     assert ids["queued"] not in result.refused
+
+
+def test_queue_window_keeps_every_active_job_and_pages_old_terminal_history(tmp_path):
+    store = JobStore(tmp_path / "window.db")
+    leaves = [leaf(str(index)) for index in range(1, 8)]
+    created = store.create_batch("u", "album", leaves, force=False).created
+    for job_id in created[:4]:
+        store.mark(job_id, "done")
+    store.mark(created[4], "waiting")
+    store.mark(created[5], "running")
+
+    window = store.queue_window(terminal_limit=2)
+    assert [job.id for job in window["jobs"]] == created[2:]
+    assert window["history_has_more"] is True
+    assert window["history_before_id"] == created[2]
+    assert store.counts() == {"done": 4, "waiting": 1, "running": 1, "queued": 1, "total": 7}
+
+    older = store.history_page(before_id=window["history_before_id"], limit=1)
+    assert [job.id for job in older["jobs"]] == [created[1]]
+    assert older["has_more"] is True
+    oldest = store.history_page(before_id=older["before_id"], limit=10)
+    assert [job.id for job in oldest["jobs"]] == [created[0]]
+    assert oldest["has_more"] is False

@@ -1,13 +1,14 @@
-/* amd-hub's client, in one file and about six hundred lines.
+/* amd-hub's client, in one file.
  *
  * No HTMX. The brief named server-rendered HTMX templates, and the server-rendered half is
  * what is here -- every page arrives complete from Jinja2 and every action is a form that
- * works without this file. What is missing is the HTMX *runtime*: htmx's SSE extension is
- * what the live queue would use, and a ~3 KB script fetched from a CDN at page load is a
- * worse trade for a tool on a home LAN than a script this size that uses the platform's own
- * `EventSource`. So the interactive half is native, and the templates use `data-action`
- * attributes rather than `hx-*` ones -- a `hx-post` on a page with no htmx silently does
- * nothing, which is the worst of both.
+ * works without this file. What is missing is the HTMX *runtime*: htmx's live-update
+ * extensions would otherwise provide the queue connection, and a ~3 KB script fetched from
+ * a CDN at page load is a worse trade for a tool on a home LAN than native WebSocket support.
+ * The queue socket
+ * reconnects with backoff and receives a fresh snapshot after every reconnect. The templates
+ * use `data-action` attributes rather than `hx-*` ones -- a `hx-post` on a page with no htmx
+ * silently does nothing, which is the worst of both.
  *
  * (This line used to say "about a hundred lines", and said so for long enough that it had
  * become the file's least accurate statement. A header that understates the file is not
@@ -15,10 +16,9 @@
  *
  * The two things this file must not get wrong:
  *
- *   - the snapshot. The stream sends a full queue first and then one change at a time, so a
- *     reconnect is a resync rather than a patch. `replaceRows` is therefore only ever called
- *     for a snapshot, and `upsertRow` otherwise; applying a snapshot as a merge would leave
- *     rows the user just cancelled on screen.
+ *   - the snapshot. The stream sends every active job and a bounded recent terminal window,
+ *     then one change at a time. A reconnect replaces that window and rehydrates history pages
+ *     the user already opened; applying a snapshot as a merge would leave deleted rows visible.
  *   - the rows. `textContent` everywhere, never `innerHTML`. `skip_reason` holds directory
  *     names read off the filesystem, and a user-curated library really does contain
  *     directories called `<img src=x onerror=...>`. The server escapes them too; this is the
@@ -77,12 +77,145 @@
     if (target) copyText(target);
   });
 
+  initLibraryPage();
+
+  function initLibraryPage() {
+    var search = document.getElementById("library-search");
+    var rows = document.getElementById("library-albums");
+    if (!search || !rows) return;
+    var count = document.getElementById("library-result-count");
+    var timer = null;
+    var request = 0;
+
+    function text(tag, value, className) {
+      var node = document.createElement(tag);
+      if (className) node.className = className;
+      node.textContent = value == null ? "" : String(value);
+      return node;
+    }
+
+    function drawAlbums(albums, total) {
+      rows.replaceChildren();
+      albums.forEach(function (album) {
+        var tr = document.createElement("tr");
+        tr.appendChild(text("td", album.artist || "—"));
+        tr.appendChild(text("td", album.name || "—"));
+        tr.appendChild(text("td", album.tracks, "num"));
+        var pathCell = text("td", "", "small");
+        pathCell.appendChild(text("code", album.path));
+        var copy = text("button", "copy");
+        copy.type = "button";
+        copy.dataset.action = "copy-text";
+        copy.dataset.text = album.path;
+        copy.title = "copy this path";
+        pathCell.appendChild(copy);
+        tr.appendChild(pathCell);
+        rows.appendChild(tr);
+      });
+      if (!albums.length) {
+        var empty = document.createElement("tr");
+        empty.appendChild(text("td", "No matching album directories.", "muted"));
+        empty.firstChild.colSpan = 4;
+        rows.appendChild(empty);
+      }
+      if (count) count.textContent = albums.length + " of " + total + " album directories";
+    }
+
+    function runSearch() {
+      var current = ++request;
+      var url = "/api/library/albums?q=" + encodeURIComponent(search.value);
+      fetch(url, { credentials: "same-origin" }).then(function (response) {
+        if (!response.ok) throw new Error("Library search failed (" + response.status + ")");
+        return response.json();
+      }).then(function (data) {
+        if (current === request) drawAlbums(data.albums, data.total_albums);
+      }).catch(function (error) {
+        if (current === request && count) count.textContent = error.message;
+      });
+    }
+
+    search.addEventListener("input", function () {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(runSearch, 160);
+    });
+
+    var duplicateButton = document.getElementById("library-duplicates-toggle");
+    var report = document.getElementById("duplicate-report");
+    if (duplicateButton && report) {
+      duplicateButton.addEventListener("click", function () {
+        report.hidden = false;
+        duplicateButton.disabled = true;
+        report.replaceChildren(text("p", "Scanning for possible name matches…", "muted"));
+        fetch("/api/library/duplicates", { credentials: "same-origin" }).then(function (response) {
+          if (!response.ok) throw new Error("Duplicate report failed (" + response.status + ")");
+          return response.json();
+        }).then(function (data) {
+          report.replaceChildren();
+          report.appendChild(text("p", data.warning, "warning"));
+          report.appendChild(text("p", data.candidate_count + " possible match groups"));
+          var list = document.createElement("ul");
+          list.className = "duplicate-list";
+          data.candidates.forEach(function (candidate) {
+            var item = document.createElement("li");
+            item.appendChild(text("strong", candidate.album_name + " — " + candidate.track_name));
+            var paths = document.createElement("ul");
+            candidate.directories.forEach(function (directory) {
+              var path = document.createElement("li");
+              path.appendChild(text("code", directory.path));
+              var copy = text("button", "copy", "copy");
+              copy.type = "button";
+              copy.dataset.action = "copy-text";
+              copy.dataset.text = directory.path;
+              path.appendChild(copy);
+              paths.appendChild(path);
+            });
+            item.appendChild(paths);
+            list.appendChild(item);
+          });
+          if (!data.candidates.length) report.appendChild(text("p", "No candidate groups found.", "muted"));
+          else report.appendChild(list);
+        }).catch(function (error) {
+          report.replaceChildren(text("p", error.message, "error"));
+        }).finally(function () { duplicateButton.disabled = false; });
+      });
+    }
+  }
+
   var body = document.getElementById("queue-body");
   if (!body) return;
 
   var logPane = document.getElementById("log");
   var state = document.getElementById("stream-state");
+  var queueTools = document.getElementById("queue-tools");
+  var queueSearch = document.getElementById("queue-search");
+  var queueStatus = document.getElementById("queue-status-filter");
+  var queueVisibleCount = document.getElementById("queue-visible-count");
+  var queueTableWrap = document.getElementById("queue-table-wrap");
+  var queueEmpty = document.getElementById("queue-empty");
+  var queueNoResults = document.getElementById("queue-no-results");
+  var queueSummary = document.getElementById("queue-summary");
   var jobs = new Map();
+  var jobRevisions = new Map();
+  var queueCounts = null;
+  var historyLoadedIds = new Set();
+  var historyBeforeId = null;
+  var historyHasMore = false;
+  var historyLoading = false;
+  var historyTools = document.getElementById("queue-history-tools");
+  var historyButton = document.getElementById("queue-load-history");
+  var historyState = document.getElementById("queue-history-state");
+  var pauseButton = document.getElementById("queue-pause");
+  var resumeButton = document.getElementById("queue-resume");
+  var pauseState = document.getElementById("queue-pause-state");
+  function setQueuePaused(paused) {
+    if (pauseButton) pauseButton.hidden = Boolean(paused);
+    if (resumeButton) resumeButton.hidden = !paused;
+    if (pauseState) pauseState.textContent = paused ? "Paused — running downloads will finish." : "";
+  }
+  if (historyTools) {
+    historyBeforeId = Number(historyTools.dataset.beforeId) || null;
+    historyHasMore = historyTools.dataset.hasMore === "true";
+  }
 
   // -- rows ---------------------------------------------------------------
 
@@ -187,6 +320,41 @@
    * frame -- so a row the server rendered correctly is replaced by one this function built.
    * `test_the_scripts_row_builder_agrees_with_the_template` is what keeps them in step. */
   var FINISHED_STATUSES = ["done", "failed", "skipped", "cancelled"];
+  var QUEUE_STATUS_ORDER = ["queued", "waiting", "running", "done", "failed", "skipped", "cancelled"];
+
+  function updateQueueSummary() {
+    if (!queueSummary) return;
+    var counts = Object.create(null);
+    if (queueCounts) {
+      Object.keys(queueCounts).forEach(function (status) {
+        if (status !== "total") counts[status] = queueCounts[status];
+      });
+    } else {
+      body.querySelectorAll("tr[data-job-id]").forEach(function (row) {
+        var status = row.querySelector(".status-cell .status");
+        if (!status) return;
+        var name = status.textContent.trim();
+        counts[name] = (counts[name] || 0) + 1;
+      });
+    }
+    var statuses = QUEUE_STATUS_ORDER.concat(Object.keys(counts).filter(function (status) {
+      return QUEUE_STATUS_ORDER.indexOf(status) === -1;
+    }));
+    queueSummary.textContent = "";
+    statuses.forEach(function (status) {
+      if (!counts[status]) return;
+      var button = el("button", "count");
+      button.type = "button";
+      button.dataset.count = status;
+      button.dataset.action = "filter-status";
+      button.dataset.status = status;
+      button.setAttribute("aria-pressed", queueStatus && queueStatus.value === status ? "true" : "false");
+      button.title = "Filter the queue to " + status + " jobs";
+      button.appendChild(el("span", "count-n", counts[status]));
+      button.appendChild(document.createTextNode(" " + status));
+      queueSummary.appendChild(button);
+    });
+  }
 
   /* The age label. `created_at` is already in the job JSON -- `asdict(Job)`, and the column
    * was made browser-parseable for exactly this -- and the label ticks every five seconds
@@ -237,24 +405,164 @@
     return tr;
   }
 
+  function bumpJobRevision(id) {
+    jobRevisions.set(id, (jobRevisions.get(id) || 0) + 1);
+  }
+
+  function upsertIfUnchanged(job, revision) {
+    if (job && (jobRevisions.get(job.id) || 0) === revision) upsertRow(job);
+  }
+
   function upsertRow(job) {
+    bumpJobRevision(job.id);
     jobs.set(job.id, job);
     var row = document.getElementById("job-" + job.id);
     if (row) body.replaceChild(buildRow(job), row);
     else body.appendChild(buildRow(job));
-    // Rows arrive over SSE as well as in the snapshot, so the "hide finished" filter has to
-    // be applied on every path that changes a row. A job that finishes while the filter is
-    // on must disappear, not sit there looking unfinished.
-    applyFinishedFilter();
+    updateQueueSummary();
+    // Re-apply search, status and finished filters whenever a live row changes.
+    applyQueueFilters();
   }
 
-  /* A snapshot *replaces* the table. It is the whole queue as of one moment, so merging it
-   * would leave rows for jobs that have since been deleted on screen for ever. */
+  function removeJobs(ids) {
+    (ids || []).forEach(function (id) {
+      bumpJobRevision(id);
+      jobs.delete(id);
+      var row = document.getElementById("job-" + id);
+      if (row) row.remove();
+    });
+    updateQueueSummary();
+    applyQueueFilters();
+  }
+
+  var hydratingJobs = new Map();
+
+  function hydrateJobs(ids) {
+    var wanted = [];
+    var waiting = [];
+    var seen = new Set();
+    (ids || []).forEach(function (id) {
+      if (seen.has(id) || jobs.has(id)) return;
+      seen.add(id);
+      var pending = hydratingJobs.get(id);
+      if (pending) waiting.push(pending);
+      else wanted.push(id);
+    });
+    if (!wanted.length) return Promise.all(waiting);
+    var pendingRequest;
+    var chunks = [];
+    for (var start = 0; start < wanted.length; start += 500) {
+      chunks.push(wanted.slice(start, start + 500));
+    }
+    pendingRequest = Promise.all(chunks.map(function (chunk) {
+      var params = chunk.map(function (id) { return "ids=" + encodeURIComponent(id); }).join("&");
+      return fetch("/api/jobs/lookup?" + params, { credentials: "same-origin" }).then(function (response) {
+        if (!response.ok) throw new Error("queue refresh failed with " + response.status);
+        return response.json();
+      }).then(function (data) {
+        (data.jobs || []).forEach(function (job) {
+          // A WebSocket update may have overtaken this request. Never replace a newer live
+          // row with the older copy from an ID lookup.
+          if (!jobs.has(job.id)) upsertRow(job);
+        });
+      });
+    }))
+      .catch(function () {
+        log("Could not refresh the requested rows; reconnecting will reload the queue.");
+      })
+      .finally(function () {
+        wanted.forEach(function (id) {
+          if (hydratingJobs.get(id) === pendingRequest) hydratingJobs.delete(id);
+        });
+      });
+    wanted.forEach(function (id) { hydratingJobs.set(id, pendingRequest); });
+    return Promise.all(waiting.concat([pendingRequest]));
+  }
+
+  /* A snapshot replaces the active/recent window. Older terminal pages are rehydrated by ID
+   * after reconnect so rows deleted while offline do not survive as stale client-side cache. */
+  function updateHistoryWindow(data, reconnect) {
+    var previousCursor = historyBeforeId;
+    var previousHasMore = historyHasMore;
+    var hadLoadedHistory = historyLoadedIds.size > 0;
+    if (!hadLoadedHistory || !reconnect) {
+      historyBeforeId = data.history_before_id || null;
+      historyHasMore = Boolean(data.history_has_more);
+    } else {
+      historyBeforeId = previousCursor;
+      historyHasMore = previousHasMore;
+    }
+    if (historyTools) {
+      historyTools.hidden = !historyHasMore;
+      historyTools.dataset.beforeId = historyBeforeId || "";
+      historyTools.dataset.hasMore = historyHasMore ? "true" : "false";
+    }
+  }
+
   function replaceRows(list) {
+    jobs.forEach(function (_job, id) { bumpJobRevision(id); });
     jobs.clear();
     body.textContent = "";
-    list.forEach(upsertRow);
-    applyFinishedFilter();
+    list.forEach(function (job) {
+      bumpJobRevision(job.id);
+      jobs.set(job.id, job);
+      body.appendChild(buildRow(job));
+    });
+    updateQueueSummary();
+    applyQueueFilters();
+  }
+
+  function sortQueueRows() {
+    Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"))
+      .sort(function (a, b) { return Number(a.dataset.jobId) - Number(b.dataset.jobId); })
+      .forEach(function (row) { body.appendChild(row); });
+  }
+
+  function loadHistory() {
+    if (historyLoading || !historyHasMore || !historyBeforeId) return;
+    historyLoading = true;
+    if (historyButton) historyButton.disabled = true;
+    if (historyState) historyState.textContent = "Loading…";
+    fetch("/api/jobs/history?before_id=" + encodeURIComponent(historyBeforeId), {
+      credentials: "same-origin",
+    }).then(function (response) {
+      if (!response.ok) throw new Error("History request failed (" + response.status + ")");
+      return response.json();
+    }).then(function (data) {
+      (data.jobs || []).forEach(function (job) {
+        historyLoadedIds.add(job.id);
+        upsertRow(job);
+      });
+      sortQueueRows();
+      historyBeforeId = data.before_id || historyBeforeId;
+      historyHasMore = Boolean(data.has_more);
+      if (historyTools) {
+        historyTools.hidden = !historyHasMore;
+        historyTools.dataset.beforeId = historyBeforeId || "";
+        historyTools.dataset.hasMore = historyHasMore ? "true" : "false";
+      }
+      if (historyState) historyState.textContent = data.jobs.length + " older job(s) loaded";
+    }).catch(function (error) {
+      if (historyState) historyState.textContent = error.message;
+    }).finally(function () {
+      historyLoading = false;
+      if (historyButton) historyButton.disabled = false;
+    });
+  }
+
+  var countRefreshTimer = null;
+  function refreshQueueCounts() {
+    window.clearTimeout(countRefreshTimer);
+    countRefreshTimer = window.setTimeout(function () {
+      fetch("/api/jobs/counts", { credentials: "same-origin" }).then(function (response) {
+        return response.ok ? response.json() : null;
+      }).then(function (data) {
+        if (data && data.counts) {
+          queueCounts = data.counts;
+          updateQueueSummary();
+        }
+      }).catch(function () { /* The live row still renders if a count refresh is offline. */ });
+    }, 250);
   }
 
   // -- the stream ---------------------------------------------------------
@@ -320,19 +628,36 @@
       return;
     }
     switch (payload.kind) {
-      case "snapshot":
+      case "snapshot": {
+        var reconnectingWithHistory = historyLoadedIds.size > 0;
+        updateHistoryWindow(payload, reconnectingWithHistory);
+        queueCounts = payload.counts || queueCounts;
+        if (payload.queue_paused !== undefined) setQueuePaused(payload.queue_paused);
         replaceRows(payload.jobs || []);
+        if (queueCounts) updateQueueSummary();
+        if (reconnectingWithHistory) hydrateJobs(Array.from(historyLoadedIds));
         break;
-      case "job":
+      }
+      case "job": {
+        var previousJob = jobs.get(payload.job.id);
+        var statusChanged = !previousJob || previousJob.status !== payload.job.status;
         upsertRow(payload.job);
+        if (statusChanged) refreshQueueCounts();
         break;
+      }
       case "batch":
-        // A new batch's ids are in `created`; the rows themselves arrive as `job` events as
-        // the scheduler runs them. Nothing is inserted here, because a row for a queued job
-        // that has not been claimed yet would have no title and no progress.
+        // The batch carries ids, not row details. Hydrate just those rows over the REST API;
+        // a later `job` message wins if the scheduler has already changed their state.
         (payload.created || []).forEach(function (id) {
           if (!jobs.has(id)) log("queued job #" + id);
         });
+        hydrateJobs(payload.created || []);
+        refreshQueueCounts();
+        break;
+      case "deleted":
+        (payload.ids || []).forEach(function (id) { historyLoadedIds.delete(id); });
+        removeJobs(payload.ids || []);
+        refreshQueueCounts();
         break;
       case "library":
         if (payload.detail) log(payload.detail);
@@ -340,6 +665,9 @@
       case "pool":
         poolText = payload.ripping + "/" + payload.limit + " ripping";
         renderStreamLabel();
+        break;
+      case "queue-control":
+        setQueuePaused(payload.paused);
         break;
       case "wrapper":
         log("the wrapper is not ready: " + payload.problem);
@@ -352,13 +680,46 @@
     }
   }
 
-  var source = new EventSource("/api/jobs/stream");
-  source.addEventListener("open", function () {
-    setStreamState("live", "live");
-  });
-  source.addEventListener("message", handle);
+  var socket = null;
+  var reconnectAttempt = 0;
+  var openedAt = 0;
 
-  /* The pool count before any frame: the scheduler's table as the server last saw it.
+  function connectStream() {
+    setStreamState(
+      reconnectAttempt ? "reconnecting" : "connecting",
+      reconnectAttempt ? "reconnecting…" : "connecting…"
+    );
+    openedAt = 0;
+    var protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
+    socket = new WebSocket(protocol + window.location.host + "/api/jobs/ws");
+    socket.addEventListener("open", function () {
+      openedAt = Date.now();
+      setStreamState("live", "live");
+    });
+    socket.addEventListener("message", handle);
+    socket.addEventListener("close", function (event) {
+      // Authentication and origin failures cannot recover without changing the page/session.
+      if (event.code === 4401 || event.code === 4403) {
+        setStreamState("disconnected", "session expired — reload the page");
+        return;
+      }
+      // Reset the exponential backoff only after a stable connection. Immediate failures
+      // therefore cannot turn into a tight reconnect loop.
+      if (openedAt && Date.now() - openedAt >= 30000) reconnectAttempt = 0;
+      var delay = Math.min(1000 * Math.pow(2, reconnectAttempt), 30000);
+      reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
+      setStreamState("reconnecting", "reconnecting…");
+      window.setTimeout(connectStream, delay + Math.random() * 500);
+    });
+    socket.addEventListener("error", function () {
+      // Browsers follow an error with close; closing here makes that transition explicit.
+      if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+    });
+  }
+
+  connectStream();
+
+  /* The pool count before any message: the scheduler's table as the server last saw it.
    * A failure here is silent on purpose -- the stream is the loud channel, and a page
    * that cannot reach `/api/status` once will hear about it there instead. */
   fetch("/api/status", { credentials: "same-origin" })
@@ -372,14 +733,8 @@
       }
     })
     .catch(function () {
-      /* No pool line rather than a broken page; frames will carry it if they can. */
+      /* No pool line rather than a broken page; socket messages carry it when available. */
     });
-  source.addEventListener("error", function () {
-    // EventSource reconnects on its own and the stream's first frame is a fresh snapshot, so
-    // a drop is a resync rather than a gap. Saying so is better than a spinner that lies.
-    setStreamState("reconnecting", "reconnecting…");
-  });
-
   /* The age labels tick on a five-second beat, and only while the tab is visible -- a
    * backgrounded queue does not need a timer rewriting text nobody is reading. A snapshot
    * or an upsert rebuilds each row's span from `created_at` anyway, so the beat only ever
@@ -395,16 +750,21 @@
 
   // -- actions ------------------------------------------------------------
 
+  function requestJson(url, options) {
+    return fetch(url, Object.assign({ credentials: "same-origin" }, options || {})).then(
+      function (response) {
+        return response.json().then(function (data) {
+          return { ok: response.ok, status: response.status, data: data };
+        });
+      }
+    );
+  }
+
   function post(url, payload) {
-    return fetch(url, {
+    return requestJson(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
       body: JSON.stringify(payload || {}),
-    }).then(function (response) {
-      return response.json().then(function (data) {
-        return { ok: response.ok, status: response.status, data: data };
-      });
     });
   }
 
@@ -429,28 +789,67 @@
     var action = target.dataset.action;
     var jobId = target.dataset.jobId;
 
-    if (action === "wrapper-start") post("/api/wrapper/start").then(reload);
+    if (action === "queue-load-history") {
+      loadHistory();
+    } else if (action === "filter-status") {
+      var selectedStatus = target.dataset.status;
+      if (queueStatus && selectedStatus) {
+        queueStatus.value = queueStatus.value === selectedStatus ? "all" : selectedStatus;
+        if (FINISHED_STATUSES.indexOf(queueStatus.value) !== -1) setFinishedVisible(true);
+        else applyQueueFilters();
+      }
+    } else if (action === "queue-pause" || action === "queue-resume") {
+      var paused = action === "queue-pause";
+      post("/api/jobs/" + (paused ? "pause" : "resume")).then(function (result) {
+        if (result.ok) setQueuePaused(result.data.paused);
+        else log((result.data && result.data.detail) || "Queue control failed.");
+      }).catch(function () { log("Could not reach the hub to change queue state."); });
+    } else if (action === "wrapper-start") post("/api/wrapper/start").then(reload);
     else if (action === "wrapper-stop") post("/api/wrapper/stop").then(reload);
     else if (action === "wrapper-restart") post("/api/wrapper/restart").then(reload);
     else if (action === "wrapper-login") {
       var card = document.getElementById("login-card");
       if (card) card.hidden = !card.hidden;
     } else if (action === "job-cancel" && jobId) {
-      fetch("/api/jobs/" + jobId, {
-        method: "DELETE",
-        credentials: "same-origin",
-      }).then(reload);
+      var cancelRevision = jobRevisions.get(Number(jobId)) || 0;
+      requestJson("/api/jobs/" + jobId, { method: "DELETE" }).then(function (result) {
+        if (!result.ok) log((result.data && result.data.detail) || "the job could not be cancelled");
+        else upsertIfUnchanged(result.data, cancelRevision);
+      }).catch(function () { log("Could not reach the hub to cancel this job."); });
     } else if (action === "job-retry" && jobId) {
-      post("/api/jobs/" + jobId + "/retry").then(reload);
+      var retryRevision = jobRevisions.get(Number(jobId)) || 0;
+      post("/api/jobs/" + jobId + "/retry").then(function (result) {
+        if (!result.ok) log((result.data && result.data.detail) || "the job could not be retried");
+        else upsertIfUnchanged(result.data, retryRevision);
+      }).catch(function () { log("Could not reach the hub to retry this job."); });
     } else if (action === "queue-delete-finished") {
       // Irreversible, so it asks. The wording names what is *not* being deleted, because
       // "delete" next to a list of tracks is the sentence a user reads as "delete my music".
       if (!window.confirm("Remove every finished row from the queue?\n\nThe files stay on disk. Only the list is cleared.")) {
         return;
       }
-      fetch("/api/jobs/finished", { method: "DELETE", credentials: "same-origin" }).then(reload);
+      target.disabled = true;
+      requestJson("/api/jobs/finished", { method: "DELETE" }).then(function (result) {
+        if (!result.ok) {
+          log((result.data && result.data.detail) || "finished rows could not be deleted");
+          return;
+        }
+        var ids = (result.data && result.data.ids) || [];
+        removeJobs(ids);
+        log(
+          ids.length
+            ? "Removed " + ids.length + " finished row(s). The files stay on disk."
+            : "There are no finished rows to remove."
+        );
+      }).catch(function () {
+        log("Could not reach the hub to remove finished rows.");
+      }).finally(function () {
+        target.disabled = false;
+      });
     } else if (action === "queue-toggle-finished") {
       setFinishedVisible(!finishedVisible());
+    } else if (action === "queue-clear-filters") {
+      clearQueueFilters();
     }
   });
 
@@ -458,7 +857,7 @@
   //
   // A queue that only grows is a queue you scroll, and this one is a record of every
   // track the user has ever asked for. The rows stay in the DOM -- hiding them with
-  // `display: none` rather than removing them keeps the SSE upsert working against the
+  // `display: none` rather than removing them keeps WebSocket upserts working against the
   // same nodes, so a job that finishes while the filter is on does not reappear at the
   // top of an unfiltered-looking table.
   function finishedVisible() {
@@ -472,16 +871,49 @@
       button.setAttribute("aria-pressed", visible ? "true" : "false");
       button.textContent = visible ? "Hide finished" : "Show finished";
     }
-    applyFinishedFilter();
+    applyQueueFilters();
   }
 
-  function applyFinishedFilter() {
-    var hide = !finishedVisible();
-    document.querySelectorAll("#queue-body tr[data-finished]").forEach(function (row) {
-      row.hidden = hide && row.dataset.finished === "1";
+  function applyQueueFilters() {
+    var rows = Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"));
+    var query = queueSearch ? queueSearch.value.trim().toLowerCase() : "";
+    var status = queueStatus ? queueStatus.value : "all";
+    var visible = 0;
+
+    rows.forEach(function (row) {
+      var matchesFinished = finishedVisible() || row.dataset.finished !== "1";
+      var matchesStatus = status === "all" || row.classList.contains("status-" + status);
+      var matchesSearch = !query || row.textContent.toLowerCase().indexOf(query) !== -1;
+      row.hidden = !(matchesFinished && matchesStatus && matchesSearch);
+      if (!row.hidden) visible += 1;
+    });
+
+    if (queueVisibleCount) {
+      queueVisibleCount.textContent = "Showing " + visible + " of " + rows.length + " jobs";
+    }
+    if (queueEmpty) queueEmpty.hidden = rows.length !== 0;
+    if (queueTableWrap) queueTableWrap.hidden = rows.length === 0;
+    if (queueNoResults) queueNoResults.hidden = rows.length === 0 || visible !== 0;
+    document.querySelectorAll("#queue-summary button[data-status]").forEach(function (button) {
+      button.setAttribute("aria-pressed", button.dataset.status === status ? "true" : "false");
     });
   }
 
+  function clearQueueFilters() {
+    if (queueSearch) queueSearch.value = "";
+    if (queueStatus) queueStatus.value = "all";
+    setFinishedVisible(true);
+    if (queueSearch) queueSearch.focus();
+  }
+
+  if (queueSearch) queueSearch.addEventListener("input", applyQueueFilters);
+  if (queueStatus) {
+    queueStatus.addEventListener("change", function () {
+      if (FINISHED_STATUSES.indexOf(queueStatus.value) !== -1) setFinishedVisible(true);
+      else applyQueueFilters();
+    });
+  }
+  if (queueTools) queueTools.hidden = false;
   setFinishedVisible(false);
 
   // -- re-queueing and clearing ---------------------------------------------
@@ -490,6 +922,8 @@
     requeueForm.addEventListener("submit", function (event) {
       event.preventDefault();
       var select = requeueForm.querySelector('[name="scope"]');
+      var button = requeueForm.querySelector('button[type="submit"]');
+      if (button) button.disabled = true;
       post("/api/jobs/requeue", { scope: select ? select.value : "failed" }).then(function (result) {
         if (!result.ok) {
           log((result.data && result.data.detail) || "the re-queue failed");
@@ -498,11 +932,18 @@
         // Both lists are reported, because a refused row is not an error: it is a track
         // another job already holds, and saying so is the difference between "the button
         // is broken" and "one of these was already on its way".
+        var requeued = result.data.requeued || [];
         var refused = result.data.refused || [];
+        log(requeued.length + " job(s) re-queued.");
         if (refused.length) {
           log(refused.length + " could not be re-queued: already running as job " + refused.join(", "));
         }
-        reload(result);
+        // Each re-queued row is also published on the socket; those events update the table
+        // in place, and a reconnect snapshot is the recovery path if this tab is offline.
+      }).catch(function () {
+        log("Could not reach the hub to re-queue jobs.");
+      }).finally(function () {
+        if (button) button.disabled = false;
       });
     });
   }
@@ -571,6 +1012,14 @@
     var codecSelect = enqueue.querySelector('[name="codec"]');
     var languageBox = enqueue.querySelector('[name="language"]');
     var forceBox = enqueue.querySelector('[name="force"]');
+    var enqueueButton = enqueue.querySelector('button[type="submit"]');
+    var enqueueFeedback = document.getElementById("enqueue-feedback");
+
+    function setEnqueueFeedback(text) {
+      if (!enqueueFeedback) return;
+      enqueueFeedback.textContent = text || "";
+      enqueueFeedback.hidden = !text;
+    }
     if (
       remembered.codec &&
       codecSelect &&
@@ -584,6 +1033,11 @@
     enqueue.addEventListener("submit", function (event) {
       event.preventDefault();
       showError("#enqueue-error", "");
+      setEnqueueFeedback("Adding your links…");
+      if (enqueueButton) {
+        enqueueButton.disabled = true;
+        enqueueButton.textContent = "Adding…";
+      }
       var fields = readForm(enqueue);
       var urls = String(fields.urls || "").split("\n").map(function (line) {
         return line.trim();
@@ -594,18 +1048,24 @@
         language: fields.language || "",
         force: fields.force === "1",
       }).then(function (result) {
-        if (!result.data) return;
+        if (!result.data) {
+          showError("#enqueue-error", "The hub returned an empty response.");
+          setEnqueueFeedback("");
+          return;
+        }
         var problems = result.data.problems || [];
+        if (!result.ok && !problems.length) {
+          showError("#enqueue-error", result.data.detail || "The links could not be added.");
+          setEnqueueFeedback("");
+          return;
+        }
         if (problems.length) {
           // A partial batch is a 200, so the detail has to be surfaced here: the tracks that
           // were queued are queued, and the one that was refused is named.
           showError(
             "#enqueue-error",
-            problems.map(function (p) { return p.url + ": " + p.detail; }).join("\n")
+            problems.map(function (problem) { return problem.url + ": " + problem.detail; }).join("\n")
           );
-        } else if (!result.ok) {
-          showError("#enqueue-error", result.data.detail);
-          return;
         }
         try {
           localStorage.setItem(
@@ -622,7 +1082,30 @@
         (result.data.rejected || []).forEach(function (name) {
           log("not queued: " + name);
         });
-        window.location.reload();
+        var created = result.data.created || [];
+        var summary = [];
+        if (created.length) summary.push("Added " + created.length + " job(s)");
+        if ((result.data.deduplicated || []).length) {
+          summary.push((result.data.deduplicated || []).length + " already queued");
+        }
+        if ((result.data.skipped || []).length) {
+          summary.push((result.data.skipped || []).length + " skipped");
+        }
+        if (problems.length) summary.push(problems.length + " link(s) need attention above");
+        if (!summary.length) summary.push("No new jobs were added");
+        if (created.length && !problems.length) enqueue.querySelector('[name="urls"]').value = "";
+        return hydrateJobs(created).then(function () {
+          setEnqueueFeedback(summary.join(" · ") + ". The queue below is up to date.");
+          if (queueEmpty && jobs.size === 0) applyQueueFilters();
+        });
+      }).catch(function () {
+        showError("#enqueue-error", "Could not reach the hub. Your links are still in the form.");
+        setEnqueueFeedback("");
+      }).finally(function () {
+        if (enqueueButton) {
+          enqueueButton.disabled = false;
+          enqueueButton.textContent = "Add to queue";
+        }
       });
     });
   }

@@ -10,8 +10,9 @@ the same discipline `tests/test_ripper_host.py` applies to imports).
 
 The write set is deliberately narrow and every writer is named where the field lives:
 `create_app` constructs, the lifespan fills the two lifespan fields, `hub.app` owns the
-five scheduler-owned fields, and `hub.api` owns the six API-visible ones. Nothing else
-writes. `hub/tests` reaches the app only through `create_app`, so the radius of an
+scheduler fields, and `hub.api` owns the API-visible control fields. Queue pause is
+process-local and blocks new claims without interrupting work already in flight. `hub/tests`
+reaches the app only through `create_app`, so the radius of an
 interface change is this file plus the one constructor.
 
 The field docstrings carry the invariants that used to be prose beside the assignments
@@ -49,7 +50,7 @@ class HubState:
     """The signed-cookie verifier. No server-side table; `generation` retires tokens."""
 
     broker: EventBroker
-    """The in-process fan-out behind `GET /api/jobs/stream`. Not thread-safe, and it
+    """The in-process fan-out behind `/api/jobs/ws`. Not thread-safe, and it
     does not need to be: one event loop, one process."""
 
     jobs: JobStore
@@ -77,7 +78,7 @@ class HubState:
     # Partials over `state` itself, so the binding is the one legal moment after
     # construction. Tests drive `run_one()`/`run_pool()` through these; the
     # signatures are the interface.
-    jobs_counts: Callable[[], dict] | None = None
+    jobs_counts: Callable[[], dict[str, int]] | None = None
     """Queue shape per status, one table read, no cache."""
 
     run_one: Callable[[], Awaitable[bool]] | None = None
@@ -100,6 +101,9 @@ class HubState:
     """Set on shutdown; every sleep wakes on it so `docker stop` is not a stall."""
 
     # -- operational state (named owners, listed in the module docstring) --------
+    queue_paused: bool = False
+    """When true, workers stop before their next claim; already-claimed rips finish."""
+
     startup_error: str | None = None
     """The supervisor's verbatim start failure, kept until a start succeeds; the
     dashboard answers "not running" with it. Written by `hub.app` and `hub.api.wrapper`."""

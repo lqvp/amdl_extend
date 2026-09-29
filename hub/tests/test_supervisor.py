@@ -714,6 +714,22 @@ async def test_a_wrapper_that_never_comes_up_says_so(
 # --- runtime auto-restart --------------------------------------------------
 
 
+async def test_a_process_exit_wakes_an_inflight_availability_waiter(
+    fake_launcher_crash_after_ready, tmp_path
+):
+    """The app's running-job guard can observe an owned wrapper's actual process exit."""
+    sup = _supervisor(
+        fake_launcher_crash_after_ready, tmp_path, log_sink=lambda _line: None, max_restarts=0
+    )
+    try:
+        await sup.start()
+        readiness = await asyncio.wait_for(sup.wait_until_unavailable(), timeout=2.0)
+        assert readiness.kind == "down"
+        assert not sup.running
+    finally:
+        await sup.stop()
+
+
 async def test_a_crashed_wrapper_is_restarted(fake_launcher_crash_once, tmp_path):
     """A wrapper that dies *after* serving comes back on its own.
 

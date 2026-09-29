@@ -148,7 +148,7 @@ cd hub && uv run pytest -v                   # 655 tests
   `/opt/wrapper/rootfs/data`.
 - **Boot time:** ~65–75 s with no Apple account, ~20 s with one logged in.
   `start_period: 120s` covers the no-account case.
-- **An open SSE connection delays shutdown.** Close browser tabs on `/queue`
+- **An open WebSocket connection delays shutdown.** Close browser tabs on `/queue`
   before restarting.
 - **Apple credentials are a deliberate exposure.** They reach the wrapper on a
   login child's argv. Never write them to the image, compose, or any `ENV`.

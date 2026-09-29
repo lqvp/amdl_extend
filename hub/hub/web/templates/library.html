@@ -2,9 +2,9 @@
   library.html -- what the filesystem says, per spec §8.
 
   Read-only, and deliberately so: §2 refuses destructive cleanup of the library outright,
-  because a file operation run by mistake against 341 GB of real data is a far larger harm
-  than the convenience of offering it. Phase 2 adds search and deletion, behind the same
-  decision; this page is the list.
+  because a file operation run by mistake against real data is a far larger harm than the
+  convenience of offering it. Search and duplicate candidates are read-only; no file actions
+  are exposed here.
 #}{% extends "base.html" %}
 {% block title %}Library &middot; amd-hub{% endblock %}
 
@@ -12,7 +12,7 @@
 <section class="card">
   <h1>Library</h1>
   <p class="muted small">
-    {{ listing.albums | length }} album directories across
+    {{ listing.total_albums }} album directories across
     {{ listing.roots | length }} root(s), {{ listing.artists | length }} artists.
     Read from disk on every request: a folder moved or renamed outside the hub is followed
     immediately, and there is no index to go stale.
@@ -62,12 +62,21 @@
 </section>
 
 <section class="card">
+  <div class="library-tools">
+    <label for="library-search">Search artist, album, or path</label>
+    <input id="library-search" type="search" maxlength="200" autocomplete="off"
+           placeholder="Start typing to filter…">
+    <span id="library-result-count" class="muted small">{{ listing.albums | length }} of {{ listing.total_albums }} album directories</span>
+    <button type="button" id="library-duplicates-toggle">Show possible duplicates</button>
+  </div>
+  <p class="muted small">Duplicate matches are based on normalized album and track names, not file identity. Review paths; they may be different releases.</p>
+  <div id="duplicate-report" class="duplicate-report" hidden></div>
   <div class="table-wrap">
     <table>
       <thead>
         <tr><th>artist</th><th>album</th><th>tracks</th><th>path</th></tr>
       </thead>
-      <tbody>
+      <tbody id="library-albums">
         {% for album in listing.albums %}
           <tr>
             <td>{{ album.artist or "—" }}</td>

@@ -185,7 +185,7 @@ def test_the_limiter_sweeps_amortisedly_not_on_every_call(monkeypatch):
 
     The old `_prune` walked the whole dict on every call, inside an `async` handler: a sweep
     from a thousand addresses cost a thousand O(n) passes on the event loop, which is the one
-    thread the SSE stream, the scheduler and every other request need. So the sweep is counted
+    thread the WebSocket stream, the scheduler and every other request need. So the sweep is counted
     here, by wrapping the private method -- which is a *count of sweeps*, so an implementation
     that swept more often than the threshold allows fails, and so does one that never sweeps
     (which `test_a_sweep_actually_removed_something` covers from the other side).
