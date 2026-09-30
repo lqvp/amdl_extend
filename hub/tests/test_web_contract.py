@@ -737,6 +737,28 @@ def test_the_queue_offers_export_downloads():
         assert href in template, f"the queue is missing its export download: {href}"
 
 
+def test_health_banner_reports_wrapper_library_and_empty_mounts():
+    """The conditional banner: wrapper problem, degraded root, or empty mount.
+
+    Healthy status renders nothing (the empty-string branch is pinned so no
+    healthy state leaks into the DOM); the wrapper problems use role="alert"
+    and the library ones role="status".
+    """
+    script = (Path(__file__).parent.parent / "hub/web/static/app.js").read_text(encoding="utf-8")
+    # The banner is rendered from the client-side /api/status snapshot.
+    assert "function healthBanner" in script
+    assert "wrapper.problem" in script
+    assert "degraded_roots" in script
+    assert "per_root" in script
+    assert 'setAttribute("role", "alert")' in script
+    assert 'setAttribute("role", "status")' in script
+    # Empty health answer produces no node.
+    banner_fn = script[script.index("function healthBanner") : script.index("function updateHealthBanner")]
+    assert "return null" in banner_fn or "return null;" in banner_fn
+    # Refetch on page load, on WS reconnect, and on a `wrapper` frame -- no polling.
+    assert "setInterval" not in script or "healthBanner" not in script[script.index("setInterval") : script.index("setInterval") + 300]
+
+
 def test_the_queue_uses_a_reconnecting_websocket_not_eventsource():
     """Transport loss reconnects to a fresh snapshot; expired sessions stop retrying."""
     js = (Path(__file__).parent.parent / "hub/web/static/app.js").read_text(encoding="utf-8")
