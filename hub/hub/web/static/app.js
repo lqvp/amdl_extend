@@ -730,7 +730,11 @@
         setQueuePaused(payload.paused);
         break;
       case "wrapper":
-        log("the wrapper is not ready: " + payload.problem);
+        log(
+          payload.problem === null || payload.problem === undefined
+            ? "the wrapper recovered"
+            : "the wrapper is not ready: " + payload.problem
+        );
         // The wrapper's problem is exactly the banner's subject; refresh the real
         // status rather than trusting the frame's summary (no cache, one probe).
         fetch("/api/status", { credentials: "same-origin" })
