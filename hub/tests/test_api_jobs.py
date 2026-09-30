@@ -3949,6 +3949,35 @@ async def test_delete_pending_removes_queued_and_waiting_and_spares_running(
     assert leaves.get(3) is None, "the leaf outlived its row"
 
 
+async def test_delete_pending_publishes_the_exact_removed_job_ids(running, authed):
+    """Same exact-id `deleted` frame contract as the finished bulk route.
+
+    Every open tab depends on it: the response carries the ids for the origin tab, the
+    frame carries them for the others. `delete_pending` is only equivalent if it
+    publishes.
+    """
+    leaf = Leaf(
+        adam_id="501", title="track", album_name="album", artist_name="artist",
+        codec="alac", language="ja", url=ALBUM_URL, storefront="jp",
+    )
+    second = Leaf(
+        adam_id="502", title="next", album_name="album", artist_name="artist",
+        codec="alac", language="ja", url=ALBUM_URL, storefront="jp",
+    )
+    running.state.jobs.create_batch(ALBUM_URL, "album", [leaf, second], force=False)
+    running.state.jobs.mark(2, "waiting")
+    token = await _token(authed)
+
+    async with _ASGIWebSocket(running, token=token) as stream:
+        await stream.read_data()  # snapshot
+        response = await authed.delete("/api/jobs/pending")
+        event = await stream.read_data()
+
+    assert response.json() == {"deleted": 2, "ids": [1, 2]}
+    assert event == {"kind": "deleted", "ids": [1, 2]}
+    assert running.state.jobs.list() == []
+
+
 async def test_delete_pending_needs_a_session(client):
     assert (await client.delete("/api/jobs/pending")).status_code == 401
 

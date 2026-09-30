@@ -58,6 +58,10 @@ IDLE_POLL_SECONDS = 0.5
 #:
 #: - **Empty queue** -- no HTTP at all. `_has_actionable` is a SQLite read, and readiness
 #:   cannot matter when there is nothing to be ready *for*. This is where the 172,800 went.
+#:   The one exception: an **uncleaned announcement** -- while the wrapper's problem is
+#:   still announced (banner lit, queue drained -- e.g. "Clear queued & waiting"), the
+#:   idle loop probes at the *readiness* rate, because only that probe can broadcast the
+#:   clearing frame. The zero-HTTP idle returns as soon as `announced` is None.
 #: - **Queued but unready** -- this interval, because a user who has just logged in wants
 #:   their queue to start and a supervisor restart takes seconds.
 #: - **Queued and ready** -- the claim is made immediately after a fresh probe, so there is no
@@ -800,9 +804,12 @@ async def scheduler_loop(state: HubState) -> None:
             if announced is not None:
                 problem = await _wrapper_problem(state)
                 state.cached_problem = problem
-                if problem is None:
-                    announced = None
-                    state.broker.publish(JOBS_CHANNEL, {"kind": "wrapper", "problem": None})
+                if problem != announced:
+                    # Same rule as the serving branch: an announcement is a claim about
+                    # a state, so a change in the state -- recovery, or one problem
+                    # becoming another -- replaces the frame.
+                    announced = problem
+                    state.broker.publish(JOBS_CHANNEL, {"kind": "wrapper", "problem": problem})
             await _sleep_or_stop(
                 state,
                 IDLE_READINESS_POLL_SECONDS if announced is not None else IDLE_POLL_SECONDS,
