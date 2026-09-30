@@ -841,7 +841,8 @@ async def scheduler_loop(state: HubState) -> None:
         resumed = state.jobs.resume_waiting()
         if resumed:
             _log(state, f"the wrapper is serving again; {resumed} parked job(s) requeued")
-        announced = None
+        # `announced` was already cleared by the recovery block above; this line is
+        # unreachable as a state change. The clearing block owns the transition.
 
         # A job ran, so the wrapper was ready moments ago; a change since then is more
         # likely to be the kind worth noticing.

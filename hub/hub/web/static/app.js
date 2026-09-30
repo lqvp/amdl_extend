@@ -181,6 +181,67 @@
     }
   }
 
+  function healthBanner(body) {
+    /* The three problems the page can see and the user cannot: the wrapper cannot
+       serve downloads, a library root cannot be read, and a root that is mounted
+       and empty (Docker autocreated the directory over a drive that is not there).
+       Healthy input returns null -- the banner is never *present* when it is not
+       needed, rather than present and empty. */
+    var nodes = [];
+    if (body && body.wrapper && body.wrapper.problem) {
+      var p = el("p", "error");
+      p.setAttribute("role", "alert");
+      if (body.wrapper.problem === "no-account") {
+        p.textContent = "Apple にログインしていません。";
+      } else {
+        p.textContent = body.wrapper.detail || "wrapper が応答しません";
+      }
+      nodes.push(p);
+    }
+    if (body && body.library) {
+      var roots = (body.library.degraded_roots || []).concat(
+        (body.library.per_root || [])
+          .map(function (count, index) {
+            return count === 0 ? (body.library.roots || [])[index] : null;
+          })
+          .filter(function (r) { return r; })
+      );
+      Array.prototype.forEach.call(roots, function (root) {
+        var p = el("p", "error");
+        p.setAttribute("role", "status");
+        p.textContent = "ライブラリルートに問題があります: " + root;
+        nodes.push(p);
+      });
+    }
+    if (!nodes.length) return null;
+    var box = el("div", "health-banner-messages");
+    nodes.forEach(function (n) { box.appendChild(n); });
+    return box;
+  }
+
+  function updateHealthBanner(body) {
+    var mount = document.getElementById("health-banner");
+    if (!mount) return;
+    mount.textContent = "";
+    var banner = healthBanner(body);
+    if (banner) mount.appendChild(banner);
+  }
+
+  fetch("/api/status", { credentials: "same-origin" })
+    .then(function (response) {
+      return response.ok ? response.json() : null;
+    })
+    .then(function (body) {
+      if (body && body.pool) {
+        poolText = body.pool.ripping + "/" + body.pool.limit + " ripping";
+        renderStreamLabel();
+      }
+      if (body) updateHealthBanner(body);
+    })
+    .catch(function () {
+      /* No pool line rather than a broken page; socket messages carry it when available. */
+    });
+
   var body = document.getElementById("queue-body");
   if (!body) return;
 
@@ -791,66 +852,7 @@
   /* The pool count before any message: the scheduler's table as the server last saw it.
    * A failure here is silent on purpose -- the stream is the loud channel, and a page
    * that cannot reach `/api/status` once will hear about it there instead. */
-  function healthBanner(body) {
-    /* The three problems the page can see and the user cannot: the wrapper cannot
-       serve downloads, a library root cannot be read, and a root that is mounted
-       and empty (Docker autocreated the directory over a drive that is not there).
-       Healthy input returns null -- the banner is never *present* when it is not
-       needed, rather than present and empty. */
-    var nodes = [];
-    if (body && body.wrapper && body.wrapper.problem) {
-      var p = el("p", "error");
-      p.setAttribute("role", "alert");
-      if (body.wrapper.problem === "no-account") {
-        p.textContent = "Apple にログインしていません。";
-      } else {
-        p.textContent = body.wrapper.detail || "wrapper が応答しません";
-      }
-      nodes.push(p);
-    }
-    if (body && body.library) {
-      var roots = (body.library.degraded_roots || []).concat(
-        (body.library.per_root || [])
-          .map(function (count, index) {
-            return count === 0 ? (body.library.roots || [])[index] : null;
-          })
-          .filter(function (r) { return r; })
-      );
-      Array.prototype.forEach.call(roots, function (root) {
-        var p = el("p", "error");
-        p.setAttribute("role", "status");
-        p.textContent = "ライブラリルートに問題があります: " + root;
-        nodes.push(p);
-      });
-    }
-    if (!nodes.length) return null;
-    var box = el("div", "health-banner-messages");
-    nodes.forEach(function (n) { box.appendChild(n); });
-    return box;
-  }
 
-  function updateHealthBanner(body) {
-    var mount = document.getElementById("health-banner");
-    if (!mount) return;
-    mount.textContent = "";
-    var banner = healthBanner(body);
-    if (banner) mount.appendChild(banner);
-  }
-
-  fetch("/api/status", { credentials: "same-origin" })
-    .then(function (response) {
-      return response.ok ? response.json() : null;
-    })
-    .then(function (body) {
-      if (body && body.pool) {
-        poolText = body.pool.ripping + "/" + body.pool.limit + " ripping";
-        renderStreamLabel();
-      }
-      if (body) updateHealthBanner(body);
-    })
-    .catch(function () {
-      /* No pool line rather than a broken page; socket messages carry it when available. */
-    });
   /* The age labels tick on a five-second beat, and only while the tab is visible -- a
    * backgrounded queue does not need a timer rewriting text nobody is reading. A snapshot
    * or an upsert rebuilds each row's span from `created_at` anyway, so the beat only ever

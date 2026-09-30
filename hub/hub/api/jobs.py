@@ -141,12 +141,12 @@ class LeafRegistry:
     `language` -- deliberately, because the filesystem is the source of truth for what is
     downloaded and a description of the track is operational state. But both consumers of a
     job need more than that: `RipperHost.run_song` needs the storefront, and the scheduler's
-    duplicate check in `hub.app` needs the album name and the artist to render the file
+    duplicate check in `hub.scheduler` needs the album name and the artist to render the file
     name. So the expansion is held here, from the request that made it until the job
     finishes.
 
     **What a miss means, and why it is a failure rather than a blank.** A row whose leaf this
-    process never saw was enqueued by a previous hub process (or by hand). `hub.app`'s
+    process never saw was enqueued by a previous hub process (or by hand). `hub.scheduler`'s
     `_leaf_for` re-expands the parent URL in that case, which is why a restart is not a
     reason to lose a queue -- and when even that cannot produce the track, the job is failed
     with a message naming the id, so the user can re-submit it. Running it with blanks
@@ -249,7 +249,7 @@ async def create_jobs(request: Request, body: _JobsBody | None = None) -> Respon
     """Expand each URL and enqueue every track it names.
 
     The whole of the *enqueue* half of dedup. The other half -- "is it already on disk" -- is
-    per-file and happens at execution time in `hub.app`, so `skipped` is always empty here
+    per-file and happens at execution time in `hub.scheduler`, so `skipped` is always empty here
     and the response says so by carrying the key.
 
     Every URL is attempted, and one bad URL does not discard the others. A user pasting three
@@ -736,15 +736,8 @@ async def export_jobs(
     if format not in ("csv", "json"):
         return fail(400, f"{format!r} is not an export format. Use 'csv' or 'json'.")
     state = request.app.state
-    if kind == "queue":
-        rows = state.jobs._conn.execute(
-            "SELECT * FROM job WHERE status IN ('queued','waiting','running') ORDER BY id"
-        ).fetchall()
-    else:
-        rows = state.jobs._conn.execute(
-            "SELECT * FROM job WHERE status IN ('done','failed','skipped','cancelled')"
-            " ORDER BY id DESC"
-        ).fetchall()
+    # The store owns the status vocabulary; this route owns the document shape.
+    rows = state.jobs.export_rows(kind)
     columns = rows[0].keys() if rows else JOB_COLUMNS
     if format == "json":
         body = [dict(row) for row in rows]

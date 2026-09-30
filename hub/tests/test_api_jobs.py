@@ -4657,3 +4657,66 @@ async def test_pause_blocks_the_next_claim_but_lets_an_inflight_rip_finish(
     assert resumed.status_code == 200 and resumed.json()["paused"] is False
     assert await running.state.run_pool() == 1
     assert running.state.jobs.get(created[1]).status == "done"
+async def test_the_wrapper_recovery_broadcast_clears_the_banner_exactly_once(
+    live_app, settings, supervisor
+):
+    """The clearing frame is behavior, not source text: exactly one, before the claim.
+
+    The banner test pins the *string*; this pins the *transition*. A wrapper that
+    returns to serving must broadcast `{"kind": "wrapper", "problem": None}` exactly
+    once on the transition, ordered before the parked job is claimed again -- so the
+    health banner clears itself without waiting for a socket reconnect, and a
+    recovery that flickers never emits a duplicate frame.
+    """
+    supervisor.regions = ["jp"]
+    store = _store(settings)
+    async with live_app.router.lifespan_context(live_app):
+        await asyncio.sleep(0.2)
+        assert live_app.state.cached_problem is None
+        store.create_batch(
+            ALBUM_URL,
+            "album",
+            [Leaf(adam_id="1", title="t", album_name="A", artist_name="X",
+                  codec="alac", language="ja", url=ALBUM_URL, storefront="jp")],
+            force=False,
+        )
+        supervisor.regions = []
+        await asyncio.sleep(0.3)
+        assert live_app.state.cached_problem == "no-account"
+        assert store.get(1).status == "queued"
+
+        # Subscribe after the unready frame, before the recovery, so we see only the
+        # clearing transition.
+        agen = live_app.state.broker.subscribe("jobs")
+        frames: list[dict] = []
+
+        async def read_frames() -> None:
+            async for chunk in agen:
+                frames.append(json.loads(chunk))
+
+        reader = asyncio.create_task(read_frames())
+        await asyncio.sleep(0)
+        supervisor.regions = ["jp"]
+        # The loop probes at IDLE_READINESS_POLL_SECONDS; the claim follows in the same
+        # pass, so the clearing frame is observable *and* the job runs.
+        await asyncio.sleep(scheduler_module.IDLE_READINESS_POLL_SECONDS * 3)
+
+        clearing = [f for f in frames if f.get("kind") == "wrapper" and f.get("problem") is None]
+        assert len(clearing) == 1, (
+            f"expected exactly one wrapper-clearing frame, saw {clearing}"
+        )
+        assert store.get(1).status == "done", (
+            f"the job is {store.get(1).status!r}; recovery must requeue and rip it"
+        )
+        # One clearing frame *per transition*: stay ready, wait longer, count again.
+        frames.clear()
+        await asyncio.sleep(scheduler_module.IDLE_READINESS_POLL_SECONDS * 3)
+        assert [f for f in frames if f.get("kind") == "wrapper"] == [], (
+            "a ready wrapper kept re-announcing; the banner would flicker"
+        )
+        reader.cancel()
+        try:
+            await reader
+        except asyncio.CancelledError:
+            pass
+        await agen.aclose()

@@ -13,7 +13,7 @@ the whole of the queue's concurrency story:
 
 - `language` and `force` are not in the key. Two requests for the same track in two
   languages are one download, and `force` means "re-download this even if it is on disk" --
-  which the scheduler's per-file dedup check in `app.py` decides at execution time, not per
+  which the scheduler's per-file dedup check in `hub/scheduler.py` decides at execution time, not per
   queue entry. It is stored and honoured there, and it deliberately cannot buy a second
   concurrent job for one track.
 - `waiting` is in the predicate on purpose: a job parked on an expired Apple token must not
@@ -64,7 +64,7 @@ so `new Date(created_at)` in the browser parses it instead of relying on lenienc
 **One name, two spellings.** The `job` table's columns are `url` / `url_type`; the
 Python-facing `Job` and `create_batch` are `parent_url` / `parent_type`. Both are honoured
 where each is the authority -- the columns are the ones `JOB_TABLE_SQL` creates, quoted
-verbatim, and the attribute and parameter names are the ones the scheduler (`app.py`) and
+verbatim, and the attribute and parameter names are the ones the scheduler (`hub/scheduler.py`) and
 the API layer (`api/jobs.py`) pass in. The mapping is the one function, `_job_from_row`.
 
 **No migrations yet, and that is a decision rather than an omission.** There is one table, it
@@ -287,7 +287,7 @@ class BatchResult:
     `skipped` is always empty here and that is the design, not an omission: the
     `POST /api/jobs` answer is `{created[], skipped[], deduplicated[]}`, and a track already
     on disk is discovered at **execution** time by the dedup check in the scheduler
-    (`app.py`), not at enqueue time. A queued job can sit long enough for the file to be
+    (`hub/scheduler.py`), not at enqueue time. A queued job can sit long enough for the file to be
     deleted underneath it, and a second filesystem check here would put a duplicate check
     with different timing into the codebase for the two to disagree about. The list is
     kept because the response shape is the route's, and it is the field the API layer
@@ -787,6 +787,25 @@ class JobStore:
     # -- reading ------------------------------------------------------------
 
     # -- clearing the queue --------------------------------------------------
+
+    def export_rows(self, kind: str) -> list[sqlite3.Row]:
+        """The whole table for an export: `queue` = active rows id ASC, `history` = terminal id DESC.
+
+        The status vocabulary lives here, with `ACTIVE_STATUSES`/`TERMINAL_STATUSES`,
+        not in the route: a status added to one set has to be reflected on the export
+        side of the boundary automatically, and there is no second SQL copy to forget.
+        Read-only by construction -- this is a `SELECT` and nothing else.
+        """
+        statuses, order = (
+            (sorted(ACTIVE_STATUSES), "ASC")
+            if kind == "queue"
+            else (sorted(TERMINAL_STATUSES), "DESC")
+        )
+        placeholders = ", ".join("?" for _ in statuses)
+        return self._conn.execute(
+            f"SELECT * FROM job WHERE status IN ({placeholders}) ORDER BY id {order}",
+            statuses,
+        ).fetchall()
 
     def delete_finished(self, parent_url: str | None = None) -> list[int]:
         """Remove every row in a terminal status, and return the ids that went.
