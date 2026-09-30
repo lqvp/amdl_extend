@@ -439,7 +439,7 @@ class JobStore:
         """Close the connection. Idempotent, and safe to leave to the garbage collector.
 
         A store is held for the life of the process in normal use, so this exists for the
-        places that do not: a test that reopens a file, and `app.py` shutting the hub down.
+        places that do not: a test that reopens a file, and `hub.scheduler` shutting the hub down.
         """
         self._conn.close()
 

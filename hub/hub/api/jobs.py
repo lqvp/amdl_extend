@@ -19,7 +19,7 @@ reference -- `create_batch` has no such parameter, so every row has `NULL` in it
 user's entire queue and report all of it as one request's work.
 
 Nothing here decides whether a track is already on disk. That is the scheduler's, at
-execution time, in `hub.app` -- because a queued job can sit long enough for the file to be
+execution time, in `hub.scheduler` -- because a queued job can sit long enough for the file to be
 deleted underneath it, and a second filesystem check at enqueue time would put two dedup
 checks with different timings into the codebase for them to disagree. `skipped` is
 therefore always empty in this response, and it is here because the contract above has it.

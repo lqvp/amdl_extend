@@ -761,11 +761,12 @@ def test_health_banner_reports_wrapper_library_and_empty_mounts():
         "the banner mount is missing; updateHealthBanner fails silently with no mount"
     )
     # Refetch on page load, on WS reconnect, and on a `wrapper` frame -- no polling.
-    # Pinned around the banner's own code, not around whichever setInterval happens
-    # to appear first: the count-refresh and age-label beats are legitimate.
-    update_fn = script[script.index("function updateHealthBanner"):]
-    assert "setInterval" not in update_fn[: update_fn.index("});") + 3] or True
-    banner_region = script[script.index("function healthBanner") : script.index("function ", script.index("function updateHealthBanner") + 10)]
+    # Pinned around the banner's own code (healthBanner *and* updateHealthBanner),
+    # not around whichever setInterval happens to appear first: the count-refresh and
+    # age-label beats are legitimate.
+    banner_region = script[
+        script.index("function healthBanner") : script.index("function ", script.index("function updateHealthBanner") + 10)
+    ]
     assert "setInterval" not in banner_region, "the banner code polls; the spec says load + carrier frames only"
 
 

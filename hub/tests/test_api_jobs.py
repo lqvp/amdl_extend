@@ -4657,6 +4657,8 @@ async def test_pause_blocks_the_next_claim_but_lets_an_inflight_rip_finish(
     assert resumed.status_code == 200 and resumed.json()["paused"] is False
     assert await running.state.run_pool() == 1
     assert running.state.jobs.get(created[1]).status == "done"
+
+
 async def test_the_wrapper_recovery_broadcast_clears_the_banner_exactly_once(
     live_app, settings, supervisor
 ):
