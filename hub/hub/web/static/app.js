@@ -688,6 +688,14 @@
         replaceRows(payload.jobs || []);
         if (queueCounts) updateQueueSummary();
         if (reconnectingWithHistory) hydrateJobs(Array.from(historyLoadedIds));
+        // The snapshot arrives on connect/reconnect: refresh the banner from the live
+        // server so a wrapper or library that changed while the socket was down is
+        // reflected -- the wrapper frame fires only on problem transitions, never on
+        // recovery, so the snapshot is the recovery carrier.
+        fetch("/api/status", { credentials: "same-origin" })
+          .then(function (response) { return response.ok ? response.json() : null; })
+          .then(function (body) { if (body) updateHealthBanner(body); })
+          .catch(function () { /* a later snapshot or wrapper frame carries it */ });
         break;
       }
       case "job": {
@@ -791,12 +799,6 @@
       p.setAttribute("role", "alert");
       if (body.wrapper.problem === "no-account") {
         p.textContent = "Apple にログインしていません。";
-        var login = document.querySelector("#login-card, [data-action=\"wrapper-login\"]");
-        if (login) {
-          var a = el("a", null, "ログイン");
-          a.href = "#";
-          nodes.push(p);
-        }
       } else {
         p.textContent = body.wrapper.detail || "wrapper が応答しません";
       }
