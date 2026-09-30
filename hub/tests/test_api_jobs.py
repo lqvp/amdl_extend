@@ -3927,14 +3927,15 @@ async def test_both_bulk_routes_need_a_session(client):
 
 
 async def test_delete_pending_removes_queued_and_waiting_and_spares_running(
-    running, authed, settings
+    running, authed, settings, monkeypatch
 ):
     """The wrapper-down cleanup: parked and queued rows go; a rip in flight stays."""
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
     store = _store(settings)
     store.mark(1, "waiting")  # parked by a wrapper that died mid-rip
-    # `running` is reached through claim_next, not mark: the store refuses terminal->active
-    # transitions on the row, and the honest state is "a worker claimed this one".
+    # `running` is reached through claim_next, not mark: the honest state of a running
+    # row is "a worker claimed this one". The parked row 1 is not claimable.
     claimed = store.claim_next()
     assert claimed is not None and claimed.id == 2
     leaves = running.state.leaves
@@ -4683,6 +4684,72 @@ async def test_pause_blocks_the_next_claim_but_lets_an_inflight_rip_finish(
     assert resumed.status_code == 200 and resumed.json()["paused"] is False
     assert await running.state.run_pool() == 1
     assert running.state.jobs.get(created[1]).status == "done"
+
+
+async def test_a_drained_queue_still_clears_the_wrapper_announcement(live_app, settings, supervisor):
+    """M-1: the banner must not outlive the queue it was raised over.
+
+    The wrapper is down, its announcement is live, and the operator clears the queue
+    (the "Clear queued & waiting" button). The queue is now empty, so the loop would
+    normally stop probing -- but an uncleaned announcement means someone is still
+    reading a stale banner, so the idle loop probes at the readiness rate and the
+    wrapper's return still broadcasts `{"kind": "wrapper", "problem": None}`.
+    """
+    supervisor.regions = ["jp"]
+    store = _store(settings)
+    async with live_app.router.lifespan_context(live_app):
+        await asyncio.sleep(0.2)
+        assert live_app.state.cached_problem is None
+        store.create_batch(
+            ALBUM_URL,
+            "album",
+            [Leaf(adam_id="1", title="t", album_name="A", artist_name="X",
+                  codec="alac", language="ja", url=ALBUM_URL, storefront="jp")],
+            force=False,
+        )
+        supervisor.regions = []
+        await asyncio.sleep(0.3)
+        assert live_app.state.cached_problem == "no-account"
+
+        # The operator clears the queue while the wrapper is still down -- the
+        # destructive "Clear queued & waiting" button, which removes the rows.
+        store.delete_pending()
+        assert store.list() == []
+
+        # Wrapper comes back. Nobody is left to probe for it via the queue path;
+        # the idle-announcement probe must clear the frame instead.
+        supervisor.regions = ["jp"]
+        await asyncio.sleep(scheduler_module.IDLE_READINESS_POLL_SECONDS * 2)
+        assert live_app.state.cached_problem is None, (
+            "the idle loop with an uncleaned announcement stopped probing"
+        )
+
+        # The client side is the wrapper frame -> re-probe -> banner clears; here the
+        # clearing frame itself is the contract, observed via the broker.
+        agen = live_app.state.broker.subscribe("jobs")
+        frames: list[dict] = []
+
+        async def read_frames() -> None:
+            async for chunk in agen:
+                frames.append(json.loads(chunk))
+
+        reader = asyncio.create_task(read_frames())
+        await asyncio.sleep(scheduler_module.IDLE_READINESS_POLL_SECONDS * 2)
+        # The backlog replays the announcement; the clearing frame itself arrived while
+        # we were already subscribed (or landed in the backlog) -- count exactly one.
+        assert len([f for f in frames if f.get("kind") == "wrapper" and f.get("problem") is None]) == 1
+        # And the loop must NOT re-announce on its own once cleared.
+        frames.clear()
+        await asyncio.sleep(scheduler_module.IDLE_READINESS_POLL_SECONDS * 2)
+        assert [f for f in frames if f.get("kind") == "wrapper"] == [], (
+            "a cleared announcement kept re-broadcasting while idle"
+        )
+        reader.cancel()
+        try:
+            await reader
+        except asyncio.CancelledError:
+            pass
+        await agen.aclose()
 
 
 async def test_the_wrapper_recovery_broadcast_clears_the_banner_exactly_once(

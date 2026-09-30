@@ -789,7 +789,24 @@ async def scheduler_loop(state: HubState) -> None:
         # hub -- no `queued` and no `waiting` job -- is the only state in which readiness
         # cannot matter, so it asks the database and not the wrapper.
         if not _has_actionable(state):
-            await _sleep_or_stop(state, IDLE_POLL_SECONDS)
+            # An idle hub does not probe at all -- with one exception: an uncleaned
+            # announcement. The clearing frame exists to tell open tabs the wrapper is
+            # back, and if the queue drained while the wrapper was down (the "Clear
+            # queued & waiting" button, or a cancel), no later probe would ever send
+            # it. So while `announced` is set, the idle loop probes at the *readiness*
+            # rate and clears the frame itself when the wrapper returns; the probe
+            # refreshes `cached_problem` too, because the announcement is the only
+            # thing that still tracks the wrapper's state for the hub itself.
+            if announced is not None:
+                problem = await _wrapper_problem(state)
+                state.cached_problem = problem
+                if problem is None:
+                    announced = None
+                    state.broker.publish(JOBS_CHANNEL, {"kind": "wrapper", "problem": None})
+            await _sleep_or_stop(
+                state,
+                IDLE_READINESS_POLL_SECONDS if announced is not None else IDLE_POLL_SECONDS,
+            )
             continue
 
         # Something is queued, so readiness is about to be acted on and is probed now. A
