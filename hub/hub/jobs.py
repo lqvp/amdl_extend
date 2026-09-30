@@ -344,6 +344,21 @@ class RequeueResult:
     refused: list[int] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class CancelResult:
+    """What one `cancel_pending` did, per row -- the `RequeueResult` shape again.
+
+    `refused` holds the `running` rows of the group: their transfer is in flight and
+    upstream owns the partial file, so the cancel does not touch them -- the same
+    reasoning `delete_finished` gives for never deleting a `running` row. **Reporting
+    them rather than hiding them** is the contract: a caller that reported only
+    `cancelled` would show a queue that does not match what the user sees ripping.
+    """
+
+    cancelled: list[int] = field(default_factory=list)
+    refused: list[int] = field(default_factory=list)
+
+
 def _job_from_row(row: sqlite3.Row) -> Job:
     """Map one row onto the dataclass, in the one place the two namings meet."""
     return Job(
@@ -722,11 +737,56 @@ class JobStore:
             "UPDATE job SET status = 'queued' WHERE status = 'waiting'"
         ).rowcount
 
+    def cancel_pending(self, parent_url: str) -> CancelResult:
+        """Cancel every `queued`/`waiting` row of one batch, and refuse the rest.
+
+        The group cancel's store half: `parent_url` is the batch identity (see
+        `list`'s docstring for why it is the URL column and not the unused
+        `parent_id` self-reference).
+
+        - **Only `queued` and `waiting` move, and the predicate is in the `UPDATE`'s
+          `WHERE`** -- the same shape `mark` uses. There is no time-of-check gap:
+          the guard and the write are one statement.
+        - **`running` is refused, not cancelled.** The transfer is in flight and
+          upstream owns its partial file -- the same reason `delete_finished` and
+          `requeue` never touch it. The refused ids are *reported*; hiding them would
+          make the queue page disagree with the cancel answer.
+        - Unknown or empty groups cancel nothing and answer with two empty lists:
+          "nothing to do" is not an error, and the caller can say so truthfully.
+
+        The `refused` read happens *after* the `UPDATE` and the `cancelled` read
+        *before* it. Both are safe in this process and only in this process: every
+        store call is synchronous on the one event loop (`workers=1`), so no
+        `claim_next` can interleave inside this function -- and the `UPDATE`'s
+        `WHERE` guard still holds the line for any future writer.
+        """
+        cancelled = [
+            row["id"]
+            for row in self._conn.execute(
+                "SELECT id FROM job WHERE url = ? AND status IN ('queued', 'waiting')",
+                (parent_url,),
+            ).fetchall()
+        ]
+        # The status predicate is the guard: even if `cancelled` had gone stale, this
+        # statement cannot move a row that is not `queued`/`waiting` at write time.
+        self._conn.execute(
+            "UPDATE job SET status = 'cancelled', finished_at = ?"
+            " WHERE url = ? AND status IN ('queued', 'waiting')",
+            (_now(), parent_url),
+        )
+        refused = [
+            row["id"]
+            for row in self._conn.execute(
+                "SELECT id FROM job WHERE url = ? AND status = 'running'", (parent_url,)
+            ).fetchall()
+        ]
+        return CancelResult(cancelled=sorted(cancelled), refused=sorted(refused))
+
     # -- reading ------------------------------------------------------------
 
     # -- clearing the queue --------------------------------------------------
 
-    def delete_finished(self) -> list[int]:
+    def delete_finished(self, parent_url: str | None = None) -> list[int]:
         """Remove every row in a terminal status, and return the ids that went.
 
         **The first statement in this project that deletes a row**, and irreversible.
@@ -744,12 +804,19 @@ class JobStore:
         Idempotent, because a UI that double-submits must not be able to turn the second
         click into an error.
 
+        `parent_url` limits the delete to one batch's rows -- the group cancel's sibling
+        operation; `None` (the default) means every finished row, exactly as before.
+
         **Returns the ids rather than a count** because the caller also holds each job's
         `Leaf` in memory -- `LeafRegistry` has no bulk clear, so only the ids let it forget
         what is no longer queued. A count would leak one entry per deleted row.
         """
         placeholders = ", ".join("?" for _ in TERMINAL_STATUSES)
         params = sorted(TERMINAL_STATUSES)
+        where = f"status IN ({placeholders})"
+        if parent_url is not None:
+            where += " AND url = ?"
+            params.append(parent_url)
         # Read before write, in one transaction, so the ids cannot drift from the rows
         # deleted: another writer changing a status between the two statements would
         # otherwise produce a list the caller is then told to forget leaves for.
@@ -757,13 +824,13 @@ class JobStore:
             doomed = [
                 row["id"]
                 for row in self._conn.execute(
-                    f"SELECT id FROM job WHERE status IN ({placeholders})", params
+                    f"SELECT id FROM job WHERE {where}", params
                 ).fetchall()
             ]
-            self._conn.execute(f"DELETE FROM job WHERE status IN ({placeholders})", params)
+            self._conn.execute(f"DELETE FROM job WHERE {where}", params)
         return sorted(doomed)
 
-    def requeue(self, statuses: Collection[str]) -> RequeueResult:
+    def requeue(self, statuses: Collection[str], parent_url: str | None = None) -> RequeueResult:
         """Put rows in `statuses` back on the queue, and report the ones that could not.
 
         `statuses` is a collection rather than a single status because "re-queue what
@@ -784,6 +851,9 @@ class JobStore:
         between the read and the write is not clobbered -- the same reason `mark` is
         careful, and the reason the outcome columns are cleared rather than the row
         being rebuilt.
+
+        `parent_url` limits the requeue to one batch's rows (the group retry); `None`
+        means the whole table, exactly as before.
         """
         # `running` is excluded because moving it would double-rip a track; `queued` is
         # excluded because a row already there is not "requeued" -- nothing happens to it,
@@ -793,8 +863,13 @@ class JobStore:
         if not wanted:
             return RequeueResult()
         placeholders = ", ".join("?" for _ in wanted)
+        params: list = list(wanted)
+        where = f"status IN ({placeholders})"
+        if parent_url is not None:
+            where += " AND url = ?"
+            params.append(parent_url)
         rows = self._conn.execute(
-            f"SELECT id, status FROM job WHERE status IN ({placeholders})", wanted
+            f"SELECT id, status FROM job WHERE {where}", params
         ).fetchall()
 
         requeued: list[int] = []

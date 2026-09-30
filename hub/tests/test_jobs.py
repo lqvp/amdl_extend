@@ -1571,3 +1571,95 @@ def test_queue_window_keeps_every_active_job_and_pages_old_terminal_history(tmp_
     oldest = store.history_page(before_id=older["before_id"], limit=10)
     assert [job.id for job in oldest["jobs"]] == [created[0]]
     assert oldest["has_more"] is False
+
+
+# --- group operations over `parent_url` ---------------------------------------
+
+
+def test_cancel_pending_cancels_queued_and_waiting_and_refuses_running(tmp_path):
+    """The group cancel: queued/waiting rows of one parent_url go, running stays.
+
+    `running` is refused rather than cancelled because the transfer is in flight
+    upstream and owns its partial file -- the same reason `delete_finished` and
+    `requeue` never touch it. The refused ids are reported, not hidden: the caller
+    has to say "1 cancelled, 1 still ripping" truthfully.
+    """
+    store = JobStore(tmp_path / "hub.db")
+    parent = "https://music.apple.com/us/album/x/123"
+    other_parent = "https://music.apple.com/us/album/other/456"
+    store.create_batch(parent, "album", [leaf("1")], force=False)
+    store.create_batch(parent, "album", [leaf("2")], force=False)
+    running = store.claim_next()  # row 1 is `running` now
+    assert running is not None
+    store.mark(running.id, "waiting")  # parked -- still cancelled by the group
+    waiting_id = running.id
+    store.create_batch(parent, "album", [leaf("3")], force=False)
+    claimed_again = store.claim_next()
+    assert claimed_again is not None
+    store.create_batch(other_parent, "album", [leaf("4")], force=False)
+
+    result = store.cancel_pending(parent)
+
+    assert sorted(result.cancelled) == sorted(
+        j.id for j in store.list(parent_url=parent) if j.status == "cancelled"
+    )
+    assert waiting_id in result.cancelled
+    assert claimed_again.id in result.refused
+    assert len(result.cancelled) == 2 and len(result.refused) == 1
+    assert store.get(claimed_again.id).status == "running"
+    assert store.get(waiting_id).finished_at is not None, (
+        "cancelled is terminal; the module's terminal-timestamp invariant says the row "
+        "carries its finish time"
+    )
+    # The other group is untouched.
+    assert store.list(parent_url=other_parent)[0].status == "queued"
+
+
+def test_cancel_pending_unknown_parent_url_cancels_nothing(tmp_path):
+    store = JobStore(tmp_path / "hub.db")
+    store.create_batch("u", "album", [leaf("1")], force=False)
+    result = store.cancel_pending("https://music.apple.com/absent")
+    assert result.cancelled == [] and result.refused == []
+    assert store.list()[0].status == "queued"
+
+
+def test_cancel_pending_frees_the_dedupe_slot(tmp_path):
+    """A cancelled group frees its dedup slots -- `TERMINAL_STATUSES` working, checked
+    through the group operation rather than one row at a time."""
+    store = JobStore(tmp_path / "hub.db")
+    parent = "https://music.apple.com/us/album/x/123"
+    store.create_batch(parent, "album", [leaf("1")], force=False)
+    store.cancel_pending(parent)
+    assert len(store.create_batch(parent, "album", [leaf("1")], force=False).created) == 1
+
+
+def test_requeue_parent_url_filter_touches_only_the_group(tmp_path):
+    store = JobStore(tmp_path / "hub.db")
+    parent = "p"
+    store.create_batch(parent, "album", [leaf("1")], force=False)
+    store.create_batch(parent, "album", [leaf("2")], force=False)
+    mine = [j.id for j in store.list(parent_url=parent)]
+    for job_id in mine:
+        store.mark(job_id, "failed")
+    store.create_batch("other", "album", [leaf("3")], force=False)
+    store.mark(store.list(parent_url="other")[0].id, "failed")
+
+    result = store.requeue({"failed"}, parent_url=parent)
+
+    assert result.requeued == sorted(mine)
+    assert result.refused == []
+    assert store.list(parent_url="other")[0].status == "failed"
+
+
+def test_delete_finished_parent_url_filter_touches_only_the_group(tmp_path):
+    store = JobStore(tmp_path / "hub.db")
+    parent = "p"
+    store.create_batch(parent, "album", [leaf("1")], force=False)
+    store.mark(1, "done")
+    store.create_batch("other", "album", [leaf("2")], force=False)
+    store.mark(2, "done")
+
+    deleted = store.delete_finished(parent_url=parent)
+
+    assert deleted == [1]
+    assert [j.id for j in store.list()] == [2]
