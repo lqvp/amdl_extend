@@ -192,9 +192,10 @@ async def test_every_route_but_health_requires_a_session(running):
     assert len(table) == len(set(table))
     # WebSocket endpoints are not represented in OpenAPI; the `/api/jobs/stream` HTTP route
     # was removed when the queue moved to `/api/jobs/ws`; the new queue history/control
-    # endpoints bring the HTTP inventory to 32; `POST /api/jobs/cancel` brings it to 33.
-    assert len(table) == 33, (
-        f"the route table has {len(table)} entries, not 33: {table}. A new HTTP route is "
+    # endpoints bring the HTTP inventory to 32, `POST /api/jobs/cancel` to 33, and `GET
+    # /api/jobs/export` to 34.
+    assert len(table) == 34, (
+        f"the route table has {len(table)} entries, not 34: {table}. A new HTTP route is "
         f"expected to change this number -- add it to OPEN_WITHOUT_A_SESSION only if it "
         f"genuinely has to be reachable without a session."
     )
@@ -3961,6 +3962,83 @@ async def test_cancel_endpoint_unknown_group_is_200_with_empty_lists(running, au
     response = await authed.post("/api/jobs/cancel", json={"parent_url": "nobody-queued-this"})
     assert response.status_code == 200
     assert response.json() == {"cancelled": [], "refused": []}
+
+
+async def test_export_queue_csv_starts_with_bom_and_header(running, authed, monkeypatch):
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+
+    response = await authed.get("/api/jobs/export?kind=queue&format=csv")
+
+    assert response.status_code == 200
+    assert response.content.startswith(b"\xef\xbb\xbf")
+    header = response.text.lstrip("\ufeff").splitlines()[0]
+    # The header is the *whole* row shape, pinned in order: a renamed, dropped, or
+    # reordered column breaks the export for exactly the spreadsheet the operator opens.
+    assert header.split(",") == [
+        "id", "url", "url_type", "adam_id", "title", "codec", "language", "force",
+        "status", "skip_reason", "parent_id", "progress", "bytes_done", "bytes_total",
+        "error", "created_at", "started_at", "finished_at",
+    ]
+    # All three enqueued leaves are active; the export names them in id order.
+    body_lines = response.text.lstrip("\ufeff").strip().splitlines()[1:]
+    assert [line.split(",")[0] for line in body_lines] == ["1", "2", "3"]
+    assert "amd-hub-queue-" in response.headers["content-disposition"]
+    assert response.headers["content-disposition"].endswith(".csv\"")
+
+
+async def test_export_history_returns_terminal_rows_desc(running, authed, settings, monkeypatch):
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    store = _store(settings)
+    store.mark(1, "done")
+    store.mark(2, "failed")
+
+    response = await authed.get("/api/jobs/export?kind=history&format=csv")
+
+    body_lines = response.text.lstrip("\ufeff").strip().splitlines()[1:]
+    assert [line.split(",")[0] for line in body_lines] == ["2", "1"]
+
+
+async def test_export_invalid_kind_is_400(running, authed):
+    response = await authed.get("/api/jobs/export?kind=everything&format=csv")
+    assert response.status_code == 400
+    assert "kind" in response.text
+    response = await authed.get("/api/jobs/export?kind=queue&format=xml")
+    assert response.status_code == 400
+    assert "format" in response.text
+
+
+async def test_export_json_contains_skip_reason_verbatim(running, authed, settings, monkeypatch):
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    store = _store(settings)
+    store.mark(1, "skipped", skip_reason="duplicate:/library/A/T.flac|/library/B/T.flac")
+
+    response = await authed.get("/api/jobs/export?kind=history&format=json")
+
+    row = next(j for j in response.json() if j["id"] == 1)
+    assert row["skip_reason"] == "duplicate:/library/A/T.flac|/library/B/T.flac"
+    assert row["status"] == "skipped"
+
+
+async def test_export_leaves_the_queue_untouched(running, authed, monkeypatch):
+    """Export is read-only: it takes a snapshot and writes nothing."""
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    store = running.state.jobs
+
+    def snapshot():
+        return [(j.id, j.status, j.started_at, j.finished_at) for j in store.list()]
+
+    before = snapshot()
+    await authed.get("/api/jobs/export?kind=history&format=csv")
+    await authed.get("/api/jobs/export?kind=queue&format=json")
+    assert snapshot() == before
+
+
+async def test_export_needs_a_session(client):
+    assert (await client.get("/api/jobs/export?kind=queue&format=csv")).status_code == 401
 
 
 async def test_cancel_endpoint_publishes_the_cancelled_ids(running, authed, monkeypatch):
