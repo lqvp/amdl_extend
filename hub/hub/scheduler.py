@@ -816,7 +816,7 @@ async def scheduler_loop(state: HubState) -> None:
             )
             continue
 
-        # Something is queued, so readiness is about to be acted on and is probed now. A
+        # Something is queued, so readiness is about to be acted on and is probed now.
         # A cached answer here is the bug: a token that expired an hour ago would
         # still read as ready.
         problem = await _wrapper_problem(state)
