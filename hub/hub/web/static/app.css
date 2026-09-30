@@ -697,7 +697,10 @@ details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--
 .group-header td {
   padding: 0.5rem 0.75rem;
   background: var(--panel, #f4f4f5);
-  border-top: 1px solid currentColor;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
 }
-.group-header .group-url { max-width: 60%; overflow-wrap: anywhere; }
-.group-header .group-actions { float: right; display: inline-flex; gap: 0.5rem; }
+.group-header .group-url { overflow-wrap: anywhere; }
+.group-header .group-actions { display: inline-flex; gap: 0.5rem; flex: none; }

@@ -389,7 +389,7 @@
     tr.dataset.jobId = job.id;
     if (job.parent_url) {
       tr.dataset.parentUrl = job.parent_url;
-      tr.dataset.parentType = job.parent_type;
+      tr.dataset.parentType = job.parent_type || "group";
     }
     tr.dataset.finished = FINISHED_STATUSES.indexOf(job.status) === -1 ? "0" : "1";
 
@@ -424,6 +424,8 @@
     if (row) body.replaceChild(buildRow(job), row);
     else body.appendChild(buildRow(job));
     updateQueueSummary();
+    // A new id can open a new group, so the headers are re-derived before the filters.
+    syncGroupHeaders();
     // Re-apply search, status and finished filters whenever a live row changes.
     applyQueueFilters();
   }
@@ -436,6 +438,8 @@
       if (row) row.remove();
     });
     updateQueueSummary();
+    // A row set can empty a group; its header goes with it.
+    syncGroupHeaders();
     applyQueueFilters();
   }
 
@@ -513,6 +517,7 @@
       body.appendChild(buildRow(job));
     });
     updateQueueSummary();
+    syncGroupHeaders();
     applyQueueFilters();
   }
 
@@ -552,7 +557,7 @@
   }
 
   function syncGroupHeaders() {
-    Array.prototype.slice.call(body.querySelectorAll("tr.group-header"))
+    Array.prototype.slice.call(body.querySelectorAll(":scope > tr.group-header"))
       .forEach(function (row) { body.removeChild(row); });
     var rows = Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"));
     var previousParent = null;
