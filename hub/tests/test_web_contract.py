@@ -708,6 +708,23 @@ def test_group_headers_offer_the_group_actions():
     assert 'post("/api/jobs/cancel", {parent_url:' in script
     assert 'post("/api/jobs/requeue", {scope: "failed", parent_url:' in script
 
+    # The snapshot wipes the tbody and rebuilds every row. If the client-side re-derive
+    # ran nowhere on the snapshot path, the Jinja headers would live for the pre-hydration
+    # paint only, and the group buttons would be dead on the live page -- with the
+    # substring checks above still green. The re-derive call site is pinned instead.
+    body = script[script.index("function replaceRows") : script.index("function sortQueueRows")]
+    assert "syncGroupHeaders()" in body, (
+        "the snapshot wipes tbody; without a re-derive the group actions vanish on the "
+        "first frame"
+    )
+    # And the client-side header is a button the browser won't submit, built by the
+    # script, not only by the template.
+    header_builder = script[
+        script.index("function groupHeaderRow") : script.index("function syncGroupHeaders")
+    ]
+    assert 'cancel.type = "button"' in header_builder
+    assert 'requeue.type = "button"' in header_builder
+
 
 def test_the_queue_uses_a_reconnecting_websocket_not_eventsource():
     """Transport loss reconnects to a fresh snapshot; expired sessions stop retrying."""

@@ -31,6 +31,7 @@ import asyncio
 import json
 from contextlib import suppress
 from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -70,6 +71,39 @@ CODECS: frozenset[str] = frozenset(
 PARENT_TYPES: frozenset[str] = frozenset(
     {"song", "album", "artist", "playlist", "music-video"}
 )
+
+
+#: The row shape of the CSV export when the table is empty (header-only file).
+JOB_COLUMNS = (
+    "id",
+    "url",
+    "url_type",
+    "adam_id",
+    "title",
+    "codec",
+    "language",
+    "force",
+    "status",
+    "skip_reason",
+    "parent_id",
+    "progress",
+    "bytes_done",
+    "bytes_total",
+    "error",
+    "created_at",
+    "started_at",
+    "finished_at",
+)
+
+
+def _csv_cell(value: object) -> str:
+    """One value as RFC 4180 CSV: quoted when it contains a delimiter, quote, or newline."""
+    if value is None:
+        return ""
+    text = str(value)
+    if any(ch in text for ch in ('"', ",", "\n", "\r")):
+        return '"' + text.replace('"', '""') + '"'
+    return text
 
 
 def job_to_dict(job: Job) -> dict:
@@ -674,6 +708,63 @@ async def requeue_jobs(request: Request, body: _RequeueBody | None = None) -> Re
     for job_id in result.requeued:
         _publish_job(state, job_id)
     return {"requeued": result.requeued, "refused": result.refused}
+
+
+@router.get("/api/jobs/export")
+async def export_jobs(
+    request: Request,
+    kind: str = Query(default="history"),
+    format: str = Query(default="csv"),
+) -> Response:
+    """Export every row of the queue or of the history, as CSV or JSON.
+
+    The history page is paginated because the browser cannot swallow 8,000 rows at once;
+    an export is for the opposite case -- the operator who wants the *whole* table, with
+    `skip_reason` intact, for exactly the adjudication that paginated browsing cannot
+    do. It is read-only by construction: one `SELECT`, `queue_window` or its terminal
+    mirror, no writes and no cache (the table is the single source of truth).
+
+    - `kind=queue` exports the active rows in id order (what is pending);
+      `kind=history` exports every terminal row, newest first (the audit trail).
+    - `format=csv` returns BOM+UTF-8 (`Content-Disposition: attachment`) so spreadsheet
+      apps read `skip_reason`'s non-ASCII paths correctly; `format=json` returns row
+      objects. Invalid values are `fail(400, ...)` rather than a schema 422 -- the
+      vocabulary (`queue`/`history`, `csv`/`json`) belongs at the boundary.
+    """
+    if kind not in ("queue", "history"):
+        return fail(400, f"{kind!r} is not an export kind. Use 'queue' or 'history'.")
+    if format not in ("csv", "json"):
+        return fail(400, f"{format!r} is not an export format. Use 'csv' or 'json'.")
+    state = request.app.state
+    if kind == "queue":
+        rows = state.jobs._conn.execute(
+            "SELECT * FROM job WHERE status IN ('queued','waiting','running') ORDER BY id"
+        ).fetchall()
+    else:
+        rows = state.jobs._conn.execute(
+            "SELECT * FROM job WHERE status IN ('done','failed','skipped','cancelled')"
+            " ORDER BY id DESC"
+        ).fetchall()
+    columns = rows[0].keys() if rows else JOB_COLUMNS
+    if format == "json":
+        body = [dict(row) for row in rows]
+        return Response(
+            content=json.dumps(body, ensure_ascii=False),
+            media_type="application/json",
+        )
+    # CSV: BOM first so spreadsheet apps read non-ASCII paths; RFC 4180 quoting.
+    text = "\ufeff" + ",".join(columns) + "\n"
+    text += "\n".join(
+        ",".join(_csv_cell(row[column]) for column in columns) for row in rows
+    )
+    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "Z"
+    return Response(
+        content=text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="amd-hub-{kind}-{stamp}.csv"'
+        },
+    )
 
 
 @router.post("/api/jobs/cancel")
