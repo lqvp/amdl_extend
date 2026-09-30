@@ -707,3 +707,8 @@ details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--
 
 /* Export links read as text tools, not actions. */
 .export-tools { gap: 0.75rem; align-items: baseline; }
+
+/* Health banner: a quiet frame so the wrapper/library messages read as the page's
+   own state, not as toast spam. The empty mount div is invisible by default. */
+#health-banner:empty { display: none; }
+#health-banner { margin: 0 0 0.5rem; }
