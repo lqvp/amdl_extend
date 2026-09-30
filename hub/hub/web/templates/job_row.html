@@ -17,6 +17,7 @@
   have, and §7.5's own rules keep odd characters rather than stripping them.
 #}
 <tr id="job-{{ job.id }}" data-job-id="{{ job.id }}"
+    {% if job.parent_url %}data-parent-url="{{ job.parent_url }}" data-parent-type="{{ job.parent_type }}"{% endif %}
     class="status-{{ job.status }}"
     data-finished="{{ '1' if job.status in ('done', 'failed', 'skipped', 'cancelled') else '0' }}">
   {#- The cell order is `queue.html`'s `<thead>`, and it is load-bearing in both directions:

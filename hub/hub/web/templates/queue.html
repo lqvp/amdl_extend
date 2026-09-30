@@ -222,7 +222,22 @@
         </tr>
       </thead>
       <tbody id="queue-body">
+        {#- A queued batch is a group: its rows share the parent URL, and a run of one
+            parent URL is contiguous in id order. The header names the group and owns
+            its two bulk operations; `applyQueueFilters` hides a header whose whole run
+            is filtered away. -#}
         {% for job in jobs %}
+          {% if job.parent_url and (loop.first or job.parent_url != jobs[loop.index0 - 1].parent_url) %}
+          <tr class="group-header">
+            <td colspan="7">
+              <a class="group-url muted small" href="{{ job.parent_url }}" rel="noreferrer noopener">{{ job.parent_type or "group" }}</a>
+              <span class="group-actions">
+                <button type="button" data-action="cancel-group" data-parent-url="{{ job.parent_url }}">Cancel queued</button>
+                <button type="button" data-action="requeue-failed-group" data-parent-url="{{ job.parent_url }}">Re-queue failed</button>
+              </span>
+            </td>
+          </tr>
+          {% endif %}
           {% include "job_row.html" %}
         {% endfor %}
       </tbody>

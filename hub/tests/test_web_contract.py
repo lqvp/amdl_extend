@@ -681,8 +681,32 @@ def test_the_script_handles_every_bulk_action_the_page_offers():
         "queue-pause",
         "queue-resume",
         "queue-load-history",
+        "cancel-group",
+        "requeue-failed-group",
     ):
         assert f'"{action}"' in js, f"the page offers {action} and the script does not handle it"
+
+
+def test_group_headers_offer_the_group_actions():
+    """A queued batch can be cancelled / re-queued as a unit.
+
+    Both the server markup (initial render) and the script (re-sync after every sort)
+    carry the header row; a `data-action` on one side and no handler on the other is a
+    button that silently does nothing, so both sides are checked.
+    """
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/queue.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    for control in (
+        'data-action="cancel-group"',
+        'data-action="requeue-failed-group"',
+        'data-parent-url="{{ job.parent_url }}"',
+    ):
+        assert control in template, f"the queue is missing its group affordance: {control}"
+    assert 'dataset.action = "cancel-group"' in script
+    assert 'dataset.action = "requeue-failed-group"' in script
+    assert 'post("/api/jobs/cancel", {parent_url:' in script
+    assert 'post("/api/jobs/requeue", {scope: "failed", parent_url:' in script
 
 
 def test_the_queue_uses_a_reconnecting_websocket_not_eventsource():

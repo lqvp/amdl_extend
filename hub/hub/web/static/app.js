@@ -387,6 +387,10 @@
     var tr = el("tr", "status-" + job.status);
     tr.id = "job-" + job.id;
     tr.dataset.jobId = job.id;
+    if (job.parent_url) {
+      tr.dataset.parentUrl = job.parent_url;
+      tr.dataset.parentType = job.parent_type;
+    }
     tr.dataset.finished = FINISHED_STATUSES.indexOf(job.status) === -1 ? "0" : "1";
 
     var status = el("td", "status-cell");
@@ -516,6 +520,49 @@
     Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"))
       .sort(function (a, b) { return Number(a.dataset.jobId) - Number(b.dataset.jobId); })
       .forEach(function (row) { body.appendChild(row); });
+    syncGroupHeaders();
+  }
+
+  /* Group headers are derived from the rows, and the rows are the truth: the same
+     reconcile after every snapshot, upsert-sort, or history load. A header is
+     removed and re-added so a batch that changes parent -- or a row set that leaves
+     the header orphaned -- cannot strand a stale control on the page. */
+  function groupHeaderRow(parentUrl, parentType) {
+    var tr = el("tr", "group-header");
+    var td = el("td", null);
+    td.colSpan = 7;
+    var link = el("a", "group-url muted small", parentType || "group");
+    link.href = parentUrl;
+    link.rel = "noreferrer noopener";
+    td.appendChild(link);
+    var actions = el("span", "group-actions");
+    var cancel = el("button", null, "Cancel queued");
+    cancel.type = "button";
+    cancel.dataset.action = "cancel-group";
+    cancel.dataset.parentUrl = parentUrl;
+    actions.appendChild(cancel);
+    var requeue = el("button", null, "Re-queue failed");
+    requeue.type = "button";
+    requeue.dataset.action = "requeue-failed-group";
+    requeue.dataset.parentUrl = parentUrl;
+    actions.appendChild(requeue);
+    td.appendChild(actions);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function syncGroupHeaders() {
+    Array.prototype.slice.call(body.querySelectorAll("tr.group-header"))
+      .forEach(function (row) { body.removeChild(row); });
+    var rows = Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"));
+    var previousParent = null;
+    rows.forEach(function (row) {
+      var parent = row.dataset.parentUrl;
+      if (parent && parent !== previousParent) {
+        body.insertBefore(groupHeaderRow(parent, row.dataset.parentType), row);
+      }
+      previousParent = parent;
+    });
   }
 
   function loadHistory() {
@@ -846,6 +893,16 @@
       }).finally(function () {
         target.disabled = false;
       });
+    } else if (action === "cancel-group" && target.dataset.parentUrl) {
+      post("/api/jobs/cancel", {parent_url: target.dataset.parentUrl}).then(function (result) {
+        if (!result.ok) log((result.data && result.data.detail) || "the group could not be cancelled");
+        // The cancelled rows come back as `job` frames; no manual DOM bookkeeping.
+      }).catch(function () { log("Could not reach the hub to cancel the group."); });
+    } else if (action === "requeue-failed-group" && target.dataset.parentUrl) {
+      post("/api/jobs/requeue", {scope: "failed", parent_url: target.dataset.parentUrl}).then(function (result) {
+        if (!result.ok) log((result.data && result.data.detail) || "the group could not be re-queued");
+        // The requeued rows come back as `job` frames; no manual DOM bookkeeping.
+      }).catch(function () { log("Could not reach the hub to re-queue the group."); });
     } else if (action === "queue-toggle-finished") {
       setFinishedVisible(!finishedVisible());
     } else if (action === "queue-clear-filters") {
@@ -886,6 +943,18 @@
       var matchesSearch = !query || row.textContent.toLowerCase().indexOf(query) !== -1;
       row.hidden = !(matchesFinished && matchesStatus && matchesSearch);
       if (!row.hidden) visible += 1;
+    });
+
+    // Group headers follow their run: a header stays only while one of the rows after
+    // it (up to the next header) is visible.
+    var header = null;
+    Array.prototype.slice.call(body.children).forEach(function (child) {
+      if (child.classList && child.classList.contains("group-header")) {
+        header = child;
+        header.hidden = true;
+      } else if (header && !child.hidden) {
+        header.hidden = false;
+      }
     });
 
     if (queueVisibleCount) {

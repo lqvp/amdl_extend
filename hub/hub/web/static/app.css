@@ -691,3 +691,13 @@ details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--
   button:not(.link):active { transform: none; }
   .bar nav a { transition: none; }
 }
+
+/* Group headers carry the batch identity and its two bulk operations. Muted so the
+   rows read first; the buttons are right-aligned so they never sit under the URL. */
+.group-header td {
+  padding: 0.5rem 0.75rem;
+  background: var(--panel, #f4f4f5);
+  border-top: 1px solid currentColor;
+}
+.group-header .group-url { max-width: 60%; overflow-wrap: anywhere; }
+.group-header .group-actions { float: right; display: inline-flex; gap: 0.5rem; }
