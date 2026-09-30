@@ -1663,3 +1663,27 @@ def test_delete_finished_parent_url_filter_touches_only_the_group(tmp_path):
 
     assert deleted == [1]
     assert [j.id for j in store.list()] == [2]
+
+
+def test_delete_pending_removes_queued_and_waiting_and_spares_the_rest(tmp_path):
+    """The bulk cleanup: queued/waiting rows go, running and terminal rows stay."""
+    store = JobStore(tmp_path / "hub.db")
+    store.create_batch("u", "album", [leaf(str(i)) for i in range(4)], force=False)
+    store.mark(1, "waiting")
+    store.mark(2, "running")  # in-flight: upstream owns the transfer, no bulk path deletes it
+    store.mark(3, "done")
+
+    deleted = store.delete_pending()
+
+    assert deleted == [1, 4]
+    assert store.get(2) is not None and store.get(2).status == "running"
+    assert store.get(3) is not None and store.get(3).status == "done"
+    assert [row.id for row in store.list()] == [2, 3]
+
+
+def test_delete_pending_frees_the_dedupe_slot(tmp_path):
+    """Deleting the pending row unblocks the queue: the same track enqueues cleanly."""
+    store = JobStore(tmp_path / "hub.db")
+    store.create_batch("u", "album", [leaf("1")], force=False)
+    store.delete_pending()
+    assert len(store.create_batch("u", "album", [leaf("1")], force=False).created) == 1

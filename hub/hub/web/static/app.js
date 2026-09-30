@@ -364,7 +364,7 @@
       button = el("button", null, "Retry");
       button.type = "button";
       button.dataset.action = "job-retry";
-    } else if (job.status === "queued") {
+    } else if (job.status === "queued" || job.status === "waiting") {
       button = el("button", null, "Cancel");
       button.type = "button";
       button.dataset.action = "job-cancel";
@@ -974,6 +974,28 @@
         if (!result.ok) log((result.data && result.data.detail) || "the group could not be re-queued");
         // The requeued rows come back as `job` frames; no manual DOM bookkeeping.
       }).catch(function () { log("Could not reach the hub to re-queue the group."); });
+    } else if (action === "queue-clear-pending") {
+      if (!window.confirm("Cancel and remove every queued or waiting row?\n\nDownloading tracks are left alone. The files stay on disk.")) {
+        return;
+      }
+      target.disabled = true;
+      requestJson("/api/jobs/pending", { method: "DELETE" }).then(function (result) {
+        if (!result.ok) {
+          log((result.data && result.data.detail) || "pending rows could not be removed");
+          return;
+        }
+        var ids = (result.data && result.data.ids) || [];
+        removeJobs(ids);
+        log(
+          ids.length
+            ? "Removed " + ids.length + " queued/waiting row(s). Downloading tracks are untouched."
+            : "There are no queued or waiting rows to remove."
+        );
+      }).catch(function () {
+        log("Could not reach the hub to remove pending rows.");
+      }).finally(function () {
+        target.disabled = false;
+      });
     } else if (action === "queue-toggle-finished") {
       setFinishedVisible(!finishedVisible());
     } else if (action === "queue-clear-filters") {

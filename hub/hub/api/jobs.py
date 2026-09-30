@@ -820,6 +820,27 @@ async def delete_finished_jobs(
     return {"deleted": len(deleted), "ids": deleted}
 
 
+@router.delete("/api/jobs/pending")
+async def delete_pending_jobs(request: Request) -> Response:
+    """Remove every queued or waiting row, and forget the leaves that went with them.
+
+    The queue page's second bulk button. `delete_finished` covers terminal rows;
+    this covers the active-but-not-running ones -- the state a queue full of parked
+    jobs settles into when the wrapper is down for good. `running` rows are spared
+    by construction (`ACTIVE_STATUSES - {running}` is the store's WHERE): deleting
+    a row mid-rip would orphan the partial file upstream is still writing.
+
+    The leaves are forgotten and the ids published on the `deleted` frame, exactly
+    like `delete_finished`, so every open tab drops the rows in place.
+    """
+    state = request.app.state
+    deleted = state.jobs.delete_pending()
+    for job_id in deleted:
+        state.leaves.forget(job_id)
+    state.broker.publish(JOBS_CHANNEL, {"kind": "deleted", "ids": deleted})
+    return {"deleted": len(deleted), "ids": deleted}
+
+
 @router.get("/api/jobs/{job_id}")
 async def get_job(request: Request, job_id: int) -> Response:
     job = request.app.state.jobs.get(job_id)

@@ -193,9 +193,9 @@ async def test_every_route_but_health_requires_a_session(running):
     # WebSocket endpoints are not represented in OpenAPI; the `/api/jobs/stream` HTTP route
     # was removed when the queue moved to `/api/jobs/ws`; the new queue history/control
     # endpoints bring the HTTP inventory to 32, `POST /api/jobs/cancel` to 33, and `GET
-    # /api/jobs/export` to 34.
-    assert len(table) == 34, (
-        f"the route table has {len(table)} entries, not 34: {table}. A new HTTP route is "
+    # /api/jobs/export` to 34, and `DELETE /api/jobs/pending` to 35.
+    assert len(table) == 35, (
+        f"the route table has {len(table)} entries, not 35: {table}. A new HTTP route is "
         f"expected to change this number -- add it to OPEN_WITHOUT_A_SESSION only if it "
         f"genuinely has to be reachable without a session."
     )
@@ -3924,6 +3924,32 @@ async def test_both_bulk_routes_need_a_session(client):
     """A bulk delete is the most destructive thing the API offers, so it is guarded."""
     assert (await client.post("/api/jobs/requeue", json={"scope": "failed"})).status_code == 401
     assert (await client.delete("/api/jobs/finished")).status_code == 401
+
+
+async def test_delete_pending_removes_queued_and_waiting_and_spares_running(
+    running, authed, settings
+):
+    """The wrapper-down cleanup: parked and queued rows go; a rip in flight stays."""
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    store = _store(settings)
+    store.mark(1, "waiting")  # parked by a wrapper that died mid-rip
+    # `running` is reached through claim_next, not mark: the store refuses terminal->active
+    # transitions on the row, and the honest state is "a worker claimed this one".
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == 2
+    leaves = running.state.leaves
+    assert leaves.get(1) is not None, "the enqueue should have registered a leaf to forget"
+
+    response = await authed.delete("/api/jobs/pending")
+
+    assert response.json() == {"deleted": 2, "ids": [1, 3]}
+    assert store.get(2).status == "running"
+    assert leaves.get(1) is None, "the leaf outlived its row"
+    assert leaves.get(3) is None, "the leaf outlived its row"
+
+
+async def test_delete_pending_needs_a_session(client):
+    assert (await client.delete("/api/jobs/pending")).status_code == 401
 
 
 async def test_cancel_endpoint_reports_cancelled_and_refused(running, authed, settings, monkeypatch):

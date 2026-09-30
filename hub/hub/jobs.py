@@ -784,6 +784,35 @@ class JobStore:
         ]
         return CancelResult(cancelled=sorted(cancelled), refused=sorted(refused))
 
+    def delete_pending(self) -> list[int]:
+        """Remove every `queued`/`waiting` row, and return the ids that went.
+
+        The sibling of `delete_finished` for rows that are *not* terminal: the queue
+        page's "clear" button for a queue the wrapper cannot drain. The same rules
+        hold -- `running` rows are never touched (upstream owns the transfer and its
+        partial file, so deleting the row mid-rip would orphan the file), the delete
+        is idempotent, and the ids come back for `LeafRegistry.forget`.
+
+        Cancel-then-delete is implicit: a row removed here stops being claimed, and
+        freeing the `(adam_id, codec)` slot means a re-queue of the same track is
+        accepted -- which is exactly what the wrapper-down operator wants when the
+        wrapper comes back.
+        """
+        to_delete = sorted(ACTIVE_STATUSES - {"running"})
+        placeholders = ", ".join("?" for _ in to_delete)
+        where = f"status IN ({placeholders})"
+        # Read before write, in one transaction: the ids must not drift from the rows
+        # deleted, or the caller forgets leaves for rows that still exist.
+        with self._conn:  # type: ignore[attr-defined]
+            doomed = [
+                row["id"]
+                for row in self._conn.execute(
+                    f"SELECT id FROM job WHERE {where}", to_delete
+                ).fetchall()
+            ]
+            self._conn.execute(f"DELETE FROM job WHERE {where}", to_delete)
+        return sorted(doomed)
+
     # -- reading ------------------------------------------------------------
 
     # -- clearing the queue --------------------------------------------------

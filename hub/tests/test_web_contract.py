@@ -683,6 +683,7 @@ def test_the_script_handles_every_bulk_action_the_page_offers():
         "queue-load-history",
         "cancel-group",
         "requeue-failed-group",
+        "queue-clear-pending",
     ):
         assert f'"{action}"' in js, f"the page offers {action} and the script does not handle it"
 
@@ -1081,3 +1082,17 @@ def test_the_stream_line_speaks_the_pool_sentence():
     assert "ripping" in js
 
 
+
+
+def test_waiting_rows_offer_cancel_on_both_sides():
+    """The API has always cancelled `waiting`; only the UI omitted it (wrapper-down case).
+
+    Both row renderers -- the Jinja template and the script's `actionsCell` -- must offer
+    Cancel for `queued` *and* `waiting`; they are replaced by the script's build on the
+    first stream frame, so a one-sided fix is invisible until the row updates.
+    """
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/job_row.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    assert "job.status in ('queued', 'waiting')" in template
+    assert 'job.status === "queued" || job.status === "waiting"' in script

@@ -80,7 +80,7 @@
   <td class="actions">
     {% if job.status in ('done', 'failed', 'skipped', 'cancelled') %}
       <button type="button" data-action="job-retry" data-job-id="{{ job.id }}">Retry</button>
-    {% elif job.status == 'queued' %}
+    {% elif job.status in ('queued', 'waiting') %}
       <button type="button" data-action="job-cancel" data-job-id="{{ job.id }}">Cancel</button>
     {% endif %}
   </td>
