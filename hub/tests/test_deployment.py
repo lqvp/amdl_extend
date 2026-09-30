@@ -1785,8 +1785,8 @@ def test_the_documented_skip_reason_format_is_the_one_the_code_emits():
     while "fixing" it -- this asserts the positive twice: the code emits one specific string,
     and both docs say the paths are root-qualified, which is the part that changed.
     """
-    from hub.app import _skip_reason
     from hub.dedup import DuplicateHit
+    from hub.scheduler import _skip_reason
 
     emitted = _skip_reason(
         DuplicateHit(matched=("artist/album",), resolved=("/library/a/artist/album",))

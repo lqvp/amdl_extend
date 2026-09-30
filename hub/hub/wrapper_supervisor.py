@@ -289,7 +289,7 @@ class Readiness:
     """One observation of "can a download be served right now", kept whole.
 
     `kind` is a fact about the wrapper, not a vocabulary: how it is *said* belongs to
-    the caller that owns the audience -- `hub.app._park_reason` renders the park words,
+    the caller that owns the audience -- `hub.scheduler._park_reason` renders the park words,
     `hub.api.wrapper.wrapper_state` renders the JSON contract, and the two vocabularies
     stay deliberately unequal (park keeps `"unreachable"` apart; the status contract
     folds it into `"unavailable"`). What they share is this observation, so the rule it

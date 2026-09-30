@@ -181,6 +181,67 @@
     }
   }
 
+  function healthBanner(body) {
+    /* The three problems the page can see and the user cannot: the wrapper cannot
+       serve downloads, a library root cannot be read, and a root that is mounted
+       and empty (Docker autocreated the directory over a drive that is not there).
+       Healthy input returns null -- the banner is never *present* when it is not
+       needed, rather than present and empty. */
+    var nodes = [];
+    if (body && body.wrapper && body.wrapper.problem) {
+      var p = el("p", "error");
+      p.setAttribute("role", "alert");
+      if (body.wrapper.problem === "no-account") {
+        p.textContent = "Apple にログインしていません。";
+      } else {
+        p.textContent = body.wrapper.detail || "wrapper が応答しません";
+      }
+      nodes.push(p);
+    }
+    if (body && body.library) {
+      var roots = (body.library.degraded_roots || []).concat(
+        (body.library.per_root || [])
+          .map(function (count, index) {
+            return count === 0 ? (body.library.roots || [])[index] : null;
+          })
+          .filter(function (r) { return r; })
+      );
+      Array.prototype.forEach.call(roots, function (root) {
+        var p = el("p", "error");
+        p.setAttribute("role", "status");
+        p.textContent = "ライブラリルートに問題があります: " + root;
+        nodes.push(p);
+      });
+    }
+    if (!nodes.length) return null;
+    var box = el("div", "health-banner-messages");
+    nodes.forEach(function (n) { box.appendChild(n); });
+    return box;
+  }
+
+  function updateHealthBanner(body) {
+    var mount = document.getElementById("health-banner");
+    if (!mount) return;
+    mount.textContent = "";
+    var banner = healthBanner(body);
+    if (banner) mount.appendChild(banner);
+  }
+
+  fetch("/api/status", { credentials: "same-origin" })
+    .then(function (response) {
+      return response.ok ? response.json() : null;
+    })
+    .then(function (body) {
+      if (body && body.pool) {
+        poolText = body.pool.ripping + "/" + body.pool.limit + " ripping";
+        renderStreamLabel();
+      }
+      if (body) updateHealthBanner(body);
+    })
+    .catch(function () {
+      /* No pool line rather than a broken page; socket messages carry it when available. */
+    });
+
   var body = document.getElementById("queue-body");
   if (!body) return;
 
@@ -303,7 +364,7 @@
       button = el("button", null, "Retry");
       button.type = "button";
       button.dataset.action = "job-retry";
-    } else if (job.status === "queued") {
+    } else if (job.status === "queued" || job.status === "waiting") {
       button = el("button", null, "Cancel");
       button.type = "button";
       button.dataset.action = "job-cancel";
@@ -387,6 +448,10 @@
     var tr = el("tr", "status-" + job.status);
     tr.id = "job-" + job.id;
     tr.dataset.jobId = job.id;
+    if (job.parent_url) {
+      tr.dataset.parentUrl = job.parent_url;
+      tr.dataset.parentType = job.parent_type || "group";
+    }
     tr.dataset.finished = FINISHED_STATUSES.indexOf(job.status) === -1 ? "0" : "1";
 
     var status = el("td", "status-cell");
@@ -420,6 +485,8 @@
     if (row) body.replaceChild(buildRow(job), row);
     else body.appendChild(buildRow(job));
     updateQueueSummary();
+    // A new id can open a new group, so the headers are re-derived before the filters.
+    syncGroupHeaders();
     // Re-apply search, status and finished filters whenever a live row changes.
     applyQueueFilters();
   }
@@ -432,6 +499,8 @@
       if (row) row.remove();
     });
     updateQueueSummary();
+    // A row set can empty a group; its header goes with it.
+    syncGroupHeaders();
     applyQueueFilters();
   }
 
@@ -509,6 +578,7 @@
       body.appendChild(buildRow(job));
     });
     updateQueueSummary();
+    syncGroupHeaders();
     applyQueueFilters();
   }
 
@@ -516,6 +586,49 @@
     Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"))
       .sort(function (a, b) { return Number(a.dataset.jobId) - Number(b.dataset.jobId); })
       .forEach(function (row) { body.appendChild(row); });
+    syncGroupHeaders();
+  }
+
+  /* Group headers are derived from the rows, and the rows are the truth: the same
+     reconcile after every snapshot, upsert-sort, or history load. A header is
+     removed and re-added so a batch that changes parent -- or a row set that leaves
+     the header orphaned -- cannot strand a stale control on the page. */
+  function groupHeaderRow(parentUrl, parentType) {
+    var tr = el("tr", "group-header");
+    var td = el("td", null);
+    td.colSpan = 7;
+    var link = el("a", "group-url muted small", parentType || "group");
+    link.href = parentUrl;
+    link.rel = "noreferrer noopener";
+    td.appendChild(link);
+    var actions = el("span", "group-actions");
+    var cancel = el("button", null, "Cancel queued");
+    cancel.type = "button";
+    cancel.dataset.action = "cancel-group";
+    cancel.dataset.parentUrl = parentUrl;
+    actions.appendChild(cancel);
+    var requeue = el("button", null, "Re-queue failed");
+    requeue.type = "button";
+    requeue.dataset.action = "requeue-failed-group";
+    requeue.dataset.parentUrl = parentUrl;
+    actions.appendChild(requeue);
+    td.appendChild(actions);
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function syncGroupHeaders() {
+    Array.prototype.slice.call(body.querySelectorAll(":scope > tr.group-header"))
+      .forEach(function (row) { body.removeChild(row); });
+    var rows = Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"));
+    var previousParent = null;
+    rows.forEach(function (row) {
+      var parent = row.dataset.parentUrl;
+      if (parent && parent !== previousParent) {
+        body.insertBefore(groupHeaderRow(parent, row.dataset.parentType), row);
+      }
+      previousParent = parent;
+    });
   }
 
   function loadHistory() {
@@ -636,6 +749,14 @@
         replaceRows(payload.jobs || []);
         if (queueCounts) updateQueueSummary();
         if (reconnectingWithHistory) hydrateJobs(Array.from(historyLoadedIds));
+        // The snapshot arrives on connect/reconnect: refresh the banner from the live
+        // server so a wrapper or library that changed while the socket was down is
+        // reflected. The wrapper frame carries live transitions; the snapshot carries
+        // everything the socket missed.
+        fetch("/api/status", { credentials: "same-origin" })
+          .then(function (response) { return response.ok ? response.json() : null; })
+          .then(function (body) { if (body) updateHealthBanner(body); })
+          .catch(function () { /* a later snapshot or wrapper frame carries it */ });
         break;
       }
       case "job": {
@@ -670,7 +791,16 @@
         setQueuePaused(payload.paused);
         break;
       case "wrapper":
-        log("the wrapper is not ready: " + payload.problem);
+        log(
+          payload.problem === null || payload.problem === undefined
+            ? "the wrapper recovered"
+            : "the wrapper is not ready: " + payload.problem
+        );
+        // The wrapper's problem is exactly the banner's subject; refresh the real
+        // status rather than trusting the frame's summary (no cache, one probe).
+        fetch("/api/status", { credentials: "same-origin" })
+          .then(function (response) { return response.ok ? response.json() : null; })
+          .then(function (body) { if (body) updateHealthBanner(body); })          .catch(function () { /* the next frame or snapshot will carry it */ });
         break;
       case "log":
         log(payload.line);
@@ -722,19 +852,7 @@
   /* The pool count before any message: the scheduler's table as the server last saw it.
    * A failure here is silent on purpose -- the stream is the loud channel, and a page
    * that cannot reach `/api/status` once will hear about it there instead. */
-  fetch("/api/status", { credentials: "same-origin" })
-    .then(function (response) {
-      return response.ok ? response.json() : null;
-    })
-    .then(function (body) {
-      if (body && body.pool) {
-        poolText = body.pool.ripping + "/" + body.pool.limit + " ripping";
-        renderStreamLabel();
-      }
-    })
-    .catch(function () {
-      /* No pool line rather than a broken page; socket messages carry it when available. */
-    });
+
   /* The age labels tick on a five-second beat, and only while the tab is visible -- a
    * backgrounded queue does not need a timer rewriting text nobody is reading. A snapshot
    * or an upsert rebuilds each row's span from `created_at` anyway, so the beat only ever
@@ -846,6 +964,38 @@
       }).finally(function () {
         target.disabled = false;
       });
+    } else if (action === "cancel-group" && target.dataset.parentUrl) {
+      post("/api/jobs/cancel", {parent_url: target.dataset.parentUrl}).then(function (result) {
+        if (!result.ok) log((result.data && result.data.detail) || "the group could not be cancelled");
+        // The cancelled rows come back as `job` frames; no manual DOM bookkeeping.
+      }).catch(function () { log("Could not reach the hub to cancel the group."); });
+    } else if (action === "requeue-failed-group" && target.dataset.parentUrl) {
+      post("/api/jobs/requeue", {scope: "failed", parent_url: target.dataset.parentUrl}).then(function (result) {
+        if (!result.ok) log((result.data && result.data.detail) || "the group could not be re-queued");
+        // The requeued rows come back as `job` frames; no manual DOM bookkeeping.
+      }).catch(function () { log("Could not reach the hub to re-queue the group."); });
+    } else if (action === "queue-clear-pending") {
+      if (!window.confirm("Cancel and remove every queued or waiting row?\n\nDownloading tracks are left alone. The files stay on disk.")) {
+        return;
+      }
+      target.disabled = true;
+      requestJson("/api/jobs/pending", { method: "DELETE" }).then(function (result) {
+        if (!result.ok) {
+          log((result.data && result.data.detail) || "pending rows could not be removed");
+          return;
+        }
+        var ids = (result.data && result.data.ids) || [];
+        removeJobs(ids);
+        log(
+          ids.length
+            ? "Removed " + ids.length + " queued/waiting row(s). Downloading tracks are untouched."
+            : "There are no queued or waiting rows to remove."
+        );
+      }).catch(function () {
+        log("Could not reach the hub to remove pending rows.");
+      }).finally(function () {
+        target.disabled = false;
+      });
     } else if (action === "queue-toggle-finished") {
       setFinishedVisible(!finishedVisible());
     } else if (action === "queue-clear-filters") {
@@ -886,6 +1036,18 @@
       var matchesSearch = !query || row.textContent.toLowerCase().indexOf(query) !== -1;
       row.hidden = !(matchesFinished && matchesStatus && matchesSearch);
       if (!row.hidden) visible += 1;
+    });
+
+    // Group headers follow their run: a header stays only while one of the rows after
+    // it (up to the next header) is visible.
+    var header = null;
+    Array.prototype.slice.call(body.children).forEach(function (child) {
+      if (child.classList && child.classList.contains("group-header")) {
+        header = child;
+        header.hidden = true;
+      } else if (header && !child.hidden) {
+        header.hidden = false;
+      }
     });
 
     if (queueVisibleCount) {

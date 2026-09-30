@@ -451,7 +451,7 @@ def test_resolved_may_not_be_defaulted_away():
     """`resolved: tuple[str, ...] = ()` passes the entire suite, and must not.
 
     A default is the only thing standing between a caller and a `DuplicateHit` whose
-    `resolved` is empty -- which `app.py::_skip_reason` would then join into a `skip_reason`
+    `resolved` is empty -- which `scheduler.py::_skip_reason` would then join into a `skip_reason`
     naming nothing, and the queue page would render an empty path list. That is the exact
     defect round 1 removed, reachable again by one character of convenience, and the
     docstring's reasoning about it is not a guard: a docstring does not raise.

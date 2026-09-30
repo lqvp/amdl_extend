@@ -31,6 +31,10 @@
     <link rel="stylesheet" href="/static/app.css">
   </head>
   <body>
+    {#- Health banner: populated client-side from /api/status and the wrapper frames, and
+        empty when the hub is healthy. The mount point itself carries no content so a
+        healthy page renders exactly this node and nothing more. -#}
+    <div id="health-banner"></div>
     <header class="bar">
       <a class="brand" href="/">amd-hub</a>
       {#

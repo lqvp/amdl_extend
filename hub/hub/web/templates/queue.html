@@ -184,6 +184,9 @@
       </select>
       <button type="submit">Re-queue</button>
     </form>
+    <button type="button" data-action="queue-clear-pending" class="danger">
+      Clear queued & waiting
+    </button>
     <button type="button" data-action="queue-delete-finished" class="danger">
       Delete finished
     </button>
@@ -222,7 +225,22 @@
         </tr>
       </thead>
       <tbody id="queue-body">
+        {#- A queued batch is a group: its rows share the parent URL, and a run of one
+            parent URL is contiguous in id order. The header names the group and owns
+            its two bulk operations; `applyQueueFilters` hides a header whose whole run
+            is filtered away. -#}
         {% for job in jobs %}
+          {% if job.parent_url and (loop.first or job.parent_url != jobs[loop.index0 - 1].parent_url) %}
+          <tr class="group-header">
+            <td colspan="7">
+              <a class="group-url muted small" href="{{ job.parent_url }}" rel="noreferrer noopener">{{ job.parent_type or "group" }}</a>
+              <span class="group-actions">
+                <button type="button" data-action="cancel-group" data-parent-url="{{ job.parent_url }}">Cancel queued</button>
+                <button type="button" data-action="requeue-failed-group" data-parent-url="{{ job.parent_url }}">Re-queue failed</button>
+              </span>
+            </td>
+          </tr>
+          {% endif %}
           {% include "job_row.html" %}
         {% endfor %}
       </tbody>
@@ -232,6 +250,15 @@
     No visible jobs match those filters. <button type="button" class="link"
       data-action="queue-clear-filters">Clear filters</button>
   </p>
+  <div class="row export-tools">
+    {#- The whole table, in one file, for the adjudication the paginated page cannot
+        do. Static links: the session cookie rides automatically and the browser's own
+        download handling (Content-Disposition) does the rest. -#}
+    <span class="muted small">Export:</span>
+    <a href="/api/jobs/export?kind=history&format=csv">History (CSV)</a>
+    <a href="/api/jobs/export?kind=history&format=json">History (JSON)</a>
+    <a href="/api/jobs/export?kind=queue&format=csv">Queue (CSV)</a>
+  </div>
   <div class="history-tools" id="queue-history-tools"
        data-before-id="{{ history.history_before_id or '' }}"
        data-has-more="{{ 'true' if history.history_has_more else 'false' }}"

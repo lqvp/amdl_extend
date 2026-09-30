@@ -11,14 +11,15 @@ and then raises* `ValueError` on one it could not, because a 19-track album must
 **by `parent_url`**, and adds a `rejected` list naming the one that did not. A 500 here
 would be a 19-track album queued behind an error the user cannot see.
 
-**The read-back is filtered by `parent_url` and not by `parent_id`.** `parent_id` is the
-`job` table's self-reference and `create_batch` has no such parameter, so every row has
-`NULL` in it; `list(parent_id=None)` therefore means *no filter*, and using it to answer
-"what did this request create?" would return the user's entire queue and report all of it as
-this request's work. `store.list(parent_url=...)` is the only filter that means what it says.
+**`parent_url` is the group key.** The read-back, `POST /api/jobs/cancel`, the scoped
+`requeue`, and the scoped `finished` delete all address a batch by the `url` column
+`create_batch` writes for every leaf. `parent_id` is the `job` table's unused self-
+reference -- `create_batch` has no such parameter, so every row has `NULL` in it, and
+`list(parent_id=None)` means *no filter*; using it to address a group would return the
+user's entire queue and report all of it as one request's work.
 
 Nothing here decides whether a track is already on disk. That is the scheduler's, at
-execution time, in `hub.app` -- because a queued job can sit long enough for the file to be
+execution time, in `hub.scheduler` -- because a queued job can sit long enough for the file to be
 deleted underneath it, and a second filesystem check at enqueue time would put two dedup
 checks with different timings into the codebase for them to disagree. `skipped` is
 therefore always empty in this response, and it is here because the contract above has it.
@@ -30,6 +31,7 @@ import asyncio
 import json
 from contextlib import suppress
 from dataclasses import asdict
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -71,6 +73,39 @@ PARENT_TYPES: frozenset[str] = frozenset(
 )
 
 
+#: The row shape of the CSV export when the table is empty (header-only file).
+JOB_COLUMNS = (  # noqa: RUF022 - deliberately schema order, not alphabetical
+    "id",
+    "url",
+    "url_type",
+    "adam_id",
+    "title",
+    "codec",
+    "language",
+    "force",
+    "status",
+    "skip_reason",
+    "parent_id",
+    "progress",
+    "bytes_done",
+    "bytes_total",
+    "error",
+    "created_at",
+    "started_at",
+    "finished_at",
+)
+
+
+def _csv_cell(value: object) -> str:
+    """One value as RFC 4180 CSV: quoted when it contains a delimiter, quote, or newline."""
+    if value is None:
+        return ""
+    text = str(value)
+    if any(ch in text for ch in ('"', ",", "\n", "\r")):
+        return '"' + text.replace('"', '""') + '"'
+    return text
+
+
 def job_to_dict(job: Job) -> dict:
     """A `Job` as JSON: `asdict`, and nothing added.
 
@@ -106,12 +141,12 @@ class LeafRegistry:
     `language` -- deliberately, because the filesystem is the source of truth for what is
     downloaded and a description of the track is operational state. But both consumers of a
     job need more than that: `RipperHost.run_song` needs the storefront, and the scheduler's
-    duplicate check in `hub.app` needs the album name and the artist to render the file
+    duplicate check in `hub.scheduler` needs the album name and the artist to render the file
     name. So the expansion is held here, from the request that made it until the job
     finishes.
 
     **What a miss means, and why it is a failure rather than a blank.** A row whose leaf this
-    process never saw was enqueued by a previous hub process (or by hand). `hub.app`'s
+    process never saw was enqueued by a previous hub process (or by hand). `hub.scheduler`'s
     `_leaf_for` re-expands the parent URL in that case, which is why a restart is not a
     reason to lose a queue -- and when even that cannot produce the track, the job is failed
     with a message naming the id, so the user can re-submit it. Running it with blanks
@@ -214,7 +249,7 @@ async def create_jobs(request: Request, body: _JobsBody | None = None) -> Respon
     """Expand each URL and enqueue every track it names.
 
     The whole of the *enqueue* half of dedup. The other half -- "is it already on disk" -- is
-    per-file and happens at execution time in `hub.app`, so `skipped` is always empty here
+    per-file and happens at execution time in `hub.scheduler`, so `skipped` is always empty here
     and the response says so by carrying the key.
 
     Every URL is attempted, and one bad URL does not discard the others. A user pasting three
@@ -642,6 +677,7 @@ REQUEUE_SCOPES: dict[str, frozenset[str]] = {
 
 class _RequeueBody(BaseModel):
     scope: str = "failed"
+    parent_url: str | None = None
 
 
 @router.post("/api/jobs/requeue")
@@ -668,14 +704,99 @@ async def requeue_jobs(request: Request, body: _RequeueBody | None = None) -> Re
             f"{scope!r} is not a requeue scope. Use one of: "
             f"{', '.join(sorted(REQUEUE_SCOPES))}.",
         )
-    result = state.jobs.requeue(statuses)
+    result = state.jobs.requeue(statuses, parent_url=body.parent_url if body else None)
     for job_id in result.requeued:
         _publish_job(state, job_id)
     return {"requeued": result.requeued, "refused": result.refused}
 
 
+@router.get("/api/jobs/export")
+async def export_jobs(
+    request: Request,
+    kind: str = Query(default="history"),
+    format: str = Query(default="csv"),
+) -> Response:
+    """Export every row of the queue or of the history, as CSV or JSON.
+
+    The history page is paginated because the browser cannot swallow 8,000 rows at once;
+    an export is for the opposite case -- the operator who wants the *whole* table, with
+    `skip_reason` intact, for exactly the adjudication that paginated browsing cannot
+    do. It is read-only by construction: one `SELECT`, `queue_window` or its terminal
+    mirror, no writes and no cache (the table is the single source of truth).
+
+    - `kind=queue` exports the active rows in id order (what is pending);
+      `kind=history` exports every terminal row, newest first (the audit trail).
+    - `format=csv` returns BOM+UTF-8 (`Content-Disposition: attachment`) so spreadsheet
+      apps read `skip_reason`'s non-ASCII paths correctly; `format=json` returns row
+      objects. Invalid values are `fail(400, ...)` rather than a schema 422 -- the
+      vocabulary (`queue`/`history`, `csv`/`json`) belongs at the boundary.
+    """
+    if kind not in ("queue", "history"):
+        return fail(400, f"{kind!r} is not an export kind. Use 'queue' or 'history'.")
+    if format not in ("csv", "json"):
+        return fail(400, f"{format!r} is not an export format. Use 'csv' or 'json'.")
+    state = request.app.state
+    # The store owns the status vocabulary; this route owns the document shape.
+    rows = state.jobs.export_rows(kind)
+    columns = rows[0].keys() if rows else JOB_COLUMNS
+    if format == "json":
+        body = [dict(row) for row in rows]
+        return Response(
+            content=json.dumps(body, ensure_ascii=False),
+            media_type="application/json",
+        )
+    # CSV: BOM first so spreadsheet apps read non-ASCII paths; RFC 4180 quoting.
+    text = "\ufeff" + ",".join(columns) + "\n"
+    text += "\n".join(
+        ",".join(_csv_cell(row[column]) for column in columns) for row in rows
+    )
+    stamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S") + "Z"
+    return Response(
+        content=text,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="amd-hub-{kind}-{stamp}.csv"'
+        },
+    )
+
+
+@router.post("/api/jobs/cancel")
+async def cancel_jobs(request: Request) -> Response:
+    """Cancel one batch's `queued`/`waiting` rows, and report the ones still ripping.
+
+    `parent_url` is the batch identity -- the `url` column `create_batch` writes for
+    every leaf of one request; the `parent_id` self-reference is unused and cannot
+    address a group. The validation is here, not in the schema, so the answer is a
+    `fail(400)` naming `parent_url`: a missing or empty group key cannot address a
+    group, and "act on nothing" is the wrong fallback for a destructive verb. An
+    unknown group cancels nothing and answers 200 with two empty lists: "there was
+    nothing to cancel" is the truth, not an error. `running` rows are refused, not
+    cancelled -- upstream owns the transfer and its partial file, the same rule
+    `delete_finished` and `requeue` hold to.
+
+    Each cancelled row is published through `_publish_job` so every open tab sees it
+    stop; `refused` carries no frames because nothing about those rows changed.
+    """
+    state = request.app.state
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    parent_url = body.get("parent_url") if isinstance(body, dict) else None
+    if not isinstance(parent_url, str) or not parent_url:
+        return fail(400, "`parent_url` is required: it is the group cancel addresses.")
+    result = state.jobs.cancel_pending(parent_url)
+    for job_id in result.cancelled:
+        _publish_job(state, job_id)
+    return {"cancelled": result.cancelled, "refused": result.refused}
+
+
 @router.delete("/api/jobs/finished")
-async def delete_finished_jobs(request: Request) -> Response:
+async def delete_finished_jobs(
+    # Omitted `parent_url` = every finished row (unchanged contract); `parent_url=`
+    # present-but-empty addresses the empty group and deletes nothing -- the safe side.
+    request: Request, parent_url: str | None = Query(default=None)
+) -> Response:
     """Remove every finished row, and forget the leaves that went with them.
 
     **Irreversible, and the answer says how much of it there was.** What is lost is the
@@ -692,7 +813,28 @@ async def delete_finished_jobs(request: Request) -> Response:
     process, holding `Leaf` objects for jobs that no longer exist.
     """
     state = request.app.state
-    deleted = state.jobs.delete_finished()
+    deleted = state.jobs.delete_finished(parent_url)
+    for job_id in deleted:
+        state.leaves.forget(job_id)
+    state.broker.publish(JOBS_CHANNEL, {"kind": "deleted", "ids": deleted})
+    return {"deleted": len(deleted), "ids": deleted}
+
+
+@router.delete("/api/jobs/pending")
+async def delete_pending_jobs(request: Request) -> Response:
+    """Remove every queued or waiting row, and forget the leaves that went with them.
+
+    The queue page's second bulk button. `delete_finished` covers terminal rows;
+    this covers the active-but-not-running ones -- the state a queue full of parked
+    jobs settles into when the wrapper is down for good. `running` rows are spared
+    by construction (`ACTIVE_STATUSES - {running}` is the store's WHERE): deleting
+    a row mid-rip would orphan the partial file upstream is still writing.
+
+    The leaves are forgotten and the ids published on the `deleted` frame, exactly
+    like `delete_finished`, so every open tab drops the rows in place.
+    """
+    state = request.app.state
+    deleted = state.jobs.delete_pending()
     for job_id in deleted:
         state.leaves.forget(job_id)
     state.broker.publish(JOBS_CHANNEL, {"kind": "deleted", "ids": deleted})
@@ -763,7 +905,7 @@ async def retry_job(request: Request, job_id: int) -> Response:
 def _publish_job(state, job_id: int) -> None:
     """One job's current row, for the stream. Read from the store, not from a local copy.
 
-    `hub.app` imports this rather than keeping its own, because two functions that both
+    `hub.scheduler` imports this rather than keeping its own, because two functions that both
     publish "the job as it is now" is two places for a future column to be forgotten in. The
     read is a `get()` because `mark` computes `finished_at` and the store is the only place
     that knows what it set: a published row that disagrees with the table is how a queue ends

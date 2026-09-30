@@ -5,7 +5,7 @@ queue is one table with one partial unique index on `(adam_id, codec)`
 (`hub.jobs.JOB_TABLE_SQL`), and the progress bar is per track. Both of those need a flat
 list up front: an album URL is not a key, and a parent job's progress is not the sum of
 its children unless the children are already rows. So `expand()` is the boundary, and
-everything downstream -- deduplication, the per-file decision in `hub.app`'s scheduler,
+everything downstream -- deduplication, the per-file decision in `hub.scheduler`,
 the progress bar -- works on leaves rather than on URLs. It also matches the shape the
 existing TUI already shows (`src/tui/task_tree.py` registers an album group and its
 tracks).

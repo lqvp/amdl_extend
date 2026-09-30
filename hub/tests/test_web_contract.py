@@ -681,8 +681,111 @@ def test_the_script_handles_every_bulk_action_the_page_offers():
         "queue-pause",
         "queue-resume",
         "queue-load-history",
+        "cancel-group",
+        "requeue-failed-group",
+        "queue-clear-pending",
     ):
         assert f'"{action}"' in js, f"the page offers {action} and the script does not handle it"
+
+
+def test_group_headers_offer_the_group_actions():
+    """A queued batch can be cancelled / re-queued as a unit.
+
+    Both the server markup (initial render) and the script (re-sync after every sort)
+    carry the header row; a `data-action` on one side and no handler on the other is a
+    button that silently does nothing, so both sides are checked.
+    """
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/queue.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    for control in (
+        'data-action="cancel-group"',
+        'data-action="requeue-failed-group"',
+        'data-parent-url="{{ job.parent_url }}"',
+    ):
+        assert control in template, f"the queue is missing its group affordance: {control}"
+    assert 'dataset.action = "cancel-group"' in script
+    assert 'dataset.action = "requeue-failed-group"' in script
+    assert 'post("/api/jobs/cancel", {parent_url:' in script
+    assert 'post("/api/jobs/requeue", {scope: "failed", parent_url:' in script
+
+    # The snapshot wipes the tbody and rebuilds every row. If the client-side re-derive
+    # ran nowhere on the snapshot path, the Jinja headers would live for the pre-hydration
+    # paint only, and the group buttons would be dead on the live page -- with the
+    # substring checks above still green. The re-derive call site is pinned instead.
+    body = script[script.index("function replaceRows") : script.index("function sortQueueRows")]
+    assert "syncGroupHeaders()" in body, (
+        "the snapshot wipes tbody; without a re-derive the group actions vanish on the "
+        "first frame"
+    )
+    # And the client-side header is a button the browser won't submit, built by the
+    # script, not only by the template.
+    header_builder = script[
+        script.index("function groupHeaderRow") : script.index("function syncGroupHeaders")
+    ]
+    assert 'cancel.type = "button"' in header_builder
+    assert 'requeue.type = "button"' in header_builder
+
+
+def test_the_queue_offers_export_downloads():
+    """History and queue download links, static and cookie-authed -- no JS, no button."""
+    template = (Path(__file__).parent.parent / "hub/web/templates/queue.html").read_text(encoding="utf-8")
+    for href in (
+        'href="/api/jobs/export?kind=history&format=csv"',
+        'href="/api/jobs/export?kind=history&format=json"',
+        'href="/api/jobs/export?kind=queue&format=csv"',
+    ):
+        assert href in template, f"the queue is missing its export download: {href}"
+
+
+def test_health_banner_reports_wrapper_library_and_empty_mounts():
+    """The conditional banner: wrapper problem, degraded root, or empty mount.
+
+    Healthy status renders nothing (the empty-string branch is pinned so no
+    healthy state leaks into the DOM); the wrapper problems use role="alert"
+    and the library ones role="status".
+    """
+    script = (Path(__file__).parent.parent / "hub/web/static/app.js").read_text(encoding="utf-8")
+    # The banner is rendered from the client-side /api/status snapshot.
+    assert "function healthBanner" in script
+    assert "wrapper.problem" in script
+    assert "degraded_roots" in script
+    assert "per_root" in script
+    assert 'setAttribute("role", "alert")' in script
+    assert 'setAttribute("role", "status")' in script
+    # Empty health answer produces no node.
+    banner_fn = script[script.index("function healthBanner") : script.index("function updateHealthBanner")]
+    assert "return null" in banner_fn or "return null;" in banner_fn
+    # The mount exists: without #health-banner updateHealthBanner silently no-ops.
+    base = (Path(__file__).parent.parent / "hub/web/templates/base.html").read_text(encoding="utf-8")
+    assert 'id="health-banner"' in base, (
+        "the banner mount is missing; updateHealthBanner fails silently with no mount"
+    )
+    # Refetch on page load, on WS reconnect, and on a `wrapper` frame -- no polling.
+    # Pinned around the banner's own code (healthBanner *and* updateHealthBanner),
+    # not around whichever setInterval happens to appear first: the count-refresh and
+    # age-label beats are legitimate.
+    banner_region = script[
+        script.index("function healthBanner") : script.index("function ", script.index("function updateHealthBanner") + 10)
+    ]
+    assert "setInterval" not in banner_region, "the banner code polls; the spec says load + carrier frames only"
+
+
+def test_health_banner_recovery_is_carried_by_snapshot_and_clearing_frame():
+    """Recovery must clear the banner without a reload.
+
+    Two carriers, pinned as source: (a) the snapshot case refetches /api/status and
+    updates the banner; (b) the scheduler broadcasts the wrapper-clearing transition.
+    """
+    root = Path(__file__).parent.parent / "hub/web"
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    snapshot_case = script[script.index('case "snapshot":') : script.index('case "job":')]
+    assert 'fetch("/api/status"' in snapshot_case
+    assert "updateHealthBanner" in snapshot_case
+    scheduler = (Path(__file__).parent.parent / "hub/scheduler.py").read_text(encoding="utf-8")
+    assert '"kind": "wrapper", "problem": None' in scheduler, (
+        "the wrapper-clearing transition must broadcast so the banner clears live"
+    )
 
 
 def test_the_queue_uses_a_reconnecting_websocket_not_eventsource():
@@ -979,3 +1082,17 @@ def test_the_stream_line_speaks_the_pool_sentence():
     assert "ripping" in js
 
 
+
+
+def test_waiting_rows_offer_cancel_on_both_sides():
+    """The API has always cancelled `waiting`; only the UI omitted it (wrapper-down case).
+
+    Both row renderers -- the Jinja template and the script's `actionsCell` -- must offer
+    Cancel for `queued` *and* `waiting`; they are replaced by the script's build on the
+    first stream frame, so a one-sided fix is invisible until the row updates.
+    """
+    root = Path(__file__).parent.parent / "hub/web"
+    template = (root / "templates/job_row.html").read_text(encoding="utf-8")
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    assert "job.status in ('queued', 'waiting')" in template
+    assert 'job.status === "queued" || job.status === "waiting"' in script
