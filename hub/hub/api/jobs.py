@@ -190,7 +190,10 @@ class LeafRegistry:
 # POST /api/jobs
 # --------------------------------------------------------------------------- #
 class _JobsBody(BaseModel):
-    urls: list[str] = Field(default_factory=list)
+    # Capped so one request cannot hold the event loop open for hours expanding tens of
+    # thousands of Apple lookups (the per-lookup round-trip is seconds). Over-cap is a
+    # schema 422, which is the honest boundary answer for "too many at once".
+    urls: list[str] = Field(default_factory=list, max_length=500)
     codec: str = ""
     language: str = ""
     force: bool = False

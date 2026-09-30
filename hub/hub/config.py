@@ -39,6 +39,11 @@ DEFAULT_RIP_CONCURRENCY = 4
 
 MIN_SESSION_SECRET_CHARS = 32
 
+#: The minimum number of *distinct* characters an operator-supplied
+#: `AMD_SESSION_SECRET` must contain. The length check alone would accept
+#: `"a"*32`, which is guessable and makes the signed cookie offline-forgeable.
+MIN_SECRET_DISTINCT_CHARS = 8
+
 # A port outside this range cannot be bound, and the failure would otherwise surface as
 # an OSError from the server at startup rather than as a named misconfiguration.
 MIN_PORT = 1
@@ -168,6 +173,18 @@ def _concurrency(env: Mapping[str, str]) -> int:
     return count
 
 
+def _has_entropy(raw: str) -> bool:
+    """Whether `raw` carries enough variety to be a session secret.
+
+    A threshold test rather than an entropy *estimate*: the failure mode is a
+    degenerate operator value -- `"a"*32`, or `s3cr3t` repeated -- which the length
+    check cannot see and which makes the signed cookie offline-forgeable once an
+    attacker guesses the degeneracy. Requiring 8 distinct characters blocks every
+    low-variety value while accepting anything a human would actually type.
+    """
+    return len(set(raw)) >= MIN_SECRET_DISTINCT_CHARS
+
+
 def _session_secret(env: Mapping[str, str]) -> bytes:
     raw = env.get("AMD_SESSION_SECRET", "").strip()
     if not raw:
@@ -179,6 +196,13 @@ def _session_secret(env: Mapping[str, str]) -> bytes:
         raise RuntimeError(
             f"AMD_SESSION_SECRET must be at least {MIN_SESSION_SECRET_CHARS} characters, "
             f"got {len(raw)}; a short secret makes the session cookie forgeable"
+        )
+    if not _has_entropy(raw):
+        raise RuntimeError(
+            f"AMD_SESSION_SECRET must use at least {MIN_SECRET_DISTINCT_CHARS} distinct "
+            f"characters, got {len(set(raw))}; a low-variety secret is guessable and makes "
+            f"the session cookie forgeable (leave AMD_SESSION_SECRET unset to get a random "
+            f"one per process)"
         )
     return raw.encode()
 

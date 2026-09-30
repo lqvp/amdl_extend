@@ -17,7 +17,9 @@ from hub.jobs import JobStore, Progress
 from hub.wrapper_supervisor import LoginChallenge
 
 PASSWORD = "correct horse battery staple"
-SECRET = "s" * 32
+# Mixed variety on purpose: `_session_secret` refuses low-entropy values, so a
+# placeholder secret must satisfy `MIN_SECRET_DISTINCT_CHARS` like a real one.
+SECRET = "test-session-secret-0123456789abcdef"
 BASE = "http://hub.test"
 
 # Real Apple Music URL shapes. Upstream's `AppleMusicURL.parse_url` takes `paths[-1]` as the

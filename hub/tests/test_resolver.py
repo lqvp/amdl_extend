@@ -1839,3 +1839,82 @@ async def test_readme_url_leaf_counts():
         counts[name] = len(await expand(url, codec="alac", language="ja", web_api=client))
 
     assert counts == {"song": 1, "album": 2, "playlist": 3, "artist": 3, "music-video": 1}
+
+
+# --------------------------------------------------------------------------- #
+# The SSRF gate: no attacker-influenced URL may reach the network
+# --------------------------------------------------------------------------- #
+#: Every adversarial shape was validated negative by the scan's PoC: zero fetches,
+#: zero SQLite writes, all refused before `parse_url`/fetch. This is the pinned
+#: regression for that gate -- if `AppleMusicURL.parse_url` or the host anchor in
+#: `resolver` is ever relaxed, one of these starts reaching `get_real_url`.
+ADVERSARIAL_URLS = [
+    "http://169.254.169.254/latest/meta-data/",
+    "file:///etc/passwd",
+    "gopher://127.0.0.1:6379/_INFO",
+    "https://internal.local/admin",
+    "https://169.254.169.254/",
+    "https://music.apple.com@169.254.169.254/jp/album/x/1",
+    "https://music.apple.com.attacker.example/jp/album/x/1",
+    "https://music.apple.com.juice/jp/album/x/1",
+    "https://itunes.apple.com.attacker.example/album/1",
+    "javascript:alert(1)",
+    "data:text/plain,https://music.apple.com/jp/album/x/1",
+    "  file:///etc/shadow  ",
+    "dict://127.0.0.1:11211/stat",
+]
+
+
+class _SpyAPI:
+    """Any call at all is a failure; `calls` is the negative control."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def get_real_url(self, url: str) -> str:
+        self.calls.append(("real_url", url))
+        return url
+
+    def __getattr__(self, name):
+        async def _record(*args):
+            self.calls.append((name, *args))
+            raise AssertionError(f"resolver reached the network via {name}")
+
+        return _record
+
+
+@pytest.mark.parametrize("url", ADVERSARIAL_URLS)
+async def test_no_attacker_url_reaches_the_network(url):
+    api = _SpyAPI()
+    with pytest.raises(ResolveError):
+        await expand(url, codec="alac", language="ja", web_api=api)
+    assert api.calls == []
+
+
+async def test_a_legacy_itunes_link_spends_its_redirect_on_an_apple_host():
+    # The one URL shape that legitimately redirects: gate first, then Apple's own host.
+    api = _SpyAPI()
+    api.get_real_url = _spy_returning(
+        api, "https://music.apple.com/jp/album/1688539275?i=1688539274"
+    )
+    # The resolved song must then hit `get_song_info`, which the spy refuses loudly --
+    # that refusal is the positive control: the gate passes legitimate Apple traffic
+    # on to the catalogue lookups rather than blanket-refusing.
+    with pytest.raises(AssertionError, match="reached the network via get_song_info"):
+        await expand(
+            "https://itunes.apple.com/album/id123",
+            codec="alac",
+            language="ja",
+            web_api=api,
+        )
+    assert [(c[0], c[1]) for c in api.calls if c[0] == "real_url"] == [
+        ("real_url", "https://itunes.apple.com/album/id123")
+    ]
+
+
+def _spy_returning(api, target):
+    async def get_real_url(url):
+        api.calls.append(("real_url", url))
+        return target
+
+    return get_real_url

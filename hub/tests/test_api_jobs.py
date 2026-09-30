@@ -430,20 +430,35 @@ async def test_the_logout_page_retires_the_session_too(running):
 
 
 async def test_the_logout_page_cannot_be_driven_by_another_site(running):
-    """It is unauthenticated, and that is stated rather than accidental (M1).
+    """An unauthenticated cross-site post to /logout must retire nothing.
 
-    A cross-site form post here is a nuisance -- a logout the user did not ask for -- and not
-    a breach, because the only thing it can do is retire a session that already existed. It
-    is on `OPEN_WITHOUT_A_SESSION` so the route table accounts for it. This asserts the
-    reason is still true: the route needs no session, and what it does is bounded.
+    The route stays open without a session (redirecting to /login keeps the stale-cookie
+    browser UX intact), but the generation bump -- the *only* revocation mechanism -- is
+    gated on a live session. Without the gate, any site could force-log-out every user of
+    the hub with one cookie-less form post, since the generation is global.
     """
     assert ("POST", "/logout") in OPEN_WITHOUT_A_SESSION
     async with await _client(running) as http:
-        # No session at all, and it still works: that is the cross-site logout case.
-        response = await http.post("/logout", follow_redirects=False)
-        assert response.status_code == 303
-        # And it cannot be *used* for anything, because every other route still needs one.
-        assert (await http.get("/api/jobs")).status_code == 401
+        # The victim holds a live session on their own client; the attacker's form post
+        # below carries no cookie at all (which is what makes it cross-site-able).
+        async with await _client(running) as victim:
+            await victim.post("/api/auth/login", json={"password": PASSWORD})
+            generation_before = int(running.state.session_generation)
+
+            # The route still redirects rather than erroring -- and the revocation does
+            # not fire: the generation is unchanged and the victim's session verifies.
+            # This is the vuln-0001 regression pin.
+            response = await http.post("/logout", follow_redirects=False)
+            assert response.status_code == 303
+            assert response.headers["location"] == "/login"
+            assert int(running.state.session_generation) == generation_before
+            replay = await victim.get("/api/jobs")
+            assert replay.status_code == 200
+
+        # And the route still cannot be *used* for anything, because every other route
+        # still needs one.
+        async with await _client(running) as stranger:
+            assert (await stranger.get("/api/jobs")).status_code == 401
 
 
 async def test_the_session_endpoint_reports_whether_there_is_one(client):

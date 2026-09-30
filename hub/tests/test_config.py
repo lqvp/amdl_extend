@@ -2,6 +2,9 @@ import pytest
 
 from hub.config import load_settings
 
+# Same shape as web_support.SECRET: 32 characters, mixed variety.
+MIXED_SECRET = "test-session-secret-0123456789abcdef"
+
 
 def test_requires_password():
     with pytest.raises(RuntimeError, match="AMD_PASSWORD"):
@@ -81,6 +84,26 @@ def test_rejects_a_short_session_secret():
         load_settings(
             {"AMD_PASSWORD": "x", "AMD_LIBRARY_ROOTS": "/library", "AMD_SESSION_SECRET": "short"}
         )
+
+
+@pytest.mark.parametrize("degenerate", ["a" * 32, "s3cr3ts3cr3ts3cr3ts3cr3ts3cr3t"])
+def test_rejects_a_low_entropy_session_secret(degenerate):
+    # The length check cannot see a degenerate value; `"a"*32` is guessable and makes
+    # the signed cookie offline-forgeable, so the variety check catches it.
+    with pytest.raises(RuntimeError, match="AMD_SESSION_SECRET"):
+        load_settings(
+            {"AMD_PASSWORD": "x", "AMD_LIBRARY_ROOTS": "/library",
+             "AMD_SESSION_SECRET": degenerate}
+        )
+
+
+def test_accepts_a_mixed_variety_session_secret():
+    # The check must stay usable: anything a human would actually type passes.
+    settings = load_settings(
+        {"AMD_PASSWORD": "x", "AMD_LIBRARY_ROOTS": "/library",
+        "AMD_SESSION_SECRET": MIXED_SECRET}
+    )
+    assert settings.session_secret == MIXED_SECRET.encode()
 
 
 def test_rips_four_tracks_at_once_by_default():

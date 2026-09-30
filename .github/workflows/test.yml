@@ -46,7 +46,8 @@ jobs:
     # bounds.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      # Pinned to full commit SHAs (supply-chain hygiene; see build.yml for the reason).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       # The hub has no URL parser of its own: `hub/vendor.py` hands the job to upstream's
       # `AppleMusicURL.parse_url`, reached through `ripper_host._require_vendor_root()`,
@@ -88,7 +89,7 @@ jobs:
       # lockfile records, so a second tool also choosing a Python version would be a second
       # source of truth for a fact `requires-python` and `uv.lock` already own -- and the
       # two would disagree the day `requires-python` moves.
-      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
           # Pinned, not left to uv's resolver, and the pin is the image's own: the Dockerfile
           # is `FROM python:3.13-slim`, and the suite was written and has always been run

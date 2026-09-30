@@ -468,6 +468,13 @@ async def logout_page(request: Request) -> RedirectResponse:
     """
     from hub.api.auth import _clear_session
 
+    # Revocation needs a session: with no live session on the request, there is nothing to
+    # retire, and retiring the *generation* unconditionally let any site force-logout every
+    # user by posting a cookie-less form here (the generation is global). `page_session` is
+    # the shared guard, so the same `verify()` decides, and SameSite=Lax means a request that
+    # carries the cookie is already same-origin.
+    if not await page_session(request):
+        return RedirectResponse(LOGIN_PATH, status_code=303)
     request.app.state.session_generation = request.app.state.sessions.retire(
         session_generation(request)
     )
