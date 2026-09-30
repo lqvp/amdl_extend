@@ -43,11 +43,13 @@ from web_support import (
 )
 
 from hub import app as live_app_module
+from hub import scheduler as scheduler_module
 from hub.api import TEMPLATES_DIR, GuardedStatic
 from hub.app import create_app
 from hub.config import load_settings
 from hub.jobs import Leaf, Progress
 from hub.ripper_host import RipperHostError
+from hub.scheduler import Scheduler, run_pool
 
 
 # --------------------------------------------------------------------------- #
@@ -1212,10 +1214,10 @@ async def test_progress_from_a_job_that_no_longer_exists_is_dropped(
     progress_ripper.progress_up_to = 100
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
 
-    from hub import app as app_module
+    from hub.scheduler import _apply_progress
 
     # A reading for an id that was never in the table.
-    app_module._apply_progress(  # noqa: SLF001 - the handler under test
+    _apply_progress(  # noqa: SLF001 - the handler under test
         running.state, 9999, Progress(bytes_done=5, bytes_total=10, fraction=0.5)
     )
     # Nothing raised, and the store is unchanged.
@@ -1232,10 +1234,8 @@ async def test_no_progress_reading_is_written_when_nothing_is_running(
     to whatever job id happened to be in the variable. `None` is the answer, and it is what
     makes a late reading harmless.
     """
-    from hub import app as app_module
-
     assert running.state.current_job is None
-    app_module._on_progress(running.state)(  # noqa: SLF001 - the handler under test
+    Scheduler(running.state).forward_progress(  # noqa: SLF001 - the handler under test
         Progress(bytes_done=1, bytes_total=2, fraction=0.5)
     )
     # Nothing to write to, and nothing raised.
@@ -1310,9 +1310,7 @@ async def test_a_late_progress_reading_cannot_resurrect_a_finished_job(
     assert await running.state.run_one() is True
     assert store.get(1).status == "done"
 
-    from hub import app as app_module
-
-    report = app_module._on_progress(running.state)  # noqa: SLF001 - the seam's callback
+    report = Scheduler(running.state).forward_progress  # noqa: SLF001 - the seam's callback
     # The real shape of the race: `report` is called while `current_job` still names the job,
     # exactly as the sampler would, and the callback it queues lands *after* the job has
     # finished. The id is set by hand because the job is already `done` here -- which is the
@@ -1352,7 +1350,7 @@ def test_a_late_reading_is_dropped_rather_than_raised(app, settings):
     cover the three halves independently: the store's refusal (`test_jobs.py`), the caller's
     handling of a deleted row (first case here) and of a finished one (second case here).
     """
-    from hub import app as app_module
+    from hub.scheduler import _apply_progress
 
     store = _store(settings)
     store.create_batch(
@@ -1367,9 +1365,9 @@ def test_a_late_reading_is_dropped_rather_than_raised(app, settings):
 
     reading = Progress(bytes_done=5, bytes_total=10, fraction=0.5)
     # A finished job: the store refuses, and the refusal must not escape.
-    app_module._apply_progress(app.state, 1, reading)  # noqa: SLF001 - under test
+    _apply_progress(app.state, 1, reading)  # noqa: SLF001 - under test
     # A job that is not there at all: the other refusal, and the older one.
-    app_module._apply_progress(app.state, 9999, reading)  # noqa: SLF001 - under test
+    _apply_progress(app.state, 9999, reading)  # noqa: SLF001 - under test
 
     job = store.get(1)
     assert job.status == "done", "a dropped reading must leave the row exactly as it was"
@@ -2119,7 +2117,9 @@ async def test_a_wrapper_dying_during_a_rip_parks_and_retries_the_running_job(
 
     supervisor.wait_until_unavailable = wait_until_unavailable
     ripper.run_song = blocked_rip
-    execution = asyncio.create_task(live_app_module._execute(running.state, job))
+    from hub.scheduler import _execute
+
+    execution = asyncio.create_task(_execute(running.state, job))
     await asyncio.wait_for(rip_started.wait(), 1.0)
     wrapper_lost.set()
     await asyncio.wait_for(execution, 1.0)
@@ -2170,7 +2170,9 @@ async def test_a_wrapper_exit_wins_a_simultaneous_rip_failure(
 
     supervisor.wait_until_unavailable = wait_until_unavailable
     ripper.run_song = failing_rip
-    await live_app_module._execute(running.state, job)
+    from hub.scheduler import _execute
+
+    await _execute(running.state, job)
 
     parked = store.get(job.id)
     assert parked.status == "waiting"
@@ -2402,7 +2404,7 @@ async def test_the_wrapper_log_reaches_the_stream_through_the_sink_it_was_given(
 async def test_create_app_hands_the_seam_a_live_progress_callback(settings, supervisor):
     """**B5: the production wiring, not the fake's own handler, is what is under test.**
 
-    The round-1 tests called `app_module._on_progress(app.state)` themselves and assigned the
+    The round-1 tests called `hub.scheduler._on_progress(app.state)` themselves and assigned the
     result to the fake -- so the suite exercised the *callback* and never the thing that
     installs it. Passing `on_progress=None` at `app.py:628` left all 539 tests green, so the
     "… 転送速度" requirement was not shown to be satisfied by the app a user actually
@@ -2746,7 +2748,7 @@ async def _scheduler_running(app):
     would pass. Waiting on the real loop is slower by about a second and is the only version
     of this assertion that says anything.
     """
-    task = asyncio.create_task(live_app_module.scheduler_loop(app.state))
+    task = asyncio.create_task(Scheduler(app.state).run())
     try:
         yield task
     finally:
@@ -2952,9 +2954,9 @@ async def test_webhook_retries_once_until_it_succeeds(
             calls.append((url, json))
             return Response(outcomes[len(calls) - 1])
 
-    monkeypatch.setattr(live_app_module.httpx, "AsyncClient", Client)
+    monkeypatch.setattr(scheduler_module.httpx, "AsyncClient", Client)
 
-    result = await live_app_module._post_notification(
+    result = await scheduler_module._post_notification(
         "http://notify.test/hook", {"event": "queue-idle"}
     )
 
@@ -2978,7 +2980,7 @@ async def test_an_idle_queue_announces_itself_once(running, authed, monkeypatch)
         sent.append({"url": url, **payload})
         return True
 
-    monkeypatch.setattr(live_app_module, "_post_notification", capture)
+    monkeypatch.setattr(scheduler_module, "_post_notification", capture)
     running.state.settings.notify_webhook_url = "http://notify.test/hook"
 
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
@@ -3364,7 +3366,7 @@ async def test_a_shutdown_that_outlasts_its_grace_cancels_the_rip_and_still_clos
     under test. `RipperHost`'s in-flight counter is released in a `finally`, so a cancelled
     rip still lets `close()` succeed; that is why the assert below can be about `closed`.
     """
-    from hub import app as app_module
+    from hub import scheduler as scheduler_module
 
     started = asyncio.Event()
 
@@ -3373,7 +3375,7 @@ async def test_a_shutdown_that_outlasts_its_grace_cancels_the_rip_and_still_clos
         await asyncio.sleep(3600)
 
     ripper.run_song = hanging_rip  # type: ignore[method-assign]
-    monkeypatch.setattr(app_module, "DRAIN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(scheduler_module, "DRAIN_TIMEOUT_SECONDS", 0.2)
     _queue_one(settings)
 
     async with live_app.router.lifespan_context(live_app):
@@ -3400,7 +3402,7 @@ async def test_a_shutdown_cancels_every_concurrent_rip_not_just_the_first(
     were cancelled and marked" observable rather than lucky. The single-rip case cannot tell
     the two apart -- there is no other child to strand.
     """
-    from hub import app as app_module
+    from hub import scheduler as scheduler_module
 
     all_started = asyncio.Event()
     entered = 0
@@ -3413,7 +3415,7 @@ async def test_a_shutdown_cancels_every_concurrent_rip_not_just_the_first(
         await asyncio.sleep(3600)
 
     ripper.run_song = hanging_rip  # type: ignore[method-assign]
-    monkeypatch.setattr(app_module, "DRAIN_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(scheduler_module, "DRAIN_TIMEOUT_SECONDS", 0.2)
     # Three rows, written before the app exists, so this is a boot with a full queue -- and
     # so the re-expansion path is the one that resolves them. `hub.resolver` because
     # `_leaf_for` imports `expand` inside its own body.
@@ -3668,7 +3670,7 @@ async def test_an_idle_hub_probes_the_wrapper_rarely_and_one_more_when_waking(
         # Several idle intervals, and the assertion is that *nothing* is probed in them: the
         # empty queue costs a SQLite read, and readiness cannot matter when there is nothing
         # to be ready for. The old loop made 2.0 HTTP probes per second here.
-        await asyncio.sleep(live_app_module.IDLE_POLL_SECONDS * 6)
+        await asyncio.sleep(scheduler_module.IDLE_POLL_SECONDS * 6)
     elapsed = time.monotonic() - started
 
     assert probes == [], (
@@ -3685,7 +3687,7 @@ async def test_an_idle_hub_probes_the_wrapper_rarely_and_one_more_when_waking(
     # And the bound is not met by a lucky short window: the interval a *ready* wrapper with
     # queued work is polled at is deliberately short, because a token change must be noticed
     # quickly and the queue is being actively used. The idle case is the one that was 2 Hz.
-    assert live_app_module.IDLE_POLL_SECONDS <= 1.0, (
+    assert scheduler_module.IDLE_POLL_SECONDS <= 1.0, (
         "an empty queue should be re-checked at the queue rate, not slower -- it costs a "
         "SQLite read and a user who queues a job should not wait for it"
     )
@@ -3790,7 +3792,7 @@ async def test_a_cached_ready_answer_does_not_claim(live_app, settings, supervis
         # is honest about a wrapper that is up. The probe has to run again precisely when the
         # answer was bad.
         supervisor.regions = ["jp"]
-        await asyncio.sleep(live_app_module.IDLE_READINESS_POLL_SECONDS * 1.5)
+        await asyncio.sleep(scheduler_module.IDLE_READINESS_POLL_SECONDS * 1.5)
         assert live_app.state.cached_problem is None, (
             "the loop never noticed the wrapper came back, so a job it could have run is "
             "stuck in the queue until the process restarts"
@@ -3980,15 +3982,13 @@ async def test_several_tracks_are_ripped_at_the_same_time(
     monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
 
-    from hub import app as app_module
-
     barrier = _SleeperRipper(FakeWebAPI(), parties=3)
     running.state.ripper = barrier
     running.state.jobs.mark(1, "queued")
     running.state.jobs.mark(2, "queued")
     running.state.jobs.mark(3, "queued")
 
-    await app_module.run_pool(running.state)  # a single scheduler step
+    await run_pool(running.state)  # a single scheduler step
 
     assert barrier.peak_in_flight > 1, (
         f"peak_in_flight was {barrier.peak_in_flight}; the queue ripped one track at a time, "
@@ -4007,15 +4007,13 @@ async def test_no_more_than_the_configured_number_rip_at_once(running, authed, s
     monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
 
-    from hub import app as app_module
-
     running.state.settings = running.state.settings.model_copy(update={"rip_concurrency": 2})
     barrier = _SleeperRipper(FakeWebAPI(), parties=99)  # never satisfied, so all are held
     running.state.ripper = barrier
     for job_id in (1, 2, 3):
         running.state.jobs.mark(job_id, "queued")
 
-    await app_module.run_pool(running.state)
+    await run_pool(running.state)
 
     assert barrier.peak_in_flight <= 2, (
         f"peak_in_flight reached {barrier.peak_in_flight} with rip_concurrency=2"
@@ -4040,7 +4038,6 @@ async def test_the_same_track_in_two_codecs_is_not_ripped_twice_at_once(
     So the second is not claimed -- it goes back to `queued` -- and this asserts the *row*,
     not the absence of an exception, because a silent no-op is what is guarded against.
     """
-    from hub import app as app_module
     from hub.jobs import Leaf
 
     def leaf_for(codec: str) -> Leaf:
@@ -4074,7 +4071,7 @@ async def test_the_same_track_in_two_codecs_is_not_ripped_twice_at_once(
     # worker that re-claims the row it just deferred does not fail -- it spins, claiming and
     # releasing the same row until the process ends, which is a test run with no output. A
     # `TimeoutError` is a failure a human can read.
-    await asyncio.wait_for(app_module.run_pool(running.state), timeout=15.0)
+    await asyncio.wait_for(run_pool(running.state), timeout=15.0)
 
     in_flight_together = len(blocker.songs)
     assert in_flight_together == 1, (
@@ -4190,16 +4187,14 @@ async def test_a_job_that_raises_out_of_execute_does_not_strand_its_siblings(
     await authed.post("/api/wrapper/start")
     await authed.post("/api/jobs", json={"urls": [ALBUM_URL, ALBUM2_URL], "codec": "alac"})
 
-    from hub import app as app_module
-
-    real_leaf_for = app_module._leaf_for
+    real_leaf_for = scheduler_module._leaf_for
 
     async def leaf_for_that_blows_up_once(state, job):
         if job.adam_id == "2":
             raise OSError(5, "Input/output error", "the catalogue client lost the socket")
         return await real_leaf_for(state, job)
 
-    monkeypatch.setattr(app_module, "_leaf_for", leaf_for_that_blows_up_once)
+    monkeypatch.setattr(scheduler_module, "_leaf_for", leaf_for_that_blows_up_once)
     assert await running.state.run_pool() == 2
 
     statuses = {job.adam_id: job.status for job in running.state.jobs.list()}

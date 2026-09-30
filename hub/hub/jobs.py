@@ -183,7 +183,7 @@ class IllegalTransition(RuntimeError):
     **A distinct type, and not a `ValueError`, because the two mean opposite things to a
     caller.** `ValueError` is "you passed something wrong", which is a bug to fix at the call
     site. This is "the world moved on since you read it", which is a *race* the caller is
-    expected to handle: the late progress reading in `hub.app._apply_progress` catches it and
+    expected to handle: the late progress reading in `hub.scheduler._apply_progress` catches it and
     drops the reading, which is the correct answer because the job it was describing has
     finished.
 

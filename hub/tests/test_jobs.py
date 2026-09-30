@@ -773,7 +773,7 @@ def test_re_queuing_is_the_one_door_out_of_a_finished_job(tmp_path):
 def test_an_active_job_can_still_be_marked_running(tmp_path):
     """The refusal must not catch the one legitimate `mark(..., "running")`.
 
-    That call exists: `hub.app._apply_progress` writes progress on a `running` row on every
+    That call exists: `hub.scheduler._apply_progress` writes progress on a `running` row on every
     0.1 s tick. A rule that read "cannot be marked running" rather than "cannot become
     active again" would break the progress bar entirely, and this is the test that says so.
     """

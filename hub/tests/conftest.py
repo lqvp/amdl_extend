@@ -55,6 +55,7 @@ from web_support import (
 
 from hub.app import create_app
 from hub.config import load_settings
+from hub.scheduler import Scheduler
 
 
 def _touch(path: Path) -> Path:
@@ -259,9 +260,7 @@ def progress_ripper(app, ripper: FakeRipper) -> FakeRipper:
     attached here instead, exactly as a real host would have it. The app's own handler is
     read off `app.state`, so the test is not asserting against a re-implementation of it.
     """
-    from hub import app as app_module
-
-    ripper.on_progress = app_module._on_progress(app.state)  # noqa: SLF001 - the seam
+    ripper.on_progress = Scheduler(app.state).forward_progress  # noqa: SLF001 - the seam
     return ripper
 
 
