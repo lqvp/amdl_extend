@@ -726,6 +726,17 @@ def test_group_headers_offer_the_group_actions():
     assert 'requeue.type = "button"' in header_builder
 
 
+def test_the_queue_offers_export_downloads():
+    """History and queue download links, static and cookie-authed -- no JS, no button."""
+    template = (Path(__file__).parent.parent / "hub/web/templates/queue.html").read_text(encoding="utf-8")
+    for href in (
+        'href="/api/jobs/export?kind=history&format=csv"',
+        'href="/api/jobs/export?kind=history&format=json"',
+        'href="/api/jobs/export?kind=queue&format=csv"',
+    ):
+        assert href in template, f"the queue is missing its export download: {href}"
+
+
 def test_the_queue_uses_a_reconnecting_websocket_not_eventsource():
     """Transport loss reconnects to a fresh snapshot; expired sessions stop retrying."""
     js = (Path(__file__).parent.parent / "hub/web/static/app.js").read_text(encoding="utf-8")

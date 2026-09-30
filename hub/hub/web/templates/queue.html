@@ -247,6 +247,15 @@
     No visible jobs match those filters. <button type="button" class="link"
       data-action="queue-clear-filters">Clear filters</button>
   </p>
+  <div class="row export-tools">
+    {#- The whole table, in one file, for the adjudication the paginated page cannot
+        do. Static links: the session cookie rides automatically and the browser's own
+        download handling (Content-Disposition) does the rest. -#}
+    <span class="muted small">Export:</span>
+    <a href="/api/jobs/export?kind=history&format=csv">History (CSV)</a>
+    <a href="/api/jobs/export?kind=history&format=json">History (JSON)</a>
+    <a href="/api/jobs/export?kind=queue&format=csv">Queue (CSV)</a>
+  </div>
   <div class="history-tools" id="queue-history-tools"
        data-before-id="{{ history.history_before_id or '' }}"
        data-has-more="{{ 'true' if history.history_has_more else 'false' }}"

@@ -704,3 +704,6 @@ details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--
 }
 .group-header .group-url { overflow-wrap: anywhere; }
 .group-header .group-actions { display: inline-flex; gap: 0.5rem; flex: none; }
+
+/* Export links read as text tools, not actions. */
+.export-tools { gap: 0.75rem; align-items: baseline; }
