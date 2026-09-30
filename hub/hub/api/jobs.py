@@ -884,7 +884,7 @@ async def retry_job(request: Request, job_id: int) -> Response:
 def _publish_job(state, job_id: int) -> None:
     """One job's current row, for the stream. Read from the store, not from a local copy.
 
-    `hub.app` imports this rather than keeping its own, because two functions that both
+    `hub.scheduler` imports this rather than keeping its own, because two functions that both
     publish "the job as it is now" is two places for a future column to be forgotten in. The
     read is a `get()` because `mark` computes `finished_at` and the store is the only place
     that knows what it set: a published row that disagrees with the table is how a queue ends

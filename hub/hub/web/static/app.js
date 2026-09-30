@@ -751,8 +751,8 @@
         if (reconnectingWithHistory) hydrateJobs(Array.from(historyLoadedIds));
         // The snapshot arrives on connect/reconnect: refresh the banner from the live
         // server so a wrapper or library that changed while the socket was down is
-        // reflected -- the wrapper frame fires only on problem transitions, never on
-        // recovery, so the snapshot is the recovery carrier.
+        // reflected. The wrapper frame carries live transitions; the snapshot carries
+        // everything the socket missed.
         fetch("/api/status", { credentials: "same-origin" })
           .then(function (response) { return response.ok ? response.json() : null; })
           .then(function (body) { if (body) updateHealthBanner(body); })
