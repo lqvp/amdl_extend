@@ -74,7 +74,7 @@ PARENT_TYPES: frozenset[str] = frozenset(
 
 
 #: The row shape of the CSV export when the table is empty (header-only file).
-JOB_COLUMNS = (
+JOB_COLUMNS = (  # noqa: RUF022 - deliberately schema order, not alphabetical
     "id",
     "url",
     "url_type",

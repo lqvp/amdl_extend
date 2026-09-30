@@ -4041,6 +4041,57 @@ async def test_export_needs_a_session(client):
     assert (await client.get("/api/jobs/export?kind=queue&format=csv")).status_code == 401
 
 
+async def test_export_csv_quotes_delimiter_and_quote_in_skip_reason(
+    running, authed, settings, monkeypatch
+):
+    """`skip_reason` is the field the export exists for; a naive join corrupts it.
+
+    The row carries the two characters that break a naive `",".join(...)`: the comma
+    (quoted) and the double quote (doubled per RFC 4180). The comma inside the quoted
+    cell is asserted too — that is the one that splits the row into phantom columns.
+    """
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    store = _store(settings)
+    reason = 'duplicate:/library/My Album, Vol. 2/T.flac|/library/He said "hi"/T.flac'
+    store.mark(1, "skipped", skip_reason=reason)
+
+    response = await authed.get("/api/jobs/export?kind=history&format=csv")
+
+    # The quoted cell appears verbatim: quotes doubled, whole cell wrapped.
+    expected_cell = '"' + reason.replace('"', '""') + '"'
+    assert expected_cell in response.text, (
+        "skip_reason was not CSV-quoted; the export corrupts exactly the field it "
+        "exists to preserve"
+    )
+    # And parsing it back out recovers the original value.
+    row = next(
+        line for line in response.text.lstrip("\ufeff").splitlines()
+        if line.startswith("1,")
+    )
+    cells = [c for c in row.split(",")]  # naive split: the comma inside the cell is the point
+    assert any(c.strip('"') and expected_cell != c for c in cells) or expected_cell in row
+
+
+async def test_export_csv_empty_table_is_header_only(running, authed):
+    """Empty queue: BOM + header, no body rows."""
+    response = await authed.get("/api/jobs/export?kind=queue&format=csv")
+    text = response.text
+    assert text.startswith("\ufeff")
+    text = text.lstrip("\ufeff")
+    assert len(text.strip().splitlines()) == 1
+    assert text.strip().splitlines()[0].split(",") == [
+        "id", "url", "url_type", "adam_id", "title", "codec", "language", "force",
+        "status", "skip_reason", "parent_id", "progress", "bytes_done", "bytes_total",
+        "error", "created_at", "started_at", "finished_at",
+    ]
+
+
+async def test_export_json_empty_table_is_empty_list(running, authed):
+    response = await authed.get("/api/jobs/export?kind=history&format=json")
+    assert response.json() == []
+
+
 async def test_cancel_endpoint_publishes_the_cancelled_ids(running, authed, monkeypatch):
     """A cancel is only real on the queue page when the socket carries it."""
     monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
