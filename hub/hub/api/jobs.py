@@ -11,11 +11,12 @@ and then raises* `ValueError` on one it could not, because a 19-track album must
 **by `parent_url`**, and adds a `rejected` list naming the one that did not. A 500 here
 would be a 19-track album queued behind an error the user cannot see.
 
-**The read-back is filtered by `parent_url` and not by `parent_id`.** `parent_id` is the
-`job` table's self-reference and `create_batch` has no such parameter, so every row has
-`NULL` in it; `list(parent_id=None)` therefore means *no filter*, and using it to answer
-"what did this request create?" would return the user's entire queue and report all of it as
-this request's work. `store.list(parent_url=...)` is the only filter that means what it says.
+**`parent_url` is the group key.** The read-back, `POST /api/jobs/cancel`, the scoped
+`requeue`, and the scoped `finished` delete all address a batch by the `url` column
+`create_batch` writes for every leaf. `parent_id` is the `job` table's unused self-
+reference -- `create_batch` has no such parameter, so every row has `NULL` in it, and
+`list(parent_id=None)` means *no filter*; using it to address a group would return the
+user's entire queue and report all of it as one request's work.
 
 Nothing here decides whether a track is already on disk. That is the scheduler's, at
 execution time, in `hub.app` -- because a queued job can sit long enough for the file to be
@@ -642,6 +643,7 @@ REQUEUE_SCOPES: dict[str, frozenset[str]] = {
 
 class _RequeueBody(BaseModel):
     scope: str = "failed"
+    parent_url: str | None = None
 
 
 @router.post("/api/jobs/requeue")
@@ -668,14 +670,49 @@ async def requeue_jobs(request: Request, body: _RequeueBody | None = None) -> Re
             f"{scope!r} is not a requeue scope. Use one of: "
             f"{', '.join(sorted(REQUEUE_SCOPES))}.",
         )
-    result = state.jobs.requeue(statuses)
+    result = state.jobs.requeue(statuses, parent_url=body.parent_url if body else None)
     for job_id in result.requeued:
         _publish_job(state, job_id)
     return {"requeued": result.requeued, "refused": result.refused}
 
 
+@router.post("/api/jobs/cancel")
+async def cancel_jobs(request: Request) -> Response:
+    """Cancel one batch's `queued`/`waiting` rows, and report the ones still ripping.
+
+    `parent_url` is the batch identity -- the `url` column `create_batch` writes for
+    every leaf of one request; the `parent_id` self-reference is unused and cannot
+    address a group. The validation is here, not in the schema, so the answer is a
+    `fail(400)` naming `parent_url`: a missing or empty group key cannot address a
+    group, and "act on nothing" is the wrong fallback for a destructive verb. An
+    unknown group cancels nothing and answers 200 with two empty lists: "there was
+    nothing to cancel" is the truth, not an error. `running` rows are refused, not
+    cancelled -- upstream owns the transfer and its partial file, the same rule
+    `delete_finished` and `requeue` hold to.
+
+    Each cancelled row is published through `_publish_job` so every open tab sees it
+    stop; `refused` carries no frames because nothing about those rows changed.
+    """
+    state = request.app.state
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    parent_url = body.get("parent_url") if isinstance(body, dict) else None
+    if not isinstance(parent_url, str) or not parent_url:
+        return fail(400, "`parent_url` is required: it is the group cancel addresses.")
+    result = state.jobs.cancel_pending(parent_url)
+    for job_id in result.cancelled:
+        _publish_job(state, job_id)
+    return {"cancelled": result.cancelled, "refused": result.refused}
+
+
 @router.delete("/api/jobs/finished")
-async def delete_finished_jobs(request: Request) -> Response:
+async def delete_finished_jobs(
+    # Omitted `parent_url` = every finished row (unchanged contract); `parent_url=`
+    # present-but-empty addresses the empty group and deletes nothing -- the safe side.
+    request: Request, parent_url: str | None = Query(default=None)
+) -> Response:
     """Remove every finished row, and forget the leaves that went with them.
 
     **Irreversible, and the answer says how much of it there was.** What is lost is the
@@ -692,7 +729,7 @@ async def delete_finished_jobs(request: Request) -> Response:
     process, holding `Leaf` objects for jobs that no longer exist.
     """
     state = request.app.state
-    deleted = state.jobs.delete_finished()
+    deleted = state.jobs.delete_finished(parent_url)
     for job_id in deleted:
         state.leaves.forget(job_id)
     state.broker.publish(JOBS_CHANNEL, {"kind": "deleted", "ids": deleted})

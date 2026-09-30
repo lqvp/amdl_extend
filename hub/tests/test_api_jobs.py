@@ -192,9 +192,9 @@ async def test_every_route_but_health_requires_a_session(running):
     assert len(table) == len(set(table))
     # WebSocket endpoints are not represented in OpenAPI; the `/api/jobs/stream` HTTP route
     # was removed when the queue moved to `/api/jobs/ws`; the new queue history/control
-    # endpoints bring the HTTP inventory to 32.
-    assert len(table) == 32, (
-        f"the route table has {len(table)} entries, not 32: {table}. A new HTTP route is "
+    # endpoints bring the HTTP inventory to 32; `POST /api/jobs/cancel` brings it to 33.
+    assert len(table) == 33, (
+        f"the route table has {len(table)} entries, not 33: {table}. A new HTTP route is "
         f"expected to change this number -- add it to OPEN_WITHOUT_A_SESSION only if it "
         f"genuinely has to be reachable without a session."
     )
@@ -3923,6 +3923,116 @@ async def test_both_bulk_routes_need_a_session(client):
     """A bulk delete is the most destructive thing the API offers, so it is guarded."""
     assert (await client.post("/api/jobs/requeue", json={"scope": "failed"})).status_code == 401
     assert (await client.delete("/api/jobs/finished")).status_code == 401
+
+
+async def test_cancel_endpoint_reports_cancelled_and_refused(running, authed, settings, monkeypatch):
+    """The group cancel's answer names both lists, and the rows match the answer."""
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    store = _store(settings)
+    claimed = store.claim_next()  # job 1 is `running`; 2 and 3 stay `queued`
+    assert claimed.id == 1
+
+    response = await authed.post("/api/jobs/cancel", json={"parent_url": ALBUM_URL})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["cancelled"] == [2, 3]
+    assert body["refused"] == [1]
+    assert {store.get(2).status, store.get(3).status} == {"cancelled"}
+    assert store.get(1).status == "running", "the in-flight rip was cancelled anyway"
+
+
+async def test_cancel_endpoint_requires_parent_url(running, authed):
+    """`parent_url` is the group identity; without it the request cannot name a group."""
+    for body in ({}, {"parent_url": ""}):
+        response = await authed.post("/api/jobs/cancel", json=body)
+        assert response.status_code == 400, body
+        assert "parent_url" in response.text
+
+
+async def test_cancel_endpoint_needs_a_session(client):
+    response = await client.post("/api/jobs/cancel", json={"parent_url": "u"})
+    assert response.status_code == 401
+
+
+async def test_cancel_endpoint_unknown_group_is_200_with_empty_lists(running, authed):
+    """An unknown group is "nothing to cancel", not an error."""
+    response = await authed.post("/api/jobs/cancel", json={"parent_url": "nobody-queued-this"})
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": [], "refused": []}
+
+
+async def test_cancel_endpoint_publishes_the_cancelled_ids(running, authed, monkeypatch):
+    """A cancel is only real on the queue page when the socket carries it."""
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    events: list[dict] = []
+    agen = running.state.broker.subscribe("jobs")
+
+    async def read_events() -> None:
+        async for chunk in agen:
+            events.append(json.loads(chunk))
+
+    reader = asyncio.create_task(read_events())
+    await asyncio.sleep(0)
+    try:
+        await authed.post("/api/jobs/cancel", json={"parent_url": ALBUM_URL})
+        await asyncio.sleep(0)
+    finally:
+        reader.cancel()
+        try:
+            await reader
+        except asyncio.CancelledError:
+            pass
+        await agen.aclose()
+    published = [
+        frame["job"]["id"] for frame in events
+        if frame.get("kind") == "job" and frame["job"]["status"] == "cancelled"
+    ]
+    assert sorted(published) == [1, 2, 3]
+
+
+async def test_requeue_parent_url_touches_only_that_group(running, authed, settings, monkeypatch):
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    store = _store(settings)
+    for job_id in (1, 2, 3):
+        store.mark(job_id, "failed")
+    store._conn.execute(  # noqa: SLF001 - a second group, not creatable via the API fixture
+        "INSERT INTO job (url, url_type, adam_id, title, codec, language, force, status,"
+        " created_at) VALUES ('other-url', 'album', '9', 't', 'alac', 'ja', 0, 'failed',"
+        " 'now')"
+    )
+    other_id = store.list(parent_url="other-url")[0].id
+
+    response = await authed.post("/api/jobs/requeue", json={"scope": "failed", "parent_url": ALBUM_URL})
+
+    body = response.json()
+    assert body["requeued"] == [1, 2, 3]
+    assert store.get(other_id).status == "failed", "the filter leaked into another group"
+
+
+async def test_delete_finished_parent_url_removes_only_that_group(running, authed, settings, monkeypatch):
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+    store = _store(settings)
+    for job_id in (1, 2, 3):
+        store.mark(job_id, "done")
+    store._conn.execute(  # noqa: SLF001
+        "INSERT INTO job (url, url_type, adam_id, title, codec, language, force, status,"
+        " created_at) VALUES ('other-url', 'album', '9', 't', 'alac', 'ja', 0, 'done',"
+        " 'now')"
+    )
+    other_id = store.list(parent_url="other-url")[0].id
+    leaves = running.state.leaves
+
+    response = await authed.delete(f"/api/jobs/finished?parent_url={ALBUM_URL}")
+
+    assert response.json() == {"deleted": 3, "ids": [1, 2, 3]}
+    assert store.get(other_id) is not None, "the filter leaked into another group"
+    assert leaves.get(1) is None, "the leaf outlived its row"
 
 
 # ---------------------------------------------------------------------------

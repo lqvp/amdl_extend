@@ -248,10 +248,12 @@ class Job:
     """One row of `job`, as the store reads it back.
 
     `parent_url` / `parent_type` are the Python-facing names for the `url` / `url_type`
-    columns; see the module docstring. `parent_id` is the table's self-reference and is
-    `None` for everything `create_batch` writes, because its signature has no `parent_id`
-    parameter. It is here because the column is in the schema and `list(parent_id=...)`
-    filters on it.
+    columns; see the module docstring. `parent_url` is also the **group key**: every
+    operation that addresses a batch (`cancel_pending`, `requeue`/`delete_finished`
+    with `parent_url`, `list(parent_url=...)`) uses it. `parent_id` is the table's
+    unused self-reference -- nothing writes it, so it cannot address a group -- and it
+    is here because the column is in the schema and `list(parent_id=...)` filters on
+    it.
 
     `language` is a plain `str` although the column is nullable: `create_batch` is the only
     writer and it takes the language from a `Leaf`, which has no `None`. The column stays
