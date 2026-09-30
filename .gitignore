@@ -44,4 +44,4 @@ build/
 
 # --- Agent scratch: ExternalScout research and opencode session state ---
 # Written by the agent while it works; not repo content.
-.tmp/
+.tmp/.worktrees/
