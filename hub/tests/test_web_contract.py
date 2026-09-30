@@ -759,6 +759,23 @@ def test_health_banner_reports_wrapper_library_and_empty_mounts():
     assert "setInterval" not in script or "healthBanner" not in script[script.index("setInterval") : script.index("setInterval") + 300]
 
 
+def test_health_banner_recovery_is_carried_by_snapshot_and_clearing_frame():
+    """Recovery must clear the banner without a reload.
+
+    Two carriers, pinned as source: (a) the snapshot case refetches /api/status and
+    updates the banner; (b) the scheduler broadcasts the wrapper-clearing transition.
+    """
+    root = Path(__file__).parent.parent / "hub/web"
+    script = (root / "static/app.js").read_text(encoding="utf-8")
+    snapshot_case = script[script.index('case "snapshot":') : script.index('case "job":')]
+    assert 'fetch("/api/status"' in snapshot_case
+    assert "updateHealthBanner" in snapshot_case
+    scheduler = (Path(__file__).parent.parent / "hub/scheduler.py").read_text(encoding="utf-8")
+    assert '"kind": "wrapper", "problem": None' in scheduler, (
+        "the wrapper-clearing transition must broadcast so the banner clears live"
+    )
+
+
 def test_the_queue_uses_a_reconnecting_websocket_not_eventsource():
     """Transport loss reconnects to a fresh snapshot; expired sessions stop retrying."""
     js = (Path(__file__).parent.parent / "hub/web/static/app.js").read_text(encoding="utf-8")

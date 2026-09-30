@@ -809,6 +809,13 @@ async def scheduler_loop(state: HubState) -> None:
             await _sleep_or_stop(state, IDLE_READINESS_POLL_SECONDS)
             continue
 
+        if announced is not None:
+            # The wrapper recovered. The frame is emitted on the clearing transition
+            # too, so the health banner (which re-probes /api/status on any wrapper
+            # frame) can clear itself without waiting for a reconnect.
+            announced = None
+            state.broker.publish(JOBS_CHANNEL, {"kind": "wrapper", "problem": None})
+
         # **The wrapper can serve, so every parked job goes back on the queue** (B1a).
         #
         # This used to happen only on the Apple login path, which is where the round-0
