@@ -4399,6 +4399,65 @@ async def test_the_same_track_in_two_codecs_is_not_ripped_twice_at_once(
     )
 
 
+async def test_one_expansion_per_parent_url_not_one_per_track(running, monkeypatch):
+    """An artist is one expansion for its whole queue, not one per track.
+
+    The measured bug: a queue of 858 HoneyWorks tracks, each ~6 seconds of ripping, took
+    ~190 seconds *per track*, because `_leaf_for` keyed its registry on job id and rows
+    written by a previous process (the 858 were -- the hub restarted with a full queue)
+    miss it, so every job re-expanded the parent: for an artist that is one Apple request
+    per album it has ever released, ~3 minutes, identical every time.
+
+    The two rows are built through the store rather than the API for the same reason, and
+    they are claimed by the pool together, because the redundancy that matters is the
+    concurrent one -- the queue runs one parent's contiguous ids and claims four at once,
+    so four identical walks used to start within milliseconds. The gate is what makes that
+    overlap deterministic: the first caller is held until the second has arrived, and a
+    shared walk is the only way `expand` is called once.
+    """
+    from hub.jobs import Leaf
+
+    artist_url = "https://music.apple.com/jp/artist/tofubeats/305391189?uo=4"
+
+    def leaf_for(adam_id: str) -> Leaf:
+        return Leaf(adam_id=adam_id, title=f"track {adam_id}", album_name="firstlight",
+                    artist_name="tofubeats", codec="alac", language="ja",
+                    url=artist_url, storefront="jp")
+
+    expansions = 0
+    gate = asyncio.Event()
+
+    async def counting_expand(url, *, codec, language, web_api):
+        nonlocal expansions
+        expansions += 1
+        await gate.wait()
+        return [leaf_for("1"), leaf_for("2")]
+
+    monkeypatch.setattr("hub.resolver.expand", counting_expand)
+    asyncio.get_running_loop().call_later(1.0, gate.set)
+
+    store = running.state.jobs
+    created = store.create_batch(
+        artist_url, "artist", [leaf_for("1"), leaf_for("2")], force=False
+    ).created
+    assert len(created) == 2, "two rows, not one folded into the other"
+
+    await running.state.supervisor.start()
+    await asyncio.wait_for(run_pool(running.state), timeout=30.0)
+
+    assert expansions == 1, (
+        f"{expansions} expansions for one parent URL; each track of the artist re-walked "
+        f"the whole discography (~3 minutes), which is the 190-second gap this removes"
+    )
+    assert len(running.state.expansions) == 1, (
+        f"the expansion was not kept: {len(running.state.expansions)} cached"
+    )
+    statuses = {j.id: j.status for j in store.list()}
+    assert all(v == "done" for v in statuses.values()), (
+        f"sharing the walk must not lose either track: {statuses}"
+    )
+
+
 class _OneTrackFailsRipper(FakeRipper):
     """Fails one `adam_id` and succeeds the other, so a pass has to carry both outcomes."""
 

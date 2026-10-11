@@ -28,7 +28,9 @@ therefore always empty in this response, and it is here because the contract abo
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -184,6 +186,79 @@ class LeafRegistry:
 
     def __len__(self) -> int:
         return len(self._leaves)
+
+
+class ExpansionRegistry:
+    """`(parent url, codec, language) -> list[Leaf]`, for the expansions this process made.
+
+    **Why it has to exist next to `LeafRegistry`, which it is not a replacement for.**
+    `LeafRegistry` keys on job id, so it is per row: it holds what the *enqueueing*
+    expansion produced for each created id. A row a previous hub process wrote -- a
+    restart, or a queue filled while the hub was down -- has no entry there, and the
+    expansion behind it is one object shared by every track of that parent. Missing that,
+    `hub.scheduler._leaf_for` walked the parent once per job: an artist is one Apple
+    request per album it has ever released, so a queue of 858 HoneyWorks tracks paid a
+    ~3-minute discography walk 858 times on top of a 6-second rip each. The expansion is
+    the expensive object; it is keyed here by what produced it, not by who consumes it.
+
+    **Why an in-flight map as well as a cache.** The queue runs one parent's rows on
+    contiguous ids and claims four at a time, so four workers reach the *same* uncached
+    parent within milliseconds. A plain cache would let all four walk it. The first
+    creates a task, the rest await the same one -- `shield`ed, so a worker cancelled at
+    shutdown does not take the shared walk down with it, and the walk completes and
+    caches for whoever comes next. A failure is *not* cached: the next job retries, which
+    is what `_leaf_for` already does for a transport error, and a parent that is truly
+    gone fails its tracks one at a time exactly as it did before.
+
+    Bounded and small: the queue consumes an artist's rows contiguously, so a handful of
+    parents covers the run. FIFO eviction, because insertion order is the order the queue
+    consumes them in.
+    """
+
+    def __init__(self, *, capacity: int = 16) -> None:
+        self._expansions: dict[tuple[str, str, str], list[Leaf]] = {}
+        self._inflight: dict[tuple[str, str, str], asyncio.Future[list[Leaf]]] = {}
+        self._capacity = capacity
+
+    async def resolve(
+        self,
+        key: tuple[str, str, str],
+        factory: Callable[[], Awaitable[list[Leaf]]],
+    ) -> list[Leaf]:
+        """The leaves for `key`, from the cache, a walk already in flight, or `factory()`.
+
+        Exceptions from `factory` propagate to every awaiter unchanged and nothing is
+        remembered for them, so a failed parent is re-attempted rather than cached as
+        permanently broken.
+        """
+        leaves = self._expansions.get(key)
+        if leaves is not None:
+            return leaves
+        pending = self._inflight.get(key)
+        if pending is None:
+            pending = asyncio.ensure_future(factory())
+            self._inflight[key] = pending
+            pending.add_done_callback(functools.partial(self._forget, key))
+        leaves = await asyncio.shield(pending)
+        if not pending.cancelled():
+            self._remember(key, leaves)
+        return leaves
+
+    def _remember(self, key: tuple[str, str, str], leaves: list[Leaf]) -> None:
+        self._expansions[key] = leaves
+        while len(self._expansions) > self._capacity:
+            del self._expansions[next(iter(self._expansions))]
+
+    def _forget(self, key: tuple[str, str, str], task: asyncio.Future[list[Leaf]]) -> None:
+        if self._inflight.get(key) is task:
+            del self._inflight[key]
+        if not task.cancelled():
+            # Consume the exception if it failed: the awaiters saw it, but a detached
+            # failure on a task nobody awaits any more is loop-close noise.
+            task.exception()
+
+    def __len__(self) -> int:
+        return len(self._expansions)
 
 
 # --------------------------------------------------------------------------- #

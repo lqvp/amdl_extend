@@ -28,7 +28,7 @@ from pathlib import Path
 
 from fastapi.templating import Jinja2Templates
 
-from hub.api.jobs import LeafRegistry
+from hub.api.jobs import ExpansionRegistry, LeafRegistry
 from hub.auth import SessionStore
 from hub.config import Settings
 from hub.events import EventBroker
@@ -59,6 +59,13 @@ class HubState:
     leaves: LeafRegistry
     """`job id -> Leaf` for the expansions this process made; a miss means a
     re-expansion, and a failed re-expansion fails the job naming the id."""
+
+    expansions: ExpansionRegistry
+    """`(parent url, codec, language) -> [Leaf]` for the same expansions, keyed by what
+    produced them. `leaves` is per job id -- what the enqueue that created a row saw --
+    while this is the one walk every job of that parent shares; the scheduler's
+    `_leaf_for` reads this second, so a queue filled by a previous process does not
+    re-walk the parent once per track."""
 
     ripper_config_path: Path
     """`<vendor root>/config.toml`, resolved absolute before `RipperHost` chdirs."""

@@ -33,7 +33,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from hub.api.jobs import JOBS_CHANNEL, LeafRegistry
+from hub.api.jobs import JOBS_CHANNEL, ExpansionRegistry, LeafRegistry
 from hub.config import Settings, load_settings
 from hub.events import EventBroker
 from hub.jobs import JobStore, Progress
@@ -251,6 +251,7 @@ def create_app(
         broker=EventBroker(),
         jobs=JobStore(resolved.db_path),
         leaves=LeafRegistry(),
+        expansions=ExpansionRegistry(),
         ripper_config_path=config_path,
         # An injected `ripper` is left exactly as given: a test's fake already has
         # whatever behaviour it is asserting, and wrapping it in a real host to attach

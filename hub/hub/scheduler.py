@@ -627,11 +627,17 @@ def _apply_progress(state: HubState, job_id: int, progress: Progress) -> None:
 async def _leaf_for(state: HubState, job: Job) -> Leaf | None:
     """The `Leaf` for `job`, or `None` if it cannot be described any more.
 
-    Two sources, in order. The registry holds the expansion this process made, which is the
-    common case and free. The second is a re-expansion of the parent URL, which is what makes
-    a restart survivable: a queued row outlives the process that wrote it, and the `job` table
-    does not carry the fields the rip needs, so the only way to get them back is to ask the
-    catalogue again.
+    Three sources, in order. The registry holds the expansion this process made *for this
+    job id* -- what the enqueue that created the row saw -- and is free. Then the parent
+    expansion cache, keyed by `(parent url, codec, language)`: the walk is per parent, so
+    every other track of the same artist or album reads the one this process already made,
+    and four workers that claimed the same parent's contiguous ids together share a single
+    in-flight walk rather than starting four. The third, only for a parent this process
+    has never expanded, is a re-expansion of the parent URL, which is what makes a restart
+    survivable: a queued row outlives the process that wrote it, and the `job` table does
+    not carry the fields the rip needs, so the only way to get them back is to ask the
+    catalogue again. Walking per job instead of per parent is what turned a 6-second rip
+    into a ~3-minute one for an artist queue of hundreds of tracks.
 
     Matching is on `(adam_id, codec)` and not on `adam_id` alone, because a playlist that
     lists a track twice, or an artist whose catalogue holds the same song in two codecs, is
@@ -647,15 +653,18 @@ async def _leaf_for(state: HubState, job: Job) -> Leaf | None:
     from hub.resolver import ResolveError, expand
 
     try:
-        leaves = await expand(
-            job.parent_url, codec=job.codec, language=job.language, web_api=web_api
+        leaves = await state.expansions.resolve(
+            (job.parent_url, job.codec, job.language),
+            lambda: expand(
+                job.parent_url, codec=job.codec, language=job.language, web_api=web_api
+            ),
         )
     except (ResolveError, RuntimeError):
         # A `ResolveError` is "that URL is not expandable any more", which is the answer the
         # caller needs. A `RuntimeError` from the catalogue is a transport problem, and
         # treating it as "gone" would fail a perfectly good track; both land on the same
         # message, which says the expansion failed rather than claiming the track does not
-        # exist.
+        # exist. Neither is cached, so the next job of this parent tries again.
         return None
 
     for candidate in leaves:
