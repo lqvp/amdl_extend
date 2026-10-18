@@ -74,6 +74,10 @@ from pathlib import Path
 
 MODE = {mode!r}
 SLOW_SECONDS = {slow_seconds!r}
+# How long the "login_2fa_late_rootfs" mode sleeps before creating its base dir. The real
+# launcher creates it at startup; this mode models the ordering that exists on a loaded
+# machine anyway, and that `submit_2fa` has to wait out.
+LATE_ROOTFS_SECONDS = {late_rootfs_seconds!r}
 # Set by the /status handler in "crash_after_ready" mode, so the stub dies *because* it was
 # asked whether it was up -- the only version of this that cannot race the readiness poll. A
 # timer would have to outlast an unknown startup cost to guarantee `start()` saw the 200
@@ -237,6 +241,15 @@ def _login():
         print("invalid login format, expected user:pass", flush=True)
         return 1
     user = creds.split(":", 1)[0]
+    # Created *before* anything is printed, because that is what the real launcher does:
+    # `wrapper-lite-rootless.c:142` mkdirs its rootfs and base dir at startup, before the
+    # payload runs, so by the time the prompt below can trigger the supervisor the
+    # directory is already there. A stub that made it after the prompt modelled a race
+    # the launcher does not have -- and on a loaded CI runner the parent won that race and
+    # the whole exchange died on "does not exist". `login_2fa_late_rootfs` deliberately
+    # keeps the old ordering, as the thing `submit_2fa` now has to survive.
+    if MODE != "login_2fa_late_rootfs":
+        _chroot()
     # Echoed, because a child that echoes what it was handed is the case that leaks a
     # password into a log pane.
     print("2026-09-27 00:00:00.000 [INFO ] wrapper-lite login mode", flush=True)
@@ -254,6 +267,11 @@ def _login():
         # outcome and the one that must not make the caller wait out a prompt timeout.
         print("2026-09-27 00:00:01.000 [INFO ] login complete, exiting", flush=True)
         return 0
+    if MODE == "login_2fa_late_rootfs":
+        # The launcher's mkdir lands *after* the prompt: the same window a loaded machine
+        # opens between the supervisor reading `2FA: true` and the child's startup syscall.
+        # `submit_2fa` is expected to wait this out, not to fail on it.
+        time.sleep(LATE_ROOTFS_SECONDS)
     code_path = _chroot() / "2fa.txt"
     print(
         "2026-09-27 00:00:01.000 [WARN ] Enter your 2FA code into "
@@ -289,7 +307,7 @@ def _main():
     _install_sigterm()
     _isolate()
 
-    if MODE in ("login_2fa", "login_no_2fa"):
+    if MODE in ("login_2fa", "login_2fa_late_rootfs", "login_no_2fa"):
         # A login child is a separate, short-lived process that never listens -- see
         # `login()`'s docstring. So this mode does the handshake and exits, which is also
         # what makes `submit_2fa`'s "the login child is gone" branch reachable.
@@ -357,6 +375,7 @@ def _stub(
     slow_seconds: float = 1.5,
     twofa_poll_tries: int = 200,
     twofa_poll_seconds: float = 0.05,
+    late_rootfs_seconds: float = 2.0,
     regions: list | None = None,
 ) -> Path:
     """Materialise one stub launcher and return its path.
@@ -379,6 +398,7 @@ def _stub(
             slow_seconds=slow_seconds,
             twofa_poll_tries=twofa_poll_tries,
             twofa_poll_seconds=twofa_poll_seconds,
+            late_rootfs_seconds=late_rootfs_seconds,
             regions=["jp"] if regions is None else regions,
         ),
         encoding="utf-8",
@@ -406,6 +426,19 @@ def fake_launcher_2fa_slow_poll(tmp_path: Path) -> Path:
     the code file is written and then orphaned.
     """
     return _stub(tmp_path, "login_2fa", twofa_poll_tries=4, twofa_poll_seconds=5.0)
+
+
+@pytest.fixture
+def fake_launcher_2fa_late_rootfs(tmp_path: Path) -> Path:
+    """A login child whose base dir appears only *after* the 2FA prompt.
+
+    The real launcher mkdirs it at startup (`wrapper-lite-rootless.c:142`), before the
+    payload prints anything -- this is the ordering that a loaded machine can show anyway,
+    where a browser answers the challenge before the child's startup syscall lands. It is
+    the shape that failed CI's 2FA tests, kept on purpose: `submit_2fa` has to wait for
+    the directory, not die on its absence.
+    """
+    return _stub(tmp_path, "login_2fa_late_rootfs", late_rootfs_seconds=2.0)
 
 
 @pytest.fixture
@@ -1075,6 +1108,33 @@ async def test_login_raises_a_challenge_when_2fa_is_prompted(fake_launcher_2fa, 
     await sup.stop()
 
 
+async def test_submit_2fa_waits_for_the_base_dir_the_child_creates(
+    fake_launcher_2fa_late_rootfs, tmp_path
+):
+    """A challenge answered faster than the child boots must still be delivered.
+
+    `submit_2fa` used to require the login child's base dir to already exist and raise
+    "does not exist" when it did not. But the supervisor is triggered by the `2FA: true`
+    line, and on a loaded machine that can be read before the login child's startup
+    `mkdir` lands -- which failed CI's 2FA tests outright and, worse, would leave a real
+    login child polling for a code that was never written. The supervisor now waits for the
+    dir while the child that creates it is alive; this stub models the late dir and the
+    assertion is that the exchange still completes end to end.
+    """
+    lines: list[str] = []
+    sup = _supervisor(fake_launcher_2fa_late_rootfs, tmp_path, log_sink=lines.append)
+
+    challenge = await sup.login("user", "pass")
+    await asyncio.wait_for(sup.submit_2fa(challenge.id, "123456"), timeout=30)
+
+    for _ in range(200):
+        if any("Code file detected" in line for line in lines):
+            break
+        await asyncio.sleep(0.02)
+    assert any("Code file detected" in line for line in lines), lines
+    await sup.stop()
+
+
 async def test_submit_2fa_writes_the_file_the_child_polls_for(
     fake_launcher_2fa, tmp_path
 ):
@@ -1308,12 +1368,26 @@ async def test_a_second_login_does_not_inherit_the_first_logins_code(
 
     try:
         second = await sup.login("user2", "pass2")
-        await asyncio.sleep(0.3)
-        # The claim: nothing was consumed until *this* login was given a code. Codes and
-        # account names are both redacted, so the assertion is positional -- the single
-        # detection has to come after the second login's own prompt.
+        # Waited for, not slept on: the prompt line rides the pump's read of the child's
+        # stdout, and the fixed 0.3 s sleep this replaces could not see the second WARN
+        # under CPU starvation -- measured at 10 s on a 1-core pin with 4 burners, which
+        # is the class of flake the repo's oversubscription check already documents.
+        # Still bounded (10 s, the same order as the polls below), so a prompt that never
+        # arrives fails the assertion rather than hanging the suite.
+        baseline = len(lines)
+        for _ in range(200):
+            if any(n >= baseline for n in _prompts(lines)):
+                break
+            await asyncio.sleep(0.05)
+        # The *first* login's own WARN is deliberately not required: this test SIGTERMs
+        # that child the moment its code is handed over, and under starvation it can die
+        # between the `credentialHandler` line -- the line the challenge was already
+        # raised on -- and the WARN that follows it. Probing it directly showed the line
+        # simply never arrives in that case. The claim only needs the second login's
+        # prompt to exist before its detection, which is what the two assertions below
+        # and the positional one further down establish.
         assert not _detections(lines), lines
-        assert len(_prompts(lines)) == 2, lines
+        assert len(_prompts(lines)) >= 1, lines
 
         await sup.submit_2fa(second.id, "222222")
         for _ in range(400):

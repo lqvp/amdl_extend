@@ -30,7 +30,7 @@
 <section class="card enqueue-card">
   <div class="section-heading">
     <div>
-      <h2>Queue music</h2>
+      <h1>Queue music</h1>
       <p class="muted small">Paste one or more Apple Music links, one per line.</p>
     </div>
     <span class="eyebrow">DOWNLOADS</span>
@@ -40,7 +40,10 @@
     <textarea id="urls" name="urls" rows="3" required
               aria-describedby="urls-help"
               placeholder="https://music.apple.com/jp/album/...&#10;https://music.apple.com/jp/song/..."></textarea>
-    <p class="field-hint" id="urls-help">Albums, songs, playlists and music videos are supported.</p>
+    <p class="field-hint" id="urls-help">
+      Albums, songs, playlists, artists and music videos are supported.
+      <span id="urls-count" class="urls-count" aria-live="polite"></span>
+    </p>
     <div class="enqueue-options">
       <div class="field">
         <label for="codec">Audio format</label>
@@ -69,7 +72,18 @@
          data-problem="{{ wrapper.problem or '' }}"
          data-ready="{{ '1' if wrapper.ready else '0' }}"
          {% if wrapper.problem %}open{% endif %}>
-  <summary><h1>Wrapper</h1></summary>
+  {#- The summary carries the state, so a closed card -- the healthy case -- still answers
+      "is it serving" without being opened. -#}
+  <summary>
+    <h2>Wrapper</h2>
+    {%- if wrapper.problem == 'no-account' %}
+      <span class="summary-state bad">no Apple account logged in</span>
+    {%- elif wrapper.problem %}
+      <span class="summary-state bad">not serving</span>
+    {%- else %}
+      <span class="summary-state ok">serving{% if wrapper.regions %} &middot; {{ wrapper.regions | join(', ') }}{% endif %}</span>
+    {%- endif %}
+  </summary>
   {% if wrapper.problem == 'no-account' %}
     <p class="error" role="alert">{{ wrapper.detail }}</p>
     <button type="button" data-action="wrapper-login">Log in to Apple Music</button>
@@ -114,8 +128,13 @@
 </section>
 
 <details class="card" id="library-state" {% if library.degraded_roots %}open{% endif %}>
-  <summary><h2>Library</h2></summary>
-  <p class="muted small">{{ library.albums }} album directories.</p>
+  <summary>
+    <h2>Library</h2>
+    <span class="summary-state{% if library.degraded_roots %} bad{% endif %}">
+      {{- library.albums }} album directories
+      {%- if library.degraded_roots %} &middot; {{ library.degraded_roots | length }} root(s) unreadable{% endif -%}
+    </span>
+  </summary>
   <ul class="roots">
     {% for root in library.roots %}
       <li{% if root in library.degraded_roots %} class="bad"{% endif %}>
@@ -147,6 +166,14 @@
       </button>
     {%- endfor %}
   </p>
+  {#- What is left, in one sentence. Rendered from the same `queue_counts` as the chips; the
+      script adds the rate and the estimate once it has watched a few tracks finish, and
+      says nothing about them until then rather than guessing from one. -#}
+  {%- set remaining = queue_counts.get('queued', 0) + queue_counts.get('waiting', 0)
+                      + queue_counts.get('running', 0) %}
+  <p id="queue-overview" class="queue-overview" aria-live="off">
+    {%- if remaining %}{{ remaining }} to go{% else %}Nothing left to download{% endif -%}
+  </p>
 
   {#- Two controls, because until now there was no way to remove a row: `DELETE
       /api/jobs/{id}` only marks a job `cancelled`, so a queue could only grow. The scope is
@@ -154,9 +181,9 @@
       on a dedup-heavy library is the largest group and re-skips the moment it runs. -#}
   <div class="queue-tools" id="queue-tools" role="search" aria-label="Find queue jobs" hidden>
     <label class="search-field" for="queue-search">
-      <span>Search jobs</span>
+      <span>Search jobs <kbd>/</kbd></span>
       <input id="queue-search" type="search" placeholder="Title, status, codec or ID"
-             autocomplete="off" aria-controls="queue-body">
+             autocomplete="off" aria-controls="queue-body" aria-keyshortcuts="/">
     </label>
     <label class="status-filter" for="queue-status-filter">
       <span>Status</span>
@@ -172,11 +199,28 @@
       </select>
     </label>
     <button type="button" data-action="queue-clear-filters" class="secondary">Clear filters</button>
+    <button type="button" data-action="queue-toggle-groups" class="secondary" aria-pressed="false">
+      Collapse groups
+    </button>
     <span class="visible-count" id="queue-visible-count" role="status" aria-live="polite"></span>
   </div>
 
+  {#- Three groups, in the order a reader reaches for them: what the table shows and whether
+      the queue moves; putting rows back; and the two that remove rows, last and apart, so
+      the destructive pair is never the thing a hand lands on while reaching for a toggle. -#}
   <div class="row bulk">
-    <form data-action="queue-requeue" class="inline-form">
+    <span class="tool-group">
+      <button type="button" data-action="queue-toggle-finished" aria-pressed="false">
+        Show finished
+      </button>
+      <button type="button" id="queue-pause" data-action="queue-pause" class="secondary"{% if queue_paused %} hidden{% endif %}>
+        Pause queue
+      </button>
+      <button type="button" id="queue-resume" data-action="queue-resume" class="secondary"{% if not queue_paused %} hidden{% endif %}>
+        Resume queue
+      </button>
+    </span>
+    <form data-action="queue-requeue" class="inline-form tool-group">
       <label for="requeue-scope">Scope</label>
       <select id="requeue-scope" name="scope">
         <option value="failed">failed only</option>
@@ -184,21 +228,14 @@
       </select>
       <button type="submit">Re-queue</button>
     </form>
-    <button type="button" data-action="queue-clear-pending" class="danger">
-      Clear queued & waiting
-    </button>
-    <button type="button" data-action="queue-delete-finished" class="danger">
-      Delete finished
-    </button>
-    <button type="button" data-action="queue-toggle-finished" aria-pressed="false">
-      Show finished
-    </button>
-    <button type="button" id="queue-pause" data-action="queue-pause"{% if queue_paused %} hidden{% endif %}>
-      Pause queue
-    </button>
-    <button type="button" id="queue-resume" data-action="queue-resume"{% if not queue_paused %} hidden{% endif %}>
-      Resume queue
-    </button>
+    <span class="tool-group tool-group-danger">
+      <button type="button" data-action="queue-clear-pending" class="danger">
+        Clear queued &amp; waiting
+      </button>
+      <button type="button" data-action="queue-delete-finished" class="danger">
+        Delete finished
+      </button>
+    </span>
     <span id="queue-pause-state" class="muted small" role="status" aria-live="polite">
       {% if queue_paused %}Paused — running downloads will finish.{% endif %}
     </span>
@@ -231,13 +268,26 @@
             is filtered away. -#}
         {% for job in jobs %}
           {% if job.parent_url and (loop.first or job.parent_url != jobs[loop.index0 - 1].parent_url) %}
-          <tr class="group-header">
+          {#- The bar is a `div` inside the cell, never the cell itself: a `td` given
+              `display: flex` stops being a table cell, loses its `colspan`, and the whole
+              header collapses into the first column. The per-status counts are the
+              script's, which rebuilds every header from the rows on the first frame. -#}
+          <tr class="group-header" data-parent-url="{{ job.parent_url }}">
             <td colspan="7">
-              <a class="group-url muted small" href="{{ job.parent_url }}" rel="noreferrer noopener">{{ job.parent_type or "group" }}</a>
-              <span class="group-actions">
-                <button type="button" data-action="cancel-group" data-parent-url="{{ job.parent_url }}">Cancel queued</button>
-                <button type="button" data-action="requeue-failed-group" data-parent-url="{{ job.parent_url }}">Re-queue failed</button>
-              </span>
+              <div class="group-bar">
+                <button type="button" class="group-toggle" data-action="toggle-group"
+                        data-parent-url="{{ job.parent_url }}" aria-expanded="true"
+                        aria-label="Collapse {{ job.parent_url | group_name }}"
+                        title="Collapse this group">&#9662;</button>
+                <span class="group-kind">{{ job.parent_type or "group" }}</span>
+                <a class="group-url" href="{{ job.parent_url }}" rel="noreferrer noopener"
+                   title="{{ job.parent_url }}">{{ job.parent_url | group_name }}</a>
+                <span class="group-counts"></span>
+                <span class="group-actions">
+                  <button type="button" data-action="cancel-group" data-parent-url="{{ job.parent_url }}">Cancel queued</button>
+                  <button type="button" data-action="requeue-failed-group" data-parent-url="{{ job.parent_url }}">Re-queue failed</button>
+                </span>
+              </div>
             </td>
           </tr>
           {% endif %}
@@ -277,7 +327,17 @@
 </section>
 
 <section class="card">
-  <h2>Log</h2>
-  <pre id="log" aria-live="polite"></pre>
+  <div class="section-heading log-heading">
+    <h2>Log</h2>
+    {#- Both buttons act on this tab's copy only: clearing the pane does not touch the hub's
+        recent log, and a new tab still starts from it. -#}
+    <div class="log-tools">
+      <button type="button" id="log-latest" data-action="log-latest" class="secondary" hidden>
+        Jump to latest
+      </button>
+      <button type="button" data-action="log-clear" class="secondary">Clear</button>
+    </div>
+  </div>
+  <pre id="log" aria-live="polite" tabindex="0" aria-label="Wrapper and hub log"></pre>
 </section>
 {% endblock %}

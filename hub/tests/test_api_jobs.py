@@ -742,8 +742,8 @@ async def test_a_refused_leaf_answers_200_with_what_landed_and_a_rejected_name(
 ):
     """One bad track must not become a 500 with 19 tracks queued behind it.
 
-    The handler catches `ValueError`, reads back the batch **by `parent_url`** and reports
-    the two that landed plus a `rejected` entry naming the one that did not.
+    The handler catches the refusal, reports the two that landed -- from the `BatchResult`
+    the `BatchRefused` carries -- plus a `rejected` entry naming the one that did not.
     """
     monkeypatch.setattr(
         "hub.api.jobs.expand",
@@ -764,18 +764,20 @@ async def test_a_refused_leaf_answers_200_with_what_landed_and_a_rejected_name(
 
 
 async def test_the_partial_answer_names_only_this_batch(authed, settings, monkeypatch):
-    """The read-back is filtered by `parent_url`, and this is the test that says so.
+    """The partial answer is exactly what this batch did, and this is the test that says so.
 
+    It used to be a read-back, and the read-back had to be filtered by `parent_url`:
     `store.list(parent_id=None)` means *no filter* -- `parent_id` is a self-reference nothing
-    writes -- so reading this batch back that way returns the user's entire queue. Here that
+    writes -- so reading this batch back that way returned the user's entire queue. Here that
     is job 1, queued from a *different* URL a moment earlier: an unfiltered read would report
     `created == [1, 2]` and tell the user their first request had been created by their
-    second one.
+    second one. The refusal now carries `create_batch`'s own result (`BatchRefused`), so
+    there is no read-back to get wrong -- and this pins that the answer did not regress to one.
 
     The overlap is deliberate. The refused batch's second track is `adam_id=2`, which the
     first request already queued, so it folds into job 1 -- which puts a real id from the
     other URL on both sides of the assertion and makes the difference between `[2]` and
-    `[1, 2]` a difference about *filtering* rather than about which tracks are new.
+    `[1, 2]` a difference about *attribution* rather than about which tracks are new.
     """
     first = await authed.post("/api/jobs", json={"urls": [ALBUM2_URL], "codec": "alac"})
     assert first.json()["created"] == [1]
@@ -785,12 +787,12 @@ async def test_the_partial_answer_names_only_this_batch(authed, settings, monkey
     body = response.json()
     assert body["created"] == [2]
     assert body["rejected"] == ["the one with no id"]
-    # `deduplicated` is empty even though the refused batch's second track *did* fold into
-    # job 1. That fold is recorded on the holder's row, which belongs to the other URL, and
-    # there is no column on it saying which leaf put it there -- so after a `ValueError` a
-    # cross-batch fold is not recoverable and `deduplicated` is a lower bound. Naming job 1
-    # here would mean reading the whole queue, which is the bug this test exists for.
-    assert body["deduplicated"] == []
+    # The refused batch's second track *did* fold into job 1, and the answer says so. A
+    # read-back by `parent_url` could not: the fold is recorded on the holder's row, which
+    # belongs to the other URL, and nothing on it says which leaf put it there -- so the old
+    # answer was a lower bound (`[]`) here. The store knew the holder at the moment of the
+    # fold, and the refusal hands that over.
+    assert body["deduplicated"] == [1]
     assert set(body) >= {"created", "skipped", "deduplicated", "rejected"}
     # And the store agrees: two rows total, one per URL, neither invented.
     assert [job.parent_url for job in _store(settings).list()] == [ALBUM2_URL, ALBUM_URL]
@@ -2237,11 +2239,11 @@ async def test_create_app_assembles_the_supervisor_from_the_resolved_settings(
     `.wrapper_base_dir` appeared in no test at all; the only assertion on them is
     `test_config.py`'s, which reads `Settings` and never reads the app.
 
-    The production link that this block owns is `log_sink=lambda line: _log(app.state, line)`.
-    Mutating it to `lambda line: None` -- dropping every line the wrapper writes -- left 558
-    tests green, and `test_the_wrapper_log_reaches_the_same_stream` still passed, because it
-    calls `hub.app._log` *by hand* rather than through the sink it was given. The test claimed
-    "the wrapper's log lines reach the stream" and demonstrated that `_log` publishes.
+    The production link that this block owns is `log_sink=lambda line: publish_log(state,
+    line)`. Mutating it to `lambda line: None` -- dropping every line the wrapper writes -- left
+    558 tests green, and `test_the_wrapper_log_reaches_the_same_stream` still passed, because it
+    calls the publisher *by hand* rather than through the sink it was given. The test claimed
+    "the wrapper's log lines reach the stream" and demonstrated that the publisher publishes.
 
     So: build through the real `create_app` with `supervisor=None`, replace only the
     `WrapperSupervisor` *class*, and assert what it was constructed with. Non-default values
@@ -2339,9 +2341,9 @@ async def test_the_wrapper_log_reaches_the_stream_through_the_sink_it_was_given(
     """**And the sink works.** The test above proves the block was run; this proves its
     argument does what the block intends.
 
-    The round-2 version of this assertion called `hub.app._log(app.state, line)` by hand,
-    which demonstrated that `_log` publishes a frame and said nothing about the
-    `log_sink=lambda line: _log(app.state, line)` the app actually installs. So the line is
+    The round-2 version of this assertion called the publisher (`hub.app._log` then,
+    `hub.api.jobs.publish_log` now) by hand, which demonstrated that it publishes a frame and
+    said nothing about the `log_sink` lambda the app actually installs. So the line is
     handed to the sink *the app gave the supervisor*, and read back off a real stream
     subscription, which is the path a wrapper's stderr takes in production.
 
@@ -2906,6 +2908,39 @@ async def test_the_websocket_stream_sends_a_fresh_json_snapshot(running, authed)
         assert (await stream.read_data())["kind"] == "snapshot"
 
 
+async def test_a_tab_that_opens_late_is_shown_the_recent_log(running, authed):
+    """The log's past rides the snapshot, numbered, and the live lines carry on the numbering.
+
+    The stream starts at the snapshot, which is right for the queue and was wrong for the log:
+    a tab opened to find out why the wrapper is not serving showed an empty pane, because the
+    lines that said why were published before it connected. The numbering is what lets a tab
+    that reconnects add only the lines it missed.
+    """
+    from hub.api.jobs import publish_log
+
+    publish_log(running.state, "the wrapper did not start: no account is logged in")
+    publish_log(running.state, "[lite] waiting for a login")
+    token = await _token(authed)
+    async with _ASGIWebSocket(running, token=token) as stream:
+        snapshot = await stream.read_data()
+        recent = snapshot["log"]
+        assert isinstance(recent["epoch"], str) and recent["epoch"]
+        assert [entry["line"] for entry in recent["lines"]][-2:] == [
+            "the wrapper did not start: no account is logged in",
+            "[lite] waiting for a login",
+        ]
+        numbers = [entry["seq"] for entry in recent["lines"]]
+        assert numbers == sorted(set(numbers)), "the numbering rises by line and never repeats"
+
+        publish_log(running.state, "a line published while the tab is open")
+        live = await stream.read_data()
+    assert live == {
+        "kind": "log",
+        "line": "a line published while the tab is open",
+        "seq": numbers[-1] + 1,
+    }
+
+
 async def test_a_pool_frame_names_the_pool_around_a_rip(running, authed):
     """`pool` frames are born and die with the claim, and say what was true then.
 
@@ -3229,14 +3264,19 @@ async def test_the_wrapper_log_reaches_the_same_stream(running, authed, supervis
     them could not be placed correctly relative to the other's live frames. One channel means
     one ordering, and the client's `kind` field is what tells the two apart.
     """
-    from hub.app import _log
+    from hub.api.jobs import publish_log
 
     token = await _token(authed)
     async with _ASGIWebSocket(running, token=token) as stream:
         await stream.read_data()  # the snapshot
-        _log(running.state, "the wrapper is ready on http://127.0.0.1:12340/status")
+        publish_log(running.state, "the wrapper is ready on http://127.0.0.1:12340/status")
         event = await stream.read_data()
-    assert event == {"kind": "log", "line": "the wrapper is ready on http://127.0.0.1:12340/status"}
+    assert event == {
+        "kind": "log",
+        "line": "the wrapper is ready on http://127.0.0.1:12340/status",
+        # Numbered in the recent log, so a reconnecting tab can skip what it already shows.
+        "seq": running.state.recent_log.snapshot()["lines"][-1]["seq"],
+    }
 # --------------------------------------------------------------------------- #
 # The queue page
 # --------------------------------------------------------------------------- #
@@ -4328,6 +4368,69 @@ async def test_no_more_than_the_configured_number_rip_at_once(running, authed, s
     assert barrier.peak_in_flight <= 2, (
         f"peak_in_flight reached {barrier.peak_in_flight} with rip_concurrency=2"
     )
+
+
+class _InterleavedProgressRipper(FakeRipper):
+    """Every rip waits for its siblings, then they all report progress at once.
+
+    The barrier makes the overlap certain rather than likely, and each track reports a total
+    of its own -- `100 * adam_id` -- so a reading written onto the wrong row is a wrong number
+    on that row rather than an identical one.
+    """
+
+    def __init__(self, web_api, *, parties: int) -> None:
+        super().__init__(web_api)
+        self.parties = parties
+        self.arrived = 0
+        self.all_arrived = asyncio.Event()
+
+    async def run_song(self, leaf, *, force: bool) -> None:
+        self.songs.append((leaf, force))
+        self.arrived += 1
+        if self.arrived >= self.parties:
+            self.all_arrived.set()
+        await asyncio.wait_for(self.all_arrived.wait(), timeout=2.0)
+        total = 100 * int(leaf.adam_id)
+        for done in (total // 2, total):
+            self._report(leaf, done, total)
+            # The same yield `FakeRipper.run_song` makes, so each reading's deferred write
+            # lands while its rip is still in flight -- and the siblings' readings interleave.
+            await asyncio.sleep(0)
+
+
+async def test_concurrent_rips_report_progress_onto_their_own_rows(
+    running, authed, settings, monkeypatch
+):
+    """Three tracks in flight at once, and each row ends with its own track's bytes.
+
+    Readings used to be routed by `state.current_job` -- "the job the scheduler started
+    last" -- which is the right row for one rip and the wrong row for every other reading
+    under a pool. Here all three tracks' readings would land on job 3, leaving jobs 1 and 2
+    with no progress at all and job 3 with whichever sibling's total came last -- which is
+    what this asserted against the old routing. They are routed by the track the reading
+    names now, through the pool's in-flight table.
+    """
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    # Driving the pool directly bypasses the scheduler's readiness gate, so the wrapper is put
+    # into the ready state a rip needs; a stopped one would park every job instead.
+    await running.state.supervisor.start()
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+
+    ripper = _InterleavedProgressRipper(FakeWebAPI(), parties=3)
+    ripper.on_progress = Scheduler(running.state).forward_progress
+    running.state.ripper = ripper
+
+    assert await run_pool(running.state) == 3
+
+    rows = {
+        job.adam_id: (job.status, job.bytes_done, job.bytes_total)
+        for job in _store(settings).list()
+    }
+    assert rows == {
+        "1": ("done", 100, 100),
+        "2": ("done", 200, 200),
+        "3": ("done", 300, 300),
+    }, f"a track's progress was written onto another track's row: {rows}"
 
 
 async def test_the_same_track_in_two_codecs_is_not_ripped_twice_at_once(

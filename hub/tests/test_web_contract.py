@@ -1096,3 +1096,147 @@ def test_waiting_rows_offer_cancel_on_both_sides():
     script = (root / "static/app.js").read_text(encoding="utf-8")
     assert "job.status in ('queued', 'waiting')" in template
     assert 'job.status === "queued" || job.status === "waiting"' in script
+
+
+# ---------------------------------------------------------------------------
+# The queue's second pass: group headers that name their batch, folding, the overview, the
+# log's tools -- and the three bugs that pass found in what was already there. Each of those
+# bugs is pinned as a *class* below, not as its one instance: an undefined colour token, a
+# phone rule a later base rule overrode, and a table cell turned into a flex box.
+# ---------------------------------------------------------------------------
+
+WEB = Path(__file__).parent.parent / "hub/web"
+
+
+def _css() -> str:
+    """`app.css` without its comments, which quote selectors and tokens by name."""
+    return re.sub(r"/\*.*?\*/", "", (WEB / "static/app.css").read_text(encoding="utf-8"), flags=re.S)
+
+
+def test_every_action_a_page_offers_has_a_handler():
+    """Every literal `data-action` in every template is a string the script answers.
+
+    The bulk-action test above names its actions by hand, so an action added to a template
+    and to nothing else -- a button that silently does nothing -- passes it. This reads the
+    actions out of the templates instead, so the list cannot fall behind the pages.
+    """
+    script = (WEB / "static/app.js").read_text(encoding="utf-8")
+    offered: set[str] = set()
+    for path in sorted(TEMPLATES_DIR.glob("*.html")):
+        offered.update(re.findall(r'data-action="([a-z0-9-]+)"', path.read_text(encoding="utf-8")))
+    assert {"toggle-group", "queue-toggle-groups", "log-clear", "log-latest"} <= offered, offered
+    unanswered = sorted(action for action in offered if f'"{action}"' not in script)
+    assert unanswered == [], f"the pages offer {unanswered} and the script handles none of them"
+
+
+def test_the_stylesheet_uses_only_tokens_both_palettes_define():
+    """A `var(--name)` that no palette declares falls back -- or renders nothing -- silently.
+
+    The group headers used `var(--panel, #f4f4f5)`. `--panel` was never declared, so every
+    header was painted the fallback, a light grey from no palette: invisible as a bug in the
+    light theme and a white slab with near-white text on it in the dark one. Every token a
+    rule uses has to be declared in both `:root` blocks.
+    """
+    css = _css()
+    blocks = re.findall(r":root\s*\{(.*?)\}", css, re.S)
+    assert len(blocks) == 2, "the light and dark palettes are the two `:root` blocks"
+    declared = [set(re.findall(r"--([\w-]+)\s*:", block)) for block in blocks]
+    used = set(re.findall(r"var\(--([\w-]+)", css))
+    for theme, names in zip(("light", "dark"), declared, strict=True):
+        missing = sorted(used - names)
+        if theme == "dark":
+            # The dark block restates colours and shadows only; layout tokens (spacing, type,
+            # radius) live in the light block and apply to both, which is how `:root` cascades.
+            missing = [name for name in missing if name not in declared[0]]
+        assert missing == [], f"app.css uses --{', --'.join(missing)} and the {theme} palette never declares it"
+
+
+def test_the_phone_layout_is_the_last_word():
+    """The narrow-screen block comes after every rule it overrides.
+
+    A media query adds no specificity, so a base rule written *below* it wins on a phone too.
+    `.queue-tools` was declared below the block, and its four-column grid ran the status
+    filter off the edge of a phone's card while the one-column rule sat unused above it.
+    """
+    css = _css().rstrip()
+    start = css.rfind("@media (max-width: 44rem)")
+    assert start != -1, "the narrow-screen block is gone"
+    tail = css[start:]
+    depth = 0
+    for index, char in enumerate(tail):
+        depth += {"{": 1, "}": -1}.get(char, 0)
+        if char == "}" and depth == 0:
+            assert tail[index + 1:].strip() == "", (
+                "rules follow the narrow-screen block, and any of them it overrides wins on a "
+                "phone as well"
+            )
+            return
+    raise AssertionError("the narrow-screen block is not closed")
+
+
+def test_a_group_header_cell_stays_a_table_cell():
+    """`colspan` only works on a table cell, so the header's cell is never given a display.
+
+    `.group-header td { display: flex }` turned the cell into a flex box: it lost its
+    `colspan`, the whole header was squeezed into the title column, and its link wrapped
+    one letter per line. The layout belongs on the `.group-bar` inside the cell.
+    """
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", _css()):
+        if "group-header" in selector and "td" in selector:
+            assert "display" not in body, f"{selector.strip()} sets a display on the header's cell"
+    queue = (TEMPLATES_DIR / "queue.html").read_text(encoding="utf-8")
+    script = (WEB / "static/app.js").read_text(encoding="utf-8")
+    assert '<div class="group-bar">' in queue
+    assert 'el("div", "group-bar")' in script
+
+
+@pytest.mark.parametrize(
+    ("url", "name"),
+    [
+        ("https://music.apple.com/jp/album/%E3%83%8F%E3%83%AB%E3%82%B8%E3%82%AA%E3%83%B3/1700000001", "ハルジオン"),
+        ("https://music.apple.com/jp/album/nameless-name-single/1688539265?i=1688539274", "nameless name single"),
+        ("https://music.apple.com/jp/playlist/todays-hits/pl.f4d106fed2bd41149aaacabb233eb5eb", "todays hits"),
+        ("https://music.apple.com/jp/artist/eve/1688539273", "eve"),
+        # No slug before the id: the URL is the most honest name there is.
+        ("https://music.apple.com/jp/music-video/1800449196", "https://music.apple.com/jp/music-video/1800449196"),
+        ("u", "u"),
+    ],
+)
+def test_a_group_is_named_from_its_own_url(url, name):
+    """The header's name is the slug Apple put in the link, decoded -- nothing invented."""
+    from hub.api import group_name
+
+    assert group_name(url) == name
+
+
+async def test_the_queue_page_names_its_groups_and_offers_their_tools(
+    running, authed, settings, monkeypatch
+):
+    """The served page: a named header, its fold control, the overview and the log tools."""
+    monkeypatch.setattr("hub.api.jobs.expand", _expansion_with_three_usable_leaves())
+    monkeypatch.setattr("hub.api.jobs.parent_type_for", lambda _url, _count: "album")
+    await authed.post("/api/jobs", json={"urls": [ALBUM_URL], "codec": "alac"})
+
+    body = _html_of(await authed.get("/queue"))
+
+    assert 'class="group-header"' in body and 'data-action="toggle-group"' in body
+    from hub.api import group_name
+
+    assert f">{group_name(ALBUM_URL)}</a>" in body, "the header names the batch, not just its kind"
+    assert 'id="queue-overview"' in body and "3 to go" in body
+    assert 'data-action="queue-toggle-groups"' in body
+    assert 'id="log-latest"' in body and 'data-action="log-clear"' in body
+    # The link to the source is the header's, once per batch; the rows no longer repeat it.
+    assert ">source</a>" not in body
+
+
+async def test_static_files_are_revalidated_rather_than_cached_heuristically(client, authed):
+    """`no-cache` on every static response, so an upgrade's script and stylesheet arrive.
+
+    Without it a browser may reuse a cached file for a tenth of its age without asking --
+    days, for a stylesheet untouched for a month -- under pages the new templates render.
+    """
+    for path in ("/static/app.css", "/static/app.js"):
+        response = await client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers.get("cache-control") == "no-cache", path

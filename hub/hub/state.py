@@ -31,7 +31,7 @@ from fastapi.templating import Jinja2Templates
 from hub.api.jobs import ExpansionRegistry, LeafRegistry
 from hub.auth import SessionStore
 from hub.config import Settings
-from hub.events import EventBroker
+from hub.events import EventBroker, RecentLog
 from hub.jobs import JobStore
 from hub.ripper_host import RipperHost
 from hub.wrapper_supervisor import LoginChallenge, WrapperSupervisor
@@ -120,8 +120,10 @@ class HubState:
     Written by `hub.api.wrapper` only."""
 
     current_job: int | None = None
-    """The job the scheduler is running, non-`None` only for the duration of a rip;
-    `None` between jobs is what makes a late progress reading harmless."""
+    """The job the scheduler started last, non-`None` only for the duration of a rip;
+    `None` between jobs is what makes a late progress reading harmless. Under a pool it is
+    one rip of several, so it only routes a reading that names no track -- the seam's
+    readings carry their `adam_id` and go through `ripping_adam_ids` instead."""
 
     cached_problem: str | None = None
     """The last readiness answer, and it is *never read as an answer* -- every claim
@@ -132,8 +134,13 @@ class HubState:
 
     ripping_adam_ids: dict[str, int] = field(default_factory=dict)
     """The one in-flight table per process: adam_id -> job id. `adam_id`-only because
-    that is the key upstream's task table answers on; two codecs, one rip."""
+    that is the key upstream's task table answers on; two codecs, one rip. Also how a
+    progress reading finds its row, since a track is in flight at most once."""
 
     session_generation: int = 0
     """Logout bumps it; bumping retires every token ever issued. Written by
     `hub.api` on logout only."""
+
+    recent_log: RecentLog = field(default_factory=RecentLog)
+    """The last log lines, numbered, for the snapshot a newly opened tab starts from.
+    Written by `hub.api.jobs.publish_log` only."""

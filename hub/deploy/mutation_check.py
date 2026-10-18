@@ -13,14 +13,17 @@ DI = Path(".dockerignore")
 ENV = Path(".env.example")
 DEDUP = Path("hub/hub/dedup.py")
 APP = Path("hub/hub/app.py")
+SCHEDULER = Path("hub/hub/scheduler.py")
 SCAN = Path("hub/hub/library_scan.py")
 LIBAPI = Path("hub/hub/api/library.py")
 TMPL = Path("hub/hub/web/templates/library.html")
 
 MUTATIONS = {
     # -- the assigned fix -----------------------------------------------------
+    # `_skip_reason` moved to `hub/scheduler.py` with the scheduler split; aimed at `app.py`
+    # this mutation no longer applied and was reported as a survivor.
     "resolved[] back to matched[] in skip_reason": (
-        APP, lambda t: t.replace("'|'.join(hit.resolved)", "'|'.join(hit.matched)")),
+        SCHEDULER, lambda t: t.replace("'|'.join(hit.resolved)", "'|'.join(hit.matched)")),
     "resolved stops being populated": (
         DEDUP, lambda t: t.replace(
             '        resolved=tuple(sorted(str(scan.roots[c.root_index] / c.relpath) for c in hits)),',
@@ -45,8 +48,10 @@ MUTATIONS = {
     "the package moved but PYTHONPATH did not": (
         D, lambda t: t.replace("COPY hub/hub /app/hub/hub", "COPY hub/hub /app/hub/hub/vendored")),
     # -- important 5: the from-source build cost -----------------------------
-    "the fresh-clone warning removed from the COPY": (
-        D, lambda t: t.replace("*** A FRESH CLONE CANNOT BUILD THIS IMAGE. ***", "n/a")),
+    # Retired with the warning it guarded. The Dockerfile now builds both trees in its own
+    # stages, so a fresh clone *can* build the image and the warning was removed on purpose
+    # (see the note above its two `COPY --from` lines); a mutation of text that no longer
+    # exists can only ever be reported as a survivor.
     # -- important 6: the per-root count --------------------------------------
     # Labelled for the *file it touches*. An earlier version of this list called the first of
     # these "dropped from the status response" while mutating `api/library.py`, which is the
@@ -67,7 +72,7 @@ MUTATIONS = {
     "the empty-root warning removed from the page": (
         TMPL, lambda t: t.replace(
             '{%- elif listing.per_root[loop.index0] == 0 -%}\n'
-            '              <span class="error-text" role="alert">empty &mdash; is this mounted?</span>\n',
+            '                <span class="error-text" role="alert">empty, is this mounted?</span>\n',
             "")),
     "the per-root table removed from the page": (
         TMPL, lambda t: t.replace("album directories", "x")),

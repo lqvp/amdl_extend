@@ -78,6 +78,11 @@ SESSION_SALT = "amd-hub.session.v1"
 # could read out of it would be a place for a claim to be forged alongside the signature.
 TOKEN_PAYLOAD = {"v": 1}
 
+# The shortest HMAC key `SessionStore` accepts. `load_settings` already refuses a short
+# `AMD_SESSION_SECRET`; this is the same floor at the point of use, because a store can be
+# built by anything. The condition and its error message both name the constant.
+MIN_SECRET_BYTES = 32
+
 # One message for every authentication failure, and the only one the login handler is allowed
 # to produce. A route that said "no such user" and "wrong password" separately is telling an
 # attacker which half to work on; a single shared password means there is only one half,
@@ -347,7 +352,3 @@ class SessionStore:
             for ip, _ in oldest[:overflow]:
                 del self._attempts[ip]
 
-
-# Kept next to the check rather than next to the constant so that the number in the error
-# message and the number in the condition cannot drift apart.
-MIN_SECRET_BYTES = 32

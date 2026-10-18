@@ -1,10 +1,13 @@
 """The scheduler: claim, run, park, and the progress path back from the seam.
 
-**The scheduler runs one job at a time.** `claim_next` is atomic so several workers *could*
-run, but there is one `RipperHost`, one process working directory and one wrapper token
-budget, and `MVRipper`/`Ripper` both resolve their singletons through it. Sequential
-throughput is not the constraint here -- a download takes minutes and the queue is the
-user's, not the hub's.
+**The queue drains through a pool of `rip_concurrency` workers (four by default).** There is
+one `RipperHost`, one process working directory and one wrapper, and upstream's `Ripper` is
+built for concurrency against exactly that -- 85% of a track's wall clock is the wrapper's
+metadata round-trip, so a serial queue spent most of its time waiting (`run_pool` has the
+measurement). Two things concurrency makes the scheduler's job rather than upstream's: one
+`adam_id` is never ripped twice at once (upstream's own task table is keyed on it, so a second
+codec of an in-flight track would return immediately and read as `done`), and a progress
+reading is routed to its row by the track it names, never by "the job started last".
 
 **The filesystem duplicate check happens here and nowhere else.** It is a per-*file*
 decision, and a queued job can sit long enough for the file to be deleted underneath it, so
@@ -20,11 +23,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sys
-from collections.abc import Callable
 
 import httpx
 
-from hub.api.jobs import JOBS_CHANNEL, _publish_job, job_to_dict
+from hub.api.jobs import JOBS_CHANNEL, _publish_job, publish_log
 from hub.dedup import DuplicateHit, find_duplicate
 from hub.jobs import (
     IllegalTransition,
@@ -187,7 +189,7 @@ async def run_pool(state: HubState) -> int:
     writing to one SQLite file is four times the chance of `database is locked`. A pool that
     collected and then ignored that would report a drain it did not perform.
     """
-    running = _in_flight_table(state)
+    running = state.ripping_adam_ids
     declined: set[int] = set()
     limit = max(1, state.settings.rip_concurrency)
 
@@ -217,17 +219,7 @@ async def run_one(state: HubState) -> bool:
     only the `budget` bounds how much it may run at once. A pool that stopped after one job
     would be the barrier `run_pool` replaced, with none of the benefit.
     """
-    return (await _worker(state, _in_flight_table(state), set(), 1)) > 0
-
-
-def _in_flight_table(state: HubState) -> dict[str, int]:
-    """The one in-flight table per process.
-
-    The getattr dance this replaces existed because `app.state` was an undeclared bag;
-    `ripping_adam_ids` is declared on `HubState` and constructed with it, so the table
-    has exactly one home and the fallback had no reason left.
-    """
-    return state.ripping_adam_ids
+    return (await _worker(state, state.ripping_adam_ids, set(), 1)) > 0
 
 
 def _publish_pool(state: HubState, running: dict[str, int]) -> None:
@@ -269,10 +261,7 @@ async def _announce_if_idle(state: HubState) -> None:
         return
     if await _post_notification(url, {"event": "queue-idle", "queue": counts}):
         return
-    state.broker.publish(
-        JOBS_CHANNEL,
-        {"kind": "log", "line": "the idle announcement could not be delivered; the queue is still idle"},
-    )
+    publish_log(state, "the idle announcement could not be delivered; the queue is still idle")
 
 
 async def _post_notification(url: str, payload: dict[str, object]) -> bool:
@@ -405,7 +394,9 @@ async def _execute(state: HubState, job: Job) -> None:
     # left set, which meant the *next* job's first reading -- and any stray reading from a
     # sampler that outlived its rip -- was written to a job id that had nothing to do with it.
     # The `None` between jobs is the check that makes those readings harmless rather than
-    # merely unlikely.
+    # merely unlikely. It only routes a reading that names no track: the seam's readings
+    # carry their `adam_id` and go through the in-flight table (`_report_progress`), because
+    # under a pool "the job set last" is a different track three times out of four.
     state.current_job = job.id
     try:
         await _run_with_wrapper_guard(state, runner, leaf, force=job.force)
@@ -568,26 +559,34 @@ PARK_MESSAGES = {
 }
 
 
-def _on_progress(state: HubState) -> Callable[[Progress], None]:
-    """The seam's `on_progress`, wired to a `mark` and a publish.
+def _report_progress(state: HubState, progress: Progress) -> None:
+    """The seam's `on_progress`: name the row the reading is about, then hop to the loop.
 
-    Called from a worker thread, so it hops to the loop with `call_soon_threadsafe` rather
-    than awaiting -- a callback cannot be async, and touching the SQLite connection from a
-    worker would be a second writer besides. One `mark` per callback would be a write per
-    chunk; this coalesces, because the interesting question is "how far along is it" and
-    `ProgressCallback` in the seam already throttles to a tenth of a second.
+    **The row is the one ripping the track the reading names** -- `ripping_adam_ids`, the
+    pool's own in-flight table, which holds at most one job per `adam_id` because `_worker`
+    declines a second. `state.current_job` used to be the only answer, and under a pool it
+    is whichever job started last: with four workers, three tracks' bytes were written onto
+    the fourth track's row, and every bar jumped between other tracks' totals. A reading
+    with no `adam_id` -- the seam always sends one, a hand-built reading may not -- falls
+    back to `current_job`, which is only an answer while a single rip runs. A reading for a
+    track no worker is ripping is dropped, because no row is what it describes.
+
+    Resolved here, before the hop, so a reading is attributed to the rip that was running
+    when it was taken. The write then happens on the loop via `call_soon_threadsafe`, which
+    is safe from any thread: a callback cannot be async, and touching the SQLite connection
+    from a worker would be a second writer besides. The seam throttles to a tenth of a
+    second, so this is one `mark` per reading rather than one per chunk.
     """
-
-    def report(progress: Progress) -> None:
+    if progress.adam_id is not None:
+        job_id = state.ripping_adam_ids.get(progress.adam_id)
+    else:
         job_id = state.current_job
-        if job_id is None:
-            return
-        loop = state.loop
-        if loop is None or loop.is_closed():
-            return
-        loop.call_soon_threadsafe(_apply_progress, state, job_id, progress)
-
-    return report
+    if job_id is None:
+        return
+    loop = state.loop
+    if loop is None or loop.is_closed():
+        return
+    loop.call_soon_threadsafe(_apply_progress, state, job_id, progress)
 
 
 def _apply_progress(state: HubState, job_id: int, progress: Progress) -> None:
@@ -761,16 +760,13 @@ def _warn_degraded(state: HubState, scan) -> None:
 def _mark(state: HubState, job: Job, status: JobStatus, **fields: object) -> None:
     """Write the terminal (or intermediate) status and tell every open tab.
 
-    `store.get` afterwards rather than reusing the local `job`, because `mark` computes
-    `finished_at` and the store is the only place that knows what it set. Publishing a row
-    that disagrees with the table is how a queue ends up showing a download that finished
-    seconds ago as still running.
+    Published through `_publish_job`, which re-reads the row rather than reusing the local
+    `job`, because `mark` computes `finished_at` and the store is the only place that knows
+    what it set. Publishing a row that disagrees with the table is how a queue ends up
+    showing a download that finished seconds ago as still running.
     """
-
     state.jobs.mark(job.id, status, **fields)
-    current = state.jobs.get(job.id)
-    if current is not None:
-        state.broker.publish(JOBS_CHANNEL, {"kind": "job", "job": job_to_dict(current)})
+    _publish_job(state, job.id)
 
 
 async def scheduler_loop(state: HubState) -> None:
@@ -873,9 +869,7 @@ async def scheduler_loop(state: HubState) -> None:
         # gets there first does the work; the other finds nothing and returns 0.
         resumed = state.jobs.resume_waiting()
         if resumed:
-            _log(state, f"the wrapper is serving again; {resumed} parked job(s) requeued")
-        # `announced` was already cleared by the recovery block above; this line is
-        # unreachable as a state change. The clearing block owns the transition.
+            publish_log(state, f"the wrapper is serving again; {resumed} parked job(s) requeued")
 
         # A job ran, so the wrapper was ready moments ago; a change since then is more
         # likely to be the kind worth noticing.
@@ -897,15 +891,15 @@ def _has_actionable(state: HubState) -> bool:
     resume -- the exact no-exit bug the recovery above fixes, reintroduced through the gate
     that avoids the HTTP call.
 
-    `list(status=...)` is `SELECT * FROM job WHERE status = ? ORDER BY id` over the whole
-    table, so this is two such reads rather than free. `any(...)` short-circuits, so the cost
-    is the query and not the iteration. It is still two orders of magnitude cheaper than the
-    request it avoids, and `test_an_idle_hub_probes_the_wrapper_rarely_and_one_more_when_`
-    waking measures the difference.
+    **An `EXISTS`, not two `list()`s.** This runs every `IDLE_POLL_SECONDS` for the life of
+    an idle hub, and `list(status=...)` built a `Job` for every matching row -- a whole
+    queued artist, twice a second -- to answer a yes/no, and scanned the full table (history
+    included) to find them. `any_with_status` stops at the first row and finds it through
+    `job_status`, so the idle cost no longer grows with the queue or with the history.
+    `test_an_idle_hub_probes_the_wrapper_rarely_and_one_more_when_waking` measures the HTTP
+    side of the same trade.
     """
-    return any(True for _ in state.jobs.list(status="queued")) or any(
-        True for _ in state.jobs.list(status="waiting")
-    )
+    return state.jobs.any_with_status(("queued", "waiting"))
 
 
 async def _wrapper_problem(state: HubState) -> str | None:
@@ -958,20 +952,6 @@ async def _drain(state: HubState) -> None:
         await task
 
 
-def _log(state: HubState, line: str) -> None:
-    """The wrapper's own output, onto the stream and onto stderr.
-
-    **The supervisor scrubs this before it gets here** (R6: credentials and tokens are
-    replaced before the line leaves the child's pipe), which is why the hub can display a
-    child's log lines at all. It is published on the jobs channel so one WebSocket carries
-    the queue and the log together, in the order they happened.
-    """
-    state.broker.publish(JOBS_CHANNEL, {"kind": "log", "line": line})
-    import sys
-
-    print(line, file=sys.stderr, flush=True)
-
-
 class Scheduler:
     """The scheduling concern, in one object that holds the hub's `state`.
 
@@ -991,15 +971,15 @@ class Scheduler:
         await scheduler_loop(self.state)
 
     def forward_progress(self, progress: Progress) -> None:
-        """Thread-safe progress entry the seam's worker threads call.
+        """Thread-safe progress entry the seam calls with each reading.
 
-        `state.current_job` is resolved here, on the loop's side of the hop, so the reading
-        always describes the job actually being ripped. Everything that touches the SQLite
-        connection or the broker then happens on the event loop via `call_soon_threadsafe`,
-        which is where it belongs -- `_on_progress` holds the check and the hop, and this is
-        the single call site that reaches it.
+        The row is resolved before the hop, from the track the reading names, so the reading
+        always describes the job actually ripping that track. Everything that touches the
+        SQLite connection or the broker then happens on the event loop via
+        `call_soon_threadsafe`, which is where it belongs -- `_report_progress` holds the
+        routing and the hop, and this is the single call site that reaches it.
         """
-        _on_progress(self.state)(progress)
+        _report_progress(self.state, progress)
 
     async def drain(self) -> None:
         """Stop the loop and wait for the in-flight rip, bounded by `DRAIN_TIMEOUT_SECONDS`."""

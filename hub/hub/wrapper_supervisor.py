@@ -151,6 +151,19 @@ TWOFA_FILENAME = "2fa.txt"
 # have.
 CHILD_TWOFA_WINDOW = 60.0
 
+# How long `submit_2fa` waits for the login child's base dir to appear before giving up.
+# The launcher mkdirs it at startup (`wrapper-lite-rootless.c:142`), before the payload
+# prints the prompt the supervisor reacts to, so a code handed over the same instant is
+# *usually* after the mkdir. "Usually" is the race that failed CI's 2FA tests on a loaded
+# runner: the parent reached `_write_twofa_file` first, and a live login was killed by
+# "does not exist". Ten seconds is far past any real startup mkdir and far inside the
+# child's own 60 s wait, so nothing here can hold a user longer than the wrapper would.
+TWOFA_DIR_WAIT_SECONDS = 10.0
+
+# Polled rather than slept once: the thing being waited for is a single startup syscall,
+# so the wait absorbs scheduling noise and returns the moment it lands.
+TWOFA_DIR_POLL_SECONDS = 0.05
+
 # The 2FA prompt heuristic, copied from `wrapper/gui/main.go:653-657` (`check2FA`) rather
 # than reinvented. These are the only five strings the upstream GUI treats as a 2FA request,
 # and three come from `wrapper/lite/auth.cpp`'s own output: the `credentialHandler` line
@@ -721,6 +734,11 @@ class WrapperSupervisor:
         Single use and TTL-checked: an expired challenge is re-requested, not resent.
         The code joins the redaction set before the file is written, because the
         child echoes what it read back onto its stdout.
+
+        The base dir is waited on first (`_await_twofa_base_dir`): the login child's
+        launcher creates it at startup, which on a loaded machine can land after the
+        prompt already raised the challenge, and answering inside that window used to
+        fail with "does not exist".
         """
         if self._adopted:
             raise SupervisorError(
@@ -750,6 +768,10 @@ class WrapperSupervisor:
 
         self._challenges.pop(challenge_id, None)
         self._remember_secret(code)
+        # Waited on before the write, not inside it: the wait is bounded by the login child
+        # being alive to create the dir, and `_write_twofa_file`'s own message stands once
+        # there is no child left that could create it.
+        await self._await_twofa_base_dir()
         path = self._write_twofa_file(code)
         self._emit(
             f"2FA code written to {path}; the wrapper picks it up and removes the file"
@@ -854,6 +876,50 @@ class WrapperSupervisor:
             raise SupervisorError(
                 f"could not write the 2FA code to {path}: {exc!r}"
             ) from exc
+        return path
+
+    async def _await_twofa_base_dir(self) -> Path:
+        """Wait, briefly, for the login child's launcher to create its base dir.
+
+        The creation is `wrapper-lite-rootless.c:142`, in the launcher, at startup -- before
+        the payload prints the `2FA: true` line this supervisor is triggered by. So the
+        directory is *usually* there by the time a code arrives, but "usually" was the bug:
+        answering a challenge faster than a loaded machine could schedule the child's
+        startup raised "does not exist, so the 2FA code cannot be handed over" and took the
+        login down with it. The wait closes that window.
+
+        Both the `rootfs` and the base dir are waited on, because `_twofa_file` refuses to
+        name a path until its rootfs exists and a child that has printed the prompt can
+        still be inside its own startup syscalls.
+
+        Bounded and child-scoped, so it cannot become a new hang: it ends the moment the
+        login child that would create the directory is gone or the deadline passes, and
+        only then does the caller surface the real error -- from `_twofa_file` if the
+        rootfs never appeared, from `_write_twofa_file` if only the base dir is missing.
+        """
+        path: Path | None = None
+        waited = False
+        deadline = time.monotonic() + TWOFA_DIR_WAIT_SECONDS
+        while True:
+            ready = False
+            try:
+                path = self._twofa_file()
+                ready = path.parent.is_dir()
+            except SupervisorError:
+                pass  # no rootfs yet: keep waiting while there is a child to make one
+            if ready:
+                if waited:
+                    self._emit(f"the login child took a moment to create {path.parent}")
+                return path
+            if self._login is None or not self._login.alive:
+                break
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(TWOFA_DIR_POLL_SECONDS)
+            waited = True
+        if path is None:
+            # Never saw a valid path: the caller gets the exact "no rootfs" error.
+            return self._twofa_file()
         return path
 
     # -- starting -----------------------------------------------------------

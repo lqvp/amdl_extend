@@ -1,4 +1,4 @@
-"""The download queue: one table, one partial unique index, and one atomic claim.
+"""The download queue: one table, a partial unique index, a status index, one atomic claim.
 
 **What is persisted here is `job` and nothing else.** The library on disk is the single
 source of truth for "already downloaded", deliberately, because folders get moved,
@@ -48,6 +48,18 @@ re-evaluates the subquery against the state the first one committed.
 `tests/test_jobs.py::test_claim_next_is_exclusive_under_real_concurrency` is the test that
 tells the two apart; a sequential loop over one connection cannot, which is why a
 sequential-loop version of that test is not enough on its own.
+
+**The queue's own reads are by status, so `job_status` indexes `(status, id)`.** The claim's
+subquery, the scheduler's idle check, `resume_waiting` and the queue window all ask "which
+rows are in this status", and with the primary key alone every one of them was a scan of the
+whole table -- history included, which is the half that only grows. Measured on 200,000 rows
+(3,000 active behind 197,000 finished): the claim's subquery went from 28 ms to 3 µs, the idle
+check's scans from 28 ms each to an index probe, and the active half of the queue window from
+48 ms to 7 ms. The finished half (`ORDER BY id DESC LIMIT n`) stays under a millisecond either
+way, because SQLite stops reading each status's range once the limit is full. The cost is on
+the write side -- `mark` names `status` in its `SET`, so every progress tick rewrites the
+entry, about 6 µs a write -- and it is paid ten times a second per rip, not per request.
+`IF NOT EXISTS`, so an existing database gains the index on its next open.
 
 **Timestamps are the store's, not the caller's.** `started_at` belongs to `claim_next` alone
 and `finished_at` is a function of the status: non-NULL exactly when the job is terminal.
@@ -152,6 +164,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS job_active_dedupe
 
 DEDUPE_INDEX_NAME = "job_active_dedupe"
 
+# Not partial, unlike the dedupe index, and that is deliberate: a partial index is only used
+# when the query repeats its `WHERE` term verbatim, so one over the active statuses would
+# serve the window query and none of `status = 'queued'`, `status = 'waiting'` or a bound
+# `status IN (?, ...)`. See the module docstring for what it is measured to buy.
+STATUS_INDEX_SQL = "CREATE INDEX IF NOT EXISTS job_status ON job(status, id)"
+
 # How long a contended write waits before SQLite gives up, in milliseconds. The shape of
 # the failure is that the caller sees `OperationalError: database is locked` rather than a
 # silently lost write.
@@ -211,11 +229,19 @@ class Progress:
     and it is the only file allowed to reach into upstream's `Task`. Putting the shape in
     `jobs.py` -- with `Leaf` and `Job`, the two other things a job is made of -- is what
     lets `app.py` import it without importing the app.
+
+    `adam_id` names the track the reading is about, and it is what routes the reading to its
+    row once the pool has more than one rip in flight: the scheduler's in-flight table maps it
+    to the job id. Without it the only answer was "the job the scheduler started last", and
+    with four workers that wrote one track's bytes onto another track's row. `None` is a
+    reading that does not say -- the seam always says -- and falls back to that single-rip
+    answer, `HubState.current_job`.
     """
 
     bytes_done: int
     bytes_total: int | None
     fraction: float | None
+    adam_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -299,9 +325,37 @@ class BatchResult:
     deduplicated: list[int] = field(default_factory=list)
 
 
+class BatchRefused(ValueError):
+    """`create_batch` refused a leaf, and here is what it had already applied.
+
+    A `ValueError`, so the one `except ValueError` a caller writes still catches it, and the
+    message is the refusal's own. `result` is what a bare `ValueError` could not carry: the
+    leaves before the refused one are rows already (autocommit), and their ids -- the created
+    ones and the holders the folded ones went into -- are exactly what the caller has to
+    report. Reading them back afterwards was the alternative and it could not be exact: a
+    fold lands on the holder's row, which may belong to another batch, and nothing on that
+    row says which leaf put it there.
+    """
+
+    def __init__(self, message: str, result: BatchResult) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 def _now() -> str:
     """UTC, with an offset, to milliseconds. See the module docstring for the precision."""
     return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+def _status_in(statuses: Collection[str]) -> tuple[str, list[str]]:
+    """`status IN (?, ...)` for a set of statuses, and the parameters that go with it.
+
+    Sorted, so one set is always one statement. The sets are this module's own constants, so
+    binding is for the statement cache rather than for safety. The one status filter that
+    must *not* come from here is `_holder`'s; its docstring says why.
+    """
+    ordered = sorted(statuses)
+    return f"status IN ({', '.join('?' for _ in ordered)})", ordered
 
 
 def _is_dedupe_violation(exc: sqlite3.IntegrityError) -> bool:
@@ -427,6 +481,7 @@ class JobStore:
             self._conn.execute("PRAGMA journal_mode = WAL")
             self._conn.execute(JOB_TABLE_SQL)
             self._conn.execute(DEDUPE_INDEX_SQL)
+            self._conn.execute(STATUS_INDEX_SQL)
         except sqlite3.Error as exc:
             raise JobStoreError(
                 f"could not open the job database at {path}: {exc}. The parent directory has "
@@ -475,11 +530,10 @@ class JobStore:
         that happens in the constructor.
 
         A refused leaf does not roll the batch back -- the leaves before it are already rows --
-        and the leaves after it are not attempted. The API layer is the one caller, so
-        catching the `ValueError`, reading `list()` and telling the user what is queued is
-        its job; a retry
-        is safe because the index turns the leaves that did land into `deduplicated` entries
-        rather than duplicates.
+        and the leaves after it are not attempted. So the refusal is a `BatchRefused`, which
+        is a `ValueError` carrying the `BatchResult` of what did land, and telling the user
+        is the caller's job; a retry is safe because the index turns the leaves that did land
+        into `deduplicated` entries rather than duplicates.
         """
         if parent_type not in PARENT_TYPES:
             raise ValueError(
@@ -497,7 +551,12 @@ class JobStore:
         deduplicated: list[int] = []
         stamp = _now()
         for leaf in leaves:
-            self._check_key(leaf)
+            try:
+                self._check_key(leaf)
+            except ValueError as exc:
+                raise BatchRefused(
+                    str(exc), BatchResult(created=created, deduplicated=deduplicated)
+                ) from None
             try:
                 cursor = self._conn.execute(
                     "INSERT INTO job (url, url_type, adam_id, title, codec, language, force,"
@@ -569,6 +628,11 @@ class JobStore:
         **1** -- the finished job -- and the UI would then render "already queued as #1" for a
         job that will never run again. `test_deduplicated_names_the_running_job_not_the_oldest_one`
         is that case.
+
+        **The predicate is the index's own literal, not `_status_in`.** SQLite uses a partial
+        index only when the query repeats its `WHERE` term, so this exact text is what turns
+        the lookup into a seek on `job_active_dedupe`; the bound-parameter form plans as a
+        walk of every active row instead.
         """
         row = self._conn.execute(
             "SELECT id FROM job WHERE adam_id = ? AND codec = ?"
@@ -599,36 +663,27 @@ class JobStore:
         `exclude` is for a pool: ids the caller has already looked at and released on this
         pass, so a job it declined to run is not handed back to it -- or to a sibling -- a
         moment later. Putting a row back and excluding it are both "leave it for later", and
-        only one of them terminates. See the `skip` branch below.
+        only one of them terminates. See the comment on `excluded` below.
         """
         skip = tuple(exclude)
-        if skip:
-            # `exclude` rather than "claim it and put it back", because putting it back
-            # re-queues the row the very next statement will hand out again, and a caller
-            # looping over claims has no way to tell that apart from progress. Both are
-            # synchronous, so a loop that keeps re-claiming never reaches an `await` and the
-            # whole event loop stops -- the WebSocket stream, every request and `docker stop`'s
-            # grace period with them. Excluding makes the loop's next claim return the *next*
-            # eligible row, or `None`, which is the answer a loop can act on.
-            #
-            # The placeholders are bound, never interpolated, and the set is a handful of ids
-            # at most: a collision needs two active jobs for one `adam_id`, and there are two
-            # codecs, so a row can be excluded at most once per claim.
-            holes = ",".join("?" * len(skip))
-            rows = self._conn.execute(
-                f"UPDATE job SET status = 'running', started_at = ?, error = NULL"  # noqa: S608
-                f" WHERE id = (SELECT id FROM job WHERE status = 'queued'"
-                f" AND id NOT IN ({holes}) ORDER BY id LIMIT 1)"
-                f" RETURNING *",
-                (_now(), *skip),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "UPDATE job SET status = 'running', started_at = ?, error = NULL"
-                " WHERE id = (SELECT id FROM job WHERE status = 'queued' ORDER BY id LIMIT 1)"
-                " RETURNING *",
-                (_now(),),
-            ).fetchall()
+        # `exclude` rather than "claim it and put it back", because putting it back re-queues
+        # the row the very next statement will hand out again, and a caller looping over
+        # claims has no way to tell that apart from progress. Both are synchronous, so a loop
+        # that keeps re-claiming never reaches an `await` and the whole event loop stops --
+        # the WebSocket stream, every request and `docker stop`'s grace period with them.
+        # Excluding makes the loop's next claim return the *next* eligible row, or `None`,
+        # which is the answer a loop can act on.
+        #
+        # The placeholders are bound, never interpolated, and the set is a handful of ids at
+        # most: a collision needs two active jobs for one `adam_id`, and there are two codecs,
+        # so a row can be excluded at most once per claim.
+        excluded = f" AND id NOT IN ({', '.join('?' for _ in skip)})" if skip else ""
+        rows = self._conn.execute(
+            "UPDATE job SET status = 'running', started_at = ?, error = NULL"
+            f" WHERE id = (SELECT id FROM job WHERE status = 'queued'{excluded}"
+            " ORDER BY id LIMIT 1) RETURNING *",
+            (_now(), *skip),
+        ).fetchall()
         # A `running` row written here always carries a `started_at`, and nothing else in the
         # store can put a row into that state: the column is only ever written here, and
         # `mark` rejects it as a field. A `running` row with a null start time therefore means
@@ -662,32 +717,28 @@ class JobStore:
                 f"silent no-op, and a progress bar that stops moving with no error anywhere "
                 f"is only ever found by a user."
             )
-        if status in ACTIVE_STATUSES and status != "queued":
-            # **A finished job cannot become active again except by being re-queued**, which
-            # is what a retry does. Any other terminal -> active transition is a caller
-            # working from a stale copy of the row, and accepting it is not a small wrong
-            # answer: it moves the row out of the terminal set, so `delete` and `retry` both
-            # start refusing it with a 409 ("not finished, so there is nothing to retry") and
-            # nothing will ever release it. The job is then stuck *displaying as running* with
-            # no user action able to clear it.
-            #
-            # The case that actually happens is the late progress reading: the seam's sampler
-            # is cancelled in a `finally`, which stops new readings but not one already handed
-            # to the event loop, and that callback arrives after the job was marked `done`.
-            #
-            # **The predicate is in the `WHERE` clause rather than in a read-then-write.** A
-            # `SELECT status` first would be a time-of-check-to-time-of-use gap: the only
-            # caller that can lose that race is `_apply_progress`, which runs on a
-            # `call_soon_threadsafe` callback interleaved with everything else on the loop,
-            # and the whole point is that the check and the write must not be separable. The
-            # guard costs one indexed comparison on the write that was happening anyway.
-            #
-            # `claim_next` is deliberately *not* subject to this: it is the only legitimate
-            # way into `running`, it only ever moves a `queued` row, and it does its own
-            # `UPDATE` rather than going through `mark`.
-            illegal_transition = True
-        else:
-            illegal_transition = False
+        # **A finished job cannot become active again except by being re-queued**, which is
+        # what a retry does. Any other terminal -> active transition is a caller working from
+        # a stale copy of the row, and accepting it is not a small wrong answer: it moves the
+        # row out of the terminal set, so `delete` and `retry` both start refusing it with a
+        # 409 ("not finished, so there is nothing to retry") and nothing will ever release it.
+        # The job is then stuck *displaying as running* with no user action able to clear it.
+        #
+        # The case that actually happens is the late progress reading: the seam's sampler is
+        # cancelled in a `finally`, which stops new readings but not one already handed to the
+        # event loop, and that callback arrives after the job was marked `done`.
+        #
+        # **The predicate is in the `WHERE` clause rather than in a read-then-write.** A
+        # `SELECT status` first would be a time-of-check-to-time-of-use gap: the only caller
+        # that can lose that race is `_apply_progress`, which runs on a `call_soon_threadsafe`
+        # callback interleaved with everything else on the loop, and the whole point is that
+        # the check and the write must not be separable. The guard costs one indexed
+        # comparison on the write that was happening anyway.
+        #
+        # `claim_next` is deliberately *not* subject to this: it is the only legitimate way
+        # into `running`, it only ever moves a `queued` row, and it does its own `UPDATE`
+        # rather than going through `mark`.
+        guard_finished = status in ACTIVE_STATUSES and status != "queued"
 
         assignments = ["status = ?", "finished_at = ?"]
         params: list = [status, _now() if status in TERMINAL_STATUSES else None]
@@ -698,11 +749,11 @@ class JobStore:
                 params.append(fields[name])
         params.append(job_id)
         where = "id = ?"
-        if illegal_transition:
+        if guard_finished:
             # See the comment above: the guard lives here, in the same statement as the write.
-            placeholders = ", ".join("?" for _ in TERMINAL_STATUSES)
-            where += f" AND status NOT IN ({placeholders})"
-            params.extend(sorted(TERMINAL_STATUSES))
+            finished, finished_params = _status_in(TERMINAL_STATUSES)
+            where += f" AND NOT ({finished})"
+            params.extend(finished_params)
         cursor = self._conn.execute(
             f"UPDATE job SET {', '.join(assignments)} WHERE {where}", params
         )
@@ -739,6 +790,33 @@ class JobStore:
             "UPDATE job SET status = 'queued' WHERE status = 'waiting'"
         ).rowcount
 
+    def any_with_status(self, statuses: Collection[str]) -> bool:
+        """Whether at least one job is in one of `statuses`. A yes/no, answered by a seek.
+
+        The scheduler asks this every half second while the hub is idle, so it must not cost
+        what `list()` costs: that materialises every matching row as a `Job` to answer a
+        question whose answer is one bit. `EXISTS` stops at the first row, and `job_status`
+        makes finding that row an index probe rather than a walk of the history.
+
+        An empty or unknown set is a `ValueError` rather than `False`, for the reason `mark`
+        checks its status: a misspelled status would otherwise be a queue that always looks
+        empty.
+        """
+        wanted = set(statuses)
+        unknown = wanted - JOB_STATUSES
+        if unknown or not wanted:
+            raise ValueError(
+                f"any_with_status needs one or more of {sorted(JOB_STATUSES)}, got "
+                f"{sorted(wanted)!r}"
+            )
+        clause, params = _status_in(wanted)
+        row = self._conn.execute(
+            f"SELECT EXISTS(SELECT 1 FROM job WHERE {clause})", params
+        ).fetchone()
+        return bool(row[0])
+
+    # -- clearing the queue -------------------------------------------------
+
     def cancel_pending(self, parent_url: str) -> CancelResult:
         """Cancel every `queued`/`waiting` row of one batch, and refuse the rest.
 
@@ -756,26 +834,20 @@ class JobStore:
         - Unknown or empty groups cancel nothing and answer with two empty lists:
           "nothing to do" is not an error, and the caller can say so truthfully.
 
-        The `refused` read happens *after* the `UPDATE` and the `cancelled` read
-        *before* it. Both are safe in this process and only in this process: every
-        store call is synchronous on the one event loop (`workers=1`), so no
-        `claim_next` can interleave inside this function -- and the `UPDATE`'s
-        `WHERE` guard still holds the line for any future writer.
+        `cancelled` comes out of the `UPDATE` itself (`RETURNING`), so it is exactly the
+        rows that statement moved and not a read beside it that could disagree. The
+        `refused` read follows the write, and it is safe in this process: every store call
+        is synchronous on the one event loop (`workers=1`), so no `claim_next` can
+        interleave inside this function.
         """
         cancelled = [
             row["id"]
             for row in self._conn.execute(
-                "SELECT id FROM job WHERE url = ? AND status IN ('queued', 'waiting')",
-                (parent_url,),
+                "UPDATE job SET status = 'cancelled', finished_at = ?"
+                " WHERE url = ? AND status IN ('queued', 'waiting') RETURNING id",
+                (_now(), parent_url),
             ).fetchall()
         ]
-        # The status predicate is the guard: even if `cancelled` had gone stale, this
-        # statement cannot move a row that is not `queued`/`waiting` at write time.
-        self._conn.execute(
-            "UPDATE job SET status = 'cancelled', finished_at = ?"
-            " WHERE url = ? AND status IN ('queued', 'waiting')",
-            (_now(), parent_url),
-        )
         refused = [
             row["id"]
             for row in self._conn.execute(
@@ -798,43 +870,8 @@ class JobStore:
         accepted -- which is exactly what the wrapper-down operator wants when the
         wrapper comes back.
         """
-        to_delete = sorted(ACTIVE_STATUSES - {"running"})
-        placeholders = ", ".join("?" for _ in to_delete)
-        where = f"status IN ({placeholders})"
-        # Read before write, in one transaction: the ids must not drift from the rows
-        # deleted, or the caller forgets leaves for rows that still exist.
-        with self._conn:  # type: ignore[attr-defined]
-            doomed = [
-                row["id"]
-                for row in self._conn.execute(
-                    f"SELECT id FROM job WHERE {where}", to_delete
-                ).fetchall()
-            ]
-            self._conn.execute(f"DELETE FROM job WHERE {where}", to_delete)
-        return sorted(doomed)
-
-    # -- reading ------------------------------------------------------------
-
-    # -- clearing the queue --------------------------------------------------
-
-    def export_rows(self, kind: str) -> list[sqlite3.Row]:
-        """The whole table for an export: `queue` = active rows id ASC, `history` = terminal id DESC.
-
-        The status vocabulary lives here, with `ACTIVE_STATUSES`/`TERMINAL_STATUSES`,
-        not in the route: a status added to one set has to be reflected on the export
-        side of the boundary automatically, and there is no second SQL copy to forget.
-        Read-only by construction -- this is a `SELECT` and nothing else.
-        """
-        statuses, order = (
-            (sorted(ACTIVE_STATUSES), "ASC")
-            if kind == "queue"
-            else (sorted(TERMINAL_STATUSES), "DESC")
-        )
-        placeholders = ", ".join("?" for _ in statuses)
-        return self._conn.execute(
-            f"SELECT * FROM job WHERE status IN ({placeholders}) ORDER BY id {order}",
-            statuses,
-        ).fetchall()
+        where, params = _status_in(ACTIVE_STATUSES - {"running"})
+        return self._delete(where, params)
 
     def delete_finished(self, parent_url: str | None = None) -> list[int]:
         """Remove every row in a terminal status, and return the ids that went.
@@ -861,24 +898,27 @@ class JobStore:
         `Leaf` in memory -- `LeafRegistry` has no bulk clear, so only the ids let it forget
         what is no longer queued. A count would leak one entry per deleted row.
         """
-        placeholders = ", ".join("?" for _ in TERMINAL_STATUSES)
-        params = sorted(TERMINAL_STATUSES)
-        where = f"status IN ({placeholders})"
+        where, params = _status_in(TERMINAL_STATUSES)
         if parent_url is not None:
             where += " AND url = ?"
             params.append(parent_url)
-        # Read before write, in one transaction, so the ids cannot drift from the rows
-        # deleted: another writer changing a status between the two statements would
-        # otherwise produce a list the caller is then told to forget leaves for.
-        with self._conn:  # type: ignore[attr-defined]
-            doomed = [
-                row["id"]
-                for row in self._conn.execute(
-                    f"SELECT id FROM job WHERE {where}", params
-                ).fetchall()
-            ]
-            self._conn.execute(f"DELETE FROM job WHERE {where}", params)
-        return sorted(doomed)
+        return self._delete(where, params)
+
+    def _delete(self, where: str, params: Sequence[object]) -> list[int]:
+        """Delete the rows `where` matches, and return their ids in id order.
+
+        `DELETE ... RETURNING` rather than a `SELECT` and then a `DELETE`, because the ids
+        have to be exactly the rows removed -- the caller forgets a leaf for each, and an id
+        that drifted is a leaf forgotten for a row that still exists. The two-statement form
+        this replaces sat inside `with self._conn:` and called itself one transaction, which
+        it was not: the connection is in autocommit, and `sqlite3`'s context manager never
+        *begins* a transaction, it only commits one that is already open. One statement is
+        atomic on its own, with nothing to remember.
+        """
+        rows = self._conn.execute(
+            f"DELETE FROM job WHERE {where} RETURNING id", params
+        ).fetchall()
+        return sorted(row["id"] for row in rows)
 
     def requeue(self, statuses: Collection[str], parent_url: str | None = None) -> RequeueResult:
         """Put rows in `statuses` back on the queue, and report the ones that could not.
@@ -909,12 +949,10 @@ class JobStore:
         # excluded because a row already there is not "requeued" -- nothing happens to it,
         # and counting it would inflate the number a user reads to see whether the button
         # did anything.
-        wanted = sorted(set(statuses) - {"running", "queued"})
+        wanted = set(statuses) - {"running", "queued"}
         if not wanted:
             return RequeueResult()
-        placeholders = ", ".join("?" for _ in wanted)
-        params: list = list(wanted)
-        where = f"status IN ({placeholders})"
+        where, params = _status_in(wanted)
         if parent_url is not None:
             where += " AND url = ?"
             params.append(parent_url)
@@ -940,6 +978,8 @@ class JobStore:
                 continue
             (requeued if cursor.rowcount else refused).append(row["id"])
         return RequeueResult(requeued=sorted(requeued), refused=sorted(refused))
+
+    # -- reading ------------------------------------------------------------
 
     def get(self, job_id: int) -> Job | None:
         """One job by id, or `None`. `None` rather than raising, because `GET /api/jobs/{id}`
@@ -977,12 +1017,14 @@ class JobStore:
         """
         if not 1 <= terminal_limit <= 1000:
             raise ValueError("terminal_limit must be between 1 and 1000")
+        active, active_params = _status_in(ACTIVE_STATUSES)
         active_rows = self._conn.execute(
-            "SELECT * FROM job WHERE status IN ('queued','waiting','running') ORDER BY id"
+            f"SELECT * FROM job WHERE {active} ORDER BY id", active_params
         ).fetchall()
+        finished, finished_params = _status_in(TERMINAL_STATUSES)
         terminal_rows = self._conn.execute(
-            "SELECT * FROM job WHERE status IN ('done','failed','skipped','cancelled') "
-            "ORDER BY id DESC LIMIT ?", (terminal_limit + 1,)
+            f"SELECT * FROM job WHERE {finished} ORDER BY id DESC LIMIT ?",
+            (*finished_params, terminal_limit + 1),
         ).fetchall()
         has_more = len(terminal_rows) > terminal_limit
         recent = terminal_rows[:terminal_limit]
@@ -999,11 +1041,10 @@ class JobStore:
         """One older terminal-job page; active jobs are always served separately."""
         if not 1 <= limit <= 500:
             raise ValueError("history page limit must be between 1 and 500")
-        where = "status IN ('done','failed','skipped','cancelled')"
-        params: tuple[int, ...] = ()
+        where, params = _status_in(TERMINAL_STATUSES)
         if before_id is not None:
             where += " AND id < ?"
-            params = (before_id,)
+            params.append(before_id)
         rows = self._conn.execute(
             f"SELECT * FROM job WHERE {where} ORDER BY id DESC LIMIT ?",
             (*params, limit + 1),
@@ -1015,6 +1056,22 @@ class JobStore:
             "has_more": has_more,
             "before_id": min((row["id"] for row in page), default=None),
         }
+
+    def export_rows(self, kind: str) -> list[sqlite3.Row]:
+        """The whole table for an export: `queue` = active rows id ASC, `history` = terminal id DESC.
+
+        The status vocabulary lives here, with `ACTIVE_STATUSES`/`TERMINAL_STATUSES`,
+        not in the route: a status added to one set has to be reflected on the export
+        side of the boundary automatically, and there is no second SQL copy to forget.
+        Read-only by construction -- this is a `SELECT` and nothing else.
+        """
+        statuses, order = (
+            (ACTIVE_STATUSES, "ASC") if kind == "queue" else (TERMINAL_STATUSES, "DESC")
+        )
+        where, params = _status_in(statuses)
+        return self._conn.execute(
+            f"SELECT * FROM job WHERE {where} ORDER BY id {order}", params
+        ).fetchall()
 
     def list(
         self,
@@ -1032,14 +1089,11 @@ class JobStore:
         row; a sentinel would be a second way of saying "none" for a case that cannot arise
         yet.
 
-        `parent_url` exists for the caller that has to report a *partial* batch.
-        `create_batch` applies the leaves it could and then raises `ValueError` on one it
-        could not, and the handler is required to tell the user what actually landed. There
-        is exactly one way to ask that question today, and it is not `parent_id`: the column
-        nothing writes, whose `None` means "no filter" rather than "top level", so filtering
-        a batch by it returns the user's **entire** queue and the response names every job
-        ever queued as part of this request. The `url` column is what `create_batch` wrote
-        for every row of a batch, so it is the batch's real identity.
+        `parent_url` is how a *batch* is asked for -- `GET /api/jobs?parent=` -- and it is not
+        `parent_id`: the column nothing writes, whose `None` means "no filter" rather than
+        "top level", so filtering a batch by it returns the user's **entire** queue. The `url`
+        column is what `create_batch` wrote for every row of a batch, so it is the batch's
+        real identity.
 
         Ordered by `id` and not by `created_at`, so that two jobs enqueued inside one
         millisecond keep the order they were created in, and so that a resumed job goes back

@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -65,6 +66,43 @@ HISTORY = 50
 # never comes near it. What happens *at* the limit is `SubscriberOverrun`, and who decides
 # what to do about it is the layer that owns the connection.
 SUBSCRIBER_QUEUE_SIZE = 1000
+
+# How many log lines a tab that opens late is shown from before it connected. Enough for a
+# wrapper start-up -- the launcher's banner, a failed namespace setup, a login prompt -- which
+# is the output somebody opens the page to read when the wrapper is not serving.
+RECENT_LOG_LINES = 200
+
+
+class RecentLog:
+    """The last log lines, numbered, so a tab that opens late sees what came before it.
+
+    The stream starts at the snapshot (`replay=False`), which is right for the queue -- the
+    snapshot *is* the queue's past -- and wrong for the log, whose past is exactly what an
+    operator opens the page to read after something went wrong. So the snapshot carries these
+    lines as well, and the numbering is what lets a tab that reconnects append only the lines
+    it missed: `seq` rises by one per line for the life of the process, and `epoch` is new for
+    every process, so numbers from a previous hub are never compared with this one's.
+
+    Not thread-safe, for the broker's reason: every writer is on the one event loop.
+    """
+
+    def __init__(self, capacity: int = RECENT_LOG_LINES) -> None:
+        self.epoch = secrets.token_hex(4)
+        self._seq = 0
+        self._lines: deque[tuple[int, str]] = deque(maxlen=capacity)
+
+    def append(self, line: str) -> int:
+        """Keep `line`, and return the number it was given."""
+        self._seq += 1
+        self._lines.append((self._seq, line))
+        return self._seq
+
+    def snapshot(self) -> dict:
+        """The kept lines, oldest first, with the epoch they are numbered in."""
+        return {
+            "epoch": self.epoch,
+            "lines": [{"seq": seq, "line": line} for seq, line in self._lines],
+        }
 
 
 class SubscriberOverrun(RuntimeError):

@@ -344,11 +344,12 @@ class RipperHost:
         """`config_path` is `<vendor root>/config.toml`; `on_progress` is optional.
 
         **The optional progress callback is keyword-only and defaults to `None`, which is
-        what keeps every existing call and every existing test working.** It is called from
-        inside upstream's transfer loop, in whatever thread that loop runs in, with a
-        `hub.app.Progress`; `hub.app` hops to its event loop and writes the row. A caller that
-        passes `None` -- which is every caller that does not want progress -- gets no
-        behaviour change at all, not even a `None` check somewhere hot.
+        what keeps every existing call and every existing test working.** It is called by
+        the sampler `_with_progress` runs beside each rip, with a `hub.jobs.Progress` that
+        names the track it measured; the scheduler routes it to that track's row, hops to its
+        event loop and writes it. A caller that passes `None` -- which is every caller that
+        does not want progress -- gets no behaviour change at all, not even a `None` check
+        somewhere hot.
         """
         # Resolved here rather than in `start()`: `start()` chdirs, so a relative
         # path would be interpreted against the vendor root instead of against
@@ -845,6 +846,10 @@ class RipperHost:
         has no `Task` at all -- is not progress of zero, and writing zero would move a
         progress bar backwards the moment the task appeared.
 
+        The reading carries `leaf.adam_id`, which is how the scheduler knows whose it is:
+        with several rips sampling at once, a reading that did not say which track it
+        measured could only be pinned on whichever job the scheduler started last.
+
         **A music video always reads as `None`, and that is a known gap rather than a
         transient state.** The two paths differ structurally: `MVRipper.rip` (`src/mv.py`)
         does not go through `Ripper.download_manager` at all, so it registers no `Task` and
@@ -875,7 +880,9 @@ class RipperHost:
         total_raw = getattr(m3u8, "range_length", None) if m3u8 is not None else None
         total = int(total_raw) if isinstance(total_raw, int) and total_raw > 0 else None
         fraction = (done / total) if total else None
-        return Progress(bytes_done=done, bytes_total=total, fraction=fraction)
+        return Progress(
+            bytes_done=done, bytes_total=total, fraction=fraction, adam_id=leaf.adam_id
+        )
 
     # ------------------------------------------------------------------ #
     # Rendering

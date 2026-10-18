@@ -40,6 +40,7 @@ DECLARED = frozenset(
         "loop",
         "pending_2fa",
         "queue_paused",
+        "recent_log",
         "ripper",
         "ripper_config_path",
         "ripping_adam_ids",

@@ -62,12 +62,17 @@
 </section>
 
 <section class="card">
+  {#- The label wraps its field, as the queue's search does: `.library-tools` lays out a
+      field, a count and a button, and a label beside its input made a fourth cell that
+      pushed the button onto a row of its own. -#}
   <div class="library-tools">
-    <label for="library-search">Search artist, album, or path</label>
-    <input id="library-search" type="search" maxlength="200" autocomplete="off"
-           placeholder="Start typing to filter…">
+    <label class="search-field" for="library-search">
+      <span>Search artist, album, or path <kbd>/</kbd></span>
+      <input id="library-search" type="search" maxlength="200" autocomplete="off"
+             placeholder="Start typing to filter…" aria-keyshortcuts="/">
+    </label>
     <span id="library-result-count" class="muted small">{{ listing.albums | length }} of {{ listing.total_albums }} album directories</span>
-    <button type="button" id="library-duplicates-toggle">Show possible duplicates</button>
+    <button type="button" id="library-duplicates-toggle" class="secondary">Show possible duplicates</button>
   </div>
   <p class="muted small">Duplicate matches are based on normalized album and track names, not file identity. Review paths; they may be different releases.</p>
   <div id="duplicate-report" class="duplicate-report" hidden></div>

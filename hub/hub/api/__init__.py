@@ -22,7 +22,9 @@ Three things live here, and none of them belongs to a particular resource:
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
@@ -37,6 +39,8 @@ from starlette.requests import HTTPConnection
 # as `AttributeError: module 'hub.auth' has no attribute 'login_router'`, which points at the
 # wrong file entirely.
 from hub import auth as hub_auth
+from hub.jobs import PARENT_TYPES
+from hub.library_scan import scan_roots
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 TEMPLATES_DIR = WEB_DIR / "templates"
@@ -72,7 +76,32 @@ def build_templates() -> Jinja2Templates:
     paths read off the filesystem, and `test_a_scan_result_cannot_inject_markup_into_the_page`
     is what would notice.
     """
-    return Jinja2Templates(directory=str(TEMPLATES_DIR))
+    environment = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    environment.env.filters["group_name"] = group_name
+    return environment
+
+
+def group_name(url: object) -> str:
+    """A readable name for a batch, made of its own URL's words.
+
+    Apple's links carry a slug of the title before the id -- `/jp/album/<slug>/<id>`,
+    percent-encoded outside ASCII -- and that slug is the one human-readable thing the `job`
+    table holds about a batch: no album or playlist name is stored, because the filesystem is
+    the truth and a stored name would be a second one. So the slug is decoded and its hyphens
+    read as spaces. A URL without one (a music video's, or any other shape) is shown as
+    itself. `groupName` in `app.js` is the same rule for the headers the stream rebuilds.
+
+    Display text only: it goes through autoescaping like every other expression, and nothing
+    routes or matches on it.
+    """
+    text = url if isinstance(url, str) else ""
+    parts = urlsplit(text).path.split("/")
+    for index, part in enumerate(parts[:-2]):
+        if part in PARENT_TYPES:
+            name = unquote(parts[index + 1]).replace("-", " ").strip()
+            if name:
+                return name
+    return text
 
 
 def templates(request: Request) -> Jinja2Templates:
@@ -221,7 +250,16 @@ class GuardedStatic(StaticFiles):
             # `_Unauthorized`, which `install`'s handler turns into a 401 -- the same answer
             # as every guarded route, from the same place, with no second message.
             raise _Unauthorized()
-        return await super().get_response(path, scope)
+        response = await super().get_response(path, scope)
+        # **Revalidate every time.** `StaticFiles` sends `ETag` and `Last-Modified` and no
+        # `Cache-Control`, so a browser may cache heuristically -- a tenth of the file's age --
+        # and the image keeps a file's mtime from the checkout. A stylesheet untouched for a
+        # month was then reused for days after an upgrade, under pages rendered by the new
+        # templates and driven by the new script: markup, style and code from two versions
+        # at once. `no-cache` still caches; it only makes the browser ask first, and the
+        # answer on a LAN is a 304 with no body.
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 def _Request(scope) -> Request:  # noqa: N802 - a scope is the input, not a request
@@ -562,10 +600,6 @@ async def _library_summary(state) -> dict:
     nothing says so. `albums` alone cannot distinguish that from a full library; the
     per-root count can.
     """
-    import asyncio
-
-    from hub.library_scan import scan_roots
-
     scan = await asyncio.to_thread(scan_roots, state.settings.library_roots)
     return {
         "roots": [str(root) for root in scan.roots],

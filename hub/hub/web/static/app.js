@@ -77,6 +77,25 @@
     if (target) copyText(target);
   });
 
+  /* `/` puts the cursor in the page's search box -- the queue's or the library's -- from
+   * anywhere that is not already taking text. Both pages are lists a reader hunts through,
+   * and reaching for the mouse to find a field on a page of a few thousand rows is the step
+   * this saves. A box the page has not revealed yet (the queue's tools stay hidden until
+   * this script has wired them) is left alone. */
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "/" || event.ctrlKey || event.metaKey || event.altKey) return;
+    var target = event.target;
+    var tag = target && target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (target && target.isContentEditable)) {
+      return;
+    }
+    var search = document.getElementById("queue-search") || document.getElementById("library-search");
+    if (!search || search.offsetParent === null) return;
+    event.preventDefault();
+    search.focus();
+    search.select();
+  });
+
   initLibraryPage();
 
   function initLibraryPage() {
@@ -227,6 +246,10 @@
     if (banner) mount.appendChild(banner);
   }
 
+  /* The pool count before any message: the scheduler's table as the server last saw it,
+   * and the health banner's first paint. A failure here is silent on purpose -- the stream
+   * is the loud channel, and a page that cannot reach `/api/status` once will hear about it
+   * there instead. */
   fetch("/api/status", { credentials: "same-origin" })
     .then(function (response) {
       return response.ok ? response.json() : null;
@@ -268,10 +291,14 @@
   var pauseButton = document.getElementById("queue-pause");
   var resumeButton = document.getElementById("queue-resume");
   var pauseState = document.getElementById("queue-pause-state");
+  // The server rendered the buttons for the state it was in, so the page starts from that.
+  var queuePaused = Boolean(resumeButton && !resumeButton.hidden);
   function setQueuePaused(paused) {
-    if (pauseButton) pauseButton.hidden = Boolean(paused);
-    if (resumeButton) resumeButton.hidden = !paused;
-    if (pauseState) pauseState.textContent = paused ? "Paused — running downloads will finish." : "";
+    queuePaused = Boolean(paused);
+    if (pauseButton) pauseButton.hidden = queuePaused;
+    if (resumeButton) resumeButton.hidden = !queuePaused;
+    if (pauseState) pauseState.textContent = queuePaused ? "Paused — running downloads will finish." : "";
+    renderOverview();
   }
   if (historyTools) {
     historyBeforeId = Number(historyTools.dataset.beforeId) || null;
@@ -342,18 +369,9 @@
       td.appendChild(ul);
     } else if (job.error) {
       td.appendChild(el("span", "error-text", job.error));
-    } else if (job.parent_url) {
-      // The template renders `<a class="muted small" ...>source</a>` here; the script used to
-      // render a `<span>` holding the raw URL, so every row's source link silently became a
-      // long unprominent URL the moment the first stream frame arrived -- and only then,
-      // which is the whole reason `test_the_scripts_row_builder_agrees_with_the_template`
-      // exists. `href` is set as a property, never concatenated into markup: the URL came
-      // from the server, and a string built here is a string nobody has escaped.
-      var link = el("a", "muted small", "source");
-      link.href = job.parent_url;
-      link.rel = "noreferrer noopener";
-      td.appendChild(link);
     }
+    // Nothing for a row with neither: the link to its source is on the group header above
+    // it, once per batch, where every row used to repeat it. `job_row.html` agrees.
     return td;
   }
 
@@ -416,6 +434,97 @@
       queueSummary.appendChild(button);
     });
   }
+
+  /* -- the overview: what is left, how fast it is going, and roughly when it will be done --
+   *
+   * "N to go" is the counts' own arithmetic. The rate is read from the tracks this page has
+   * seen finish -- the snapshot's recent history, then every live finish -- over the last
+   * fifteen minutes, and the estimate is what is left over that rate. Nothing is claimed
+   * from fewer than three finishes or less than a minute of them: the first track of a
+   * session says nothing about the next hundred, and a burst of instant duplicate skips says
+   * even less. With nothing running -- paused, or a wrapper that is down -- there is no
+   * estimate at all, because nothing is moving to estimate from.
+   *
+   * The tab's title carries what is left as well, so a queue in a background tab can be read
+   * off the tab strip.
+   */
+  var queueOverview = document.getElementById("queue-overview");
+  var baseTitle = document.title;
+  var RATE_WINDOW_MS = 15 * 60 * 1000;
+  var RATE_STATUSES = ["done", "skipped", "failed"];
+  // job id -> when it finished. Keyed by id, so the snapshot that seeds it and the frame that
+  // announces the same finish count it once.
+  var recentFinishes = new Map();
+
+  function noteFinish(job, seenAt) {
+    if (!job || RATE_STATUSES.indexOf(job.status) === -1 || recentFinishes.has(job.id)) return;
+    var now = Date.now();
+    var at = Date.parse(job.finished_at || "");
+    if (isNaN(at)) at = seenAt;
+    if (typeof at !== "number" || isNaN(at)) return;
+    // The hub's clock a little ahead of this one must not put a finish in the future.
+    if (at > now) at = now;
+    if (now - at > RATE_WINDOW_MS) return;
+    recentFinishes.set(job.id, at);
+  }
+
+  function finishRate(now) {
+    var oldest = Infinity;
+    recentFinishes.forEach(function (at, id) {
+      if (now - at > RATE_WINDOW_MS) recentFinishes.delete(id);
+      else if (at < oldest) oldest = at;
+    });
+    if (recentFinishes.size < 3 || now - oldest < 60000) return null;
+    return recentFinishes.size / ((now - oldest) / 60000);
+  }
+
+  function formatDuration(minutes) {
+    if (minutes < 60) return Math.max(1, Math.round(minutes)) + " min";
+    var hours = Math.floor(minutes / 60);
+    var rest = Math.round(minutes - hours * 60);
+    if (hours < 48) return hours + " h" + (rest ? " " + rest + " min" : "");
+    return Math.round(hours / 24) + " days";
+  }
+
+  function renderOverview() {
+    if (!queueCounts) return;
+    var running = queueCounts.running || 0;
+    var remaining = (queueCounts.queued || 0) + (queueCounts.waiting || 0) + running;
+    var parts = [];
+    if (!remaining) {
+      parts.push("Nothing left to download");
+    } else {
+      parts.push(remaining.toLocaleString() + " to go");
+      if (queuePaused) {
+        parts.push("paused");
+      } else if (running) {
+        var rate = finishRate(Date.now());
+        if (rate) {
+          var minutes = remaining / rate;
+          parts.push((rate >= 10 ? Math.round(rate) : rate.toFixed(1)) + " tracks/min");
+          parts.push(minutes < 1 ? "under a minute left" : "about " + formatDuration(minutes) + " left");
+        }
+      }
+    }
+    if (queueOverview) queueOverview.textContent = parts.join(" · ");
+    // Drained while the tab was in the background: the title says so until it is looked at.
+    // Browser notifications would need a secure context, which a hub on plain LAN HTTP is
+    // not, so the tab strip is the channel that is always there.
+    if (lastRemaining > 0 && remaining === 0 && document.hidden) drainedUnseen = true;
+    lastRemaining = remaining;
+    if (remaining) drainedUnseen = false;
+    document.title = remaining
+      ? (queuePaused ? "⏸ " : "") + "(" + remaining.toLocaleString() + ") " + baseTitle
+      : (drainedUnseen ? "✓ Finished · " : "") + baseTitle;
+  }
+
+  var lastRemaining = 0;
+  var drainedUnseen = false;
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden || !drainedUnseen) return;
+    drainedUnseen = false;
+    renderOverview();
+  });
 
   /* The age label. `created_at` is already in the job JSON -- `asdict(Job)`, and the column
    * was made browser-parseable for exactly this -- and the label ticks every five seconds
@@ -480,10 +589,27 @@
 
   function upsertRow(job) {
     bumpJobRevision(job.id);
+    var previous = jobs.get(job.id);
     jobs.set(job.id, job);
     var row = document.getElementById("job-" + job.id);
-    if (row) body.replaceChild(buildRow(job), row);
-    else body.appendChild(buildRow(job));
+    var fresh = buildRow(job);
+    if (row && previous && previous.status === job.status && previous.parent_url === job.parent_url) {
+      /* An in-place change -- in practice a progress tick, which arrives ten times a second
+       * per rip. Same status and same group, so the summary counts and the group headers are
+       * what they were, and the one filter input that can have moved is the row's own text.
+       * So the row is filtered alone: the full pass below walks every row, and on a queued
+       * discography at forty frames a second that walk was the page's whole frame budget.
+       * A row whose visibility -- or whose match, which its group header follows -- did flip
+       * still takes the full pass, which is what keeps the header and the counts honest. */
+      var wasHidden = row.hidden;
+      var wasMatch = row.queueMatch;
+      body.replaceChild(fresh, row);
+      filterRow(fresh, queueQuery(), statusFilter(), finishedVisible());
+      if (fresh.hidden !== wasHidden || fresh.queueMatch !== wasMatch) applyQueueFilters();
+      return;
+    }
+    if (row) body.replaceChild(fresh, row);
+    else body.appendChild(fresh);
     updateQueueSummary();
     // A new id can open a new group, so the headers are re-derived before the filters.
     syncGroupHeaders();
@@ -589,31 +715,91 @@
     syncGroupHeaders();
   }
 
+  /* A batch's readable name, from its own URL: Apple puts a slug of the title before the
+   * id (`/jp/album/<slug>/<id>`, percent-encoded outside ASCII), and that slug is the one
+   * human-readable thing a job row holds about its batch. `group_name` in `hub/api` is the
+   * same rule for the headers the server renders; a URL with no slug is shown as itself. */
+  var GROUP_KINDS = ["song", "album", "artist", "playlist", "music-video"];
+
+  function groupName(url) {
+    var parts;
+    try {
+      parts = new URL(url).pathname.split("/");
+    } catch (err) {
+      return url;
+    }
+    for (var i = 0; i < parts.length - 2; i++) {
+      if (GROUP_KINDS.indexOf(parts[i]) === -1) continue;
+      try {
+        var name = decodeURIComponent(parts[i + 1]).replace(/-/g, " ").trim();
+        if (name) return name;
+      } catch (err) {
+        /* A malformed escape is not a name; fall through to the URL itself. */
+      }
+    }
+    return url;
+  }
+
+  /* What a header says about its rows: the states they are in, most pressing first. It
+   * counts the rows on the page -- every active row, and the finished ones the history window
+   * has loaded -- so it names states rather than claiming a batch total it cannot see. */
+  var GROUP_SUMMARY_ORDER = ["running", "queued", "waiting", "failed", "done", "skipped", "cancelled"];
+
+  function groupSummary(counts) {
+    var parts = [];
+    GROUP_SUMMARY_ORDER.forEach(function (status) {
+      if (counts[status]) parts.push(counts[status] + " " + status);
+    });
+    return parts.join(" · ");
+  }
+
   /* Group headers are derived from the rows, and the rows are the truth: the same
      reconcile after every snapshot, upsert-sort, or history load. A header is
      removed and re-added so a batch that changes parent -- or a row set that leaves
-     the header orphaned -- cannot strand a stale control on the page. */
-  function groupHeaderRow(parentUrl, parentType) {
+     the header orphaned -- cannot strand a stale control on the page.
+
+     Each header offers only the operations that would do something: "Cancel queued" while
+     the batch has queued or waiting rows, "Re-queue failed" while it has failed ones. The
+     layout is a `div` inside the cell, never the cell: a `td` with `display: flex` stops
+     being a table cell and loses its `colspan`, which is how the headers used to collapse
+     into the first column. */
+  function groupHeaderRow(parentUrl, parentType, counts) {
     var tr = el("tr", "group-header");
+    tr.dataset.parentUrl = parentUrl;
     var td = el("td", null);
     td.colSpan = 7;
-    var link = el("a", "group-url muted small", parentType || "group");
+    var bar = el("div", "group-bar");
+    var toggle = el("button", "group-toggle");
+    toggle.type = "button";
+    toggle.dataset.action = "toggle-group";
+    toggle.dataset.parentUrl = parentUrl;
+    bar.appendChild(toggle);
+    bar.appendChild(el("span", "group-kind", parentType || "group"));
+    // `href` is set as a property, never concatenated into markup: the URL came from the
+    // server, and a string built here is a string nobody has escaped.
+    var link = el("a", "group-url", groupName(parentUrl));
     link.href = parentUrl;
     link.rel = "noreferrer noopener";
-    td.appendChild(link);
+    link.title = parentUrl;
+    bar.appendChild(link);
+    bar.appendChild(el("span", "group-counts", groupSummary(counts)));
     var actions = el("span", "group-actions");
     var cancel = el("button", null, "Cancel queued");
     cancel.type = "button";
     cancel.dataset.action = "cancel-group";
     cancel.dataset.parentUrl = parentUrl;
+    cancel.hidden = !(counts.queued || counts.waiting);
     actions.appendChild(cancel);
     var requeue = el("button", null, "Re-queue failed");
     requeue.type = "button";
     requeue.dataset.action = "requeue-failed-group";
     requeue.dataset.parentUrl = parentUrl;
+    requeue.hidden = !counts.failed;
     actions.appendChild(requeue);
-    td.appendChild(actions);
+    bar.appendChild(actions);
+    td.appendChild(bar);
     tr.appendChild(td);
+    paintGroupToggle(tr);
     return tr;
   }
 
@@ -621,14 +807,76 @@
     Array.prototype.slice.call(body.querySelectorAll(":scope > tr.group-header"))
       .forEach(function (row) { body.removeChild(row); });
     var rows = Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"));
-    var previousParent = null;
+    // Each run of one parent URL, with the states of the rows in it, before any header is
+    // inserted -- a header has to know its whole run to say what is in it.
+    var runs = [];
+    var run = null;
     rows.forEach(function (row) {
       var parent = row.dataset.parentUrl;
-      if (parent && parent !== previousParent) {
-        body.insertBefore(groupHeaderRow(parent, row.dataset.parentType), row);
+      if (!parent) {
+        run = null;
+        return;
       }
-      previousParent = parent;
+      if (!run || run.parent !== parent) {
+        run = { parent: parent, type: row.dataset.parentType, first: row, counts: Object.create(null) };
+        runs.push(run);
+      }
+      var job = jobs.get(Number(row.dataset.jobId));
+      var cell = job ? null : row.querySelector(".status-cell .status");
+      var status = job ? job.status : (cell ? cell.textContent.trim() : "");
+      run.counts[status] = (run.counts[status] || 0) + 1;
     });
+    runs.forEach(function (each) {
+      body.insertBefore(groupHeaderRow(each.parent, each.type, each.counts), each.first);
+    });
+  }
+
+  /* Groups the reader has folded away, by parent URL. The headers are rebuilt from the rows
+   * on every snapshot and status change; the reader's choice is kept here, so it survives
+   * them. A folded group's rows still match the filters -- they are only out of sight --
+   * which is what keeps its header on the page to be opened again. */
+  var collapsedGroups = new Set();
+  var groupsToggle = document.querySelector('[data-action="queue-toggle-groups"]');
+
+  function paintGroupToggle(header) {
+    var toggle = header.querySelector(".group-toggle");
+    if (!toggle) return;
+    var collapsed = collapsedGroups.has(header.dataset.parentUrl);
+    var name = header.querySelector(".group-url");
+    toggle.textContent = collapsed ? "▸" : "▾";
+    toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    // The glyph is for the eye; a screen reader is told what the button folds.
+    toggle.setAttribute("aria-label", (collapsed ? "Expand " : "Collapse ") + (name ? name.textContent : "group"));
+    toggle.title = collapsed ? "Expand this group" : "Collapse this group";
+  }
+
+  function paintGroupToggles() {
+    body.querySelectorAll(":scope > tr.group-header").forEach(paintGroupToggle);
+    if (groupsToggle) {
+      var folded = collapsedGroups.size > 0;
+      groupsToggle.setAttribute("aria-pressed", folded ? "true" : "false");
+      groupsToggle.textContent = folded ? "Expand groups" : "Collapse groups";
+    }
+  }
+
+  function toggleGroup(parentUrl) {
+    if (collapsedGroups.has(parentUrl)) collapsedGroups.delete(parentUrl);
+    else collapsedGroups.add(parentUrl);
+    paintGroupToggles();
+    applyQueueFilters();
+  }
+
+  /* Fold every group on the page, or open every folded one. "Collapse groups" turns a queue
+   * of a few thousand rows into one line per album -- its name and where its tracks stand. */
+  function setGroupsCollapsed(collapsed) {
+    collapsedGroups.clear();
+    if (collapsed) {
+      body.querySelectorAll(":scope > tr.group-header").forEach(function (header) {
+        collapsedGroups.add(header.dataset.parentUrl);
+      });
+    }
+    paintGroupToggles();
+    applyQueueFilters();
   }
 
   function loadHistory() {
@@ -673,6 +921,7 @@
         if (data && data.counts) {
           queueCounts = data.counts;
           updateQueueSummary();
+          renderOverview();
         }
       }).catch(function () { /* The live row still renders if a count refresh is offline. */ });
     }, 250);
@@ -682,29 +931,110 @@
 
   /* The log pane is `aria-live`, and it is also the only thing on the page that grows
    * without bound. A hub left open across a week of ripping appends a line per job, per
-   * wrapper hiccup and per re-queue; `textContent +=` reallocations the whole string every
-   * time, so without a ceiling the pane gets slower to append to and slower to repaint, on
-   * a node a screen reader re-reads on every change. 2,000 lines is the last 2,000, kept
-   * as whole lines -- trimming by length would leave a half-line at the top forever. */
+   * wrapper hiccup and per re-queue, so it keeps the last 2,000 lines, as whole lines --
+   * trimming by length would leave a half-line at the top forever.
+   *
+   * One text node per line. `textContent +=` rebuilt the whole pane on every line -- a copy
+   * of up to 2,000 lines, then a re-layout of all of them, for one new one -- and replacing
+   * a live region's entire text hands a screen reader the entire text again. Appending a
+   * node is constant work, announces only what was added, and makes the trim one
+   * `removeChild` of the oldest line.
+   *
+   * **The scroll is once per painted frame, not once per line.** Reading `scrollHeight`
+   * forces a synchronous layout of everything dirty on the page, and with progress frames
+   * replacing rows that is the whole queue table: measured at ~30 ms a line against a
+   * 3,000-row queue, so a chatty wrapper alone could hold the main thread. Deferred to
+   * `requestAnimationFrame`, the layout is the one the browser was going to do to paint, and
+   * a background tab -- where nothing paints -- does none until it is looked at again. */
   var LOG_LIMIT = 2000;
-  var logLines = 0;
+  var logScrollQueued = false;
+  var logLatest = document.getElementById("log-latest");
+
+  /* Following means "the pane is at its bottom", and only then does a new line scroll it.
+   * A reader who scrolls up to read what the wrapper said a minute ago is left there --
+   * the pane used to yank them back to the bottom on every line, which made the log
+   * unreadable exactly while it was busiest -- and "Jump to latest" appears to take them
+   * back. The pane's own scroll after a line is flagged, so measuring "at the bottom" is
+   * only ever done for a scroll a person made. */
+  var logFollowing = true;
+  var logAutoScroll = false;
+
+  if (logPane) {
+    logPane.addEventListener("scroll", function () {
+      if (logAutoScroll) {
+        logAutoScroll = false;
+        return;
+      }
+      logFollowing = logPane.scrollHeight - logPane.scrollTop - logPane.clientHeight < 8;
+      if (logFollowing && logLatest) logLatest.hidden = true;
+    });
+  }
 
   function log(line) {
     if (!logPane) return;
-    logPane.textContent += line + "\n";
-    logLines += 1;
-    if (logLines > LOG_LIMIT) {
-      var text = logPane.textContent;
-      var drop = logLines - LOG_LIMIT;
-      for (var i = 0; i < drop; i++) {
-        var newline = text.indexOf("\n");
-        if (newline === -1) break;
-        text = text.slice(newline + 1);
-      }
-      logPane.textContent = text;
-      logLines = LOG_LIMIT;
+    logPane.appendChild(document.createTextNode(line + "\n"));
+    while (logPane.childNodes.length > LOG_LIMIT) logPane.removeChild(logPane.firstChild);
+    if (!logFollowing) {
+      if (logLatest) logLatest.hidden = false;
+      return;
     }
-    logPane.scrollTop = logPane.scrollHeight;
+    scrollLogToEnd();
+  }
+
+  function scrollLogToEnd() {
+    if (logScrollQueued) return;
+    logScrollQueued = true;
+    window.requestAnimationFrame(function () {
+      logScrollQueued = false;
+      // Already there (or nothing to scroll): no scroll event would follow to clear the flag.
+      if (logPane.scrollHeight - logPane.scrollTop - logPane.clientHeight < 1) return;
+      logAutoScroll = true;
+      logPane.scrollTop = logPane.scrollHeight;
+    });
+  }
+
+  function followLog() {
+    logFollowing = true;
+    if (logLatest) logLatest.hidden = true;
+    scrollLogToEnd();
+  }
+
+  /* This tab's copy only. The hub's recent log is untouched, and the numbering below keeps
+   * a reconnect from putting the cleared lines back. */
+  function clearLog() {
+    if (!logPane) return;
+    logPane.textContent = "";
+    followLog();
+  }
+
+  /* The log's numbering, from the hub's recent log. A snapshot hands over the lines from
+   * before this tab connected; each live line carries its number too, so after a reconnect
+   * only the lines this tab missed are added, never one it already shows. A new `epoch` is
+   * a new hub process, whose numbers start again. */
+  var logEpoch = null;
+  var logSeq = 0;
+
+  function logFromSnapshot(recent) {
+    if (!recent || !Array.isArray(recent.lines)) return;
+    if (recent.epoch !== logEpoch) {
+      if (logEpoch !== null) log("— the hub restarted —");
+      logEpoch = recent.epoch;
+      logSeq = 0;
+    }
+    recent.lines.forEach(function (entry) {
+      if (entry.seq > logSeq) {
+        logSeq = entry.seq;
+        log(entry.line);
+      }
+    });
+  }
+
+  function logLiveLine(payload) {
+    if (typeof payload.seq === "number") {
+      if (payload.seq <= logSeq) return;
+      logSeq = payload.seq;
+    }
+    log(payload.line);
   }
 
   /* `data-state` is what `#stream-state`'s dot colours itself from; the label is what a
@@ -749,6 +1079,11 @@
         replaceRows(payload.jobs || []);
         if (queueCounts) updateQueueSummary();
         if (reconnectingWithHistory) hydrateJobs(Array.from(historyLoadedIds));
+        // The hub's recent log first, so a tab opened after a failure can read it; then the
+        // snapshot's finished rows, which are what the rate starts from.
+        logFromSnapshot(payload.log);
+        (payload.jobs || []).forEach(function (job) { noteFinish(job, NaN); });
+        renderOverview();
         // The snapshot arrives on connect/reconnect: refresh the banner from the live
         // server so a wrapper or library that changed while the socket was down is
         // reflected. The wrapper frame carries live transitions; the snapshot carries
@@ -763,7 +1098,10 @@
         var previousJob = jobs.get(payload.job.id);
         var statusChanged = !previousJob || previousJob.status !== payload.job.status;
         upsertRow(payload.job);
-        if (statusChanged) refreshQueueCounts();
+        if (statusChanged) {
+          noteFinish(payload.job, Date.now());
+          refreshQueueCounts();
+        }
         break;
       }
       case "batch":
@@ -800,10 +1138,11 @@
         // status rather than trusting the frame's summary (no cache, one probe).
         fetch("/api/status", { credentials: "same-origin" })
           .then(function (response) { return response.ok ? response.json() : null; })
-          .then(function (body) { if (body) updateHealthBanner(body); })          .catch(function () { /* the next frame or snapshot will carry it */ });
+          .then(function (body) { if (body) updateHealthBanner(body); })
+          .catch(function () { /* the next frame or snapshot will carry it */ });
         break;
       case "log":
-        log(payload.line);
+        logLiveLine(payload);
         break;
       default:
         break;
@@ -849,10 +1188,6 @@
 
   connectStream();
 
-  /* The pool count before any message: the scheduler's table as the server last saw it.
-   * A failure here is silent on purpose -- the stream is the loud channel, and a page
-   * that cannot reach `/api/status` once will hear about it there instead. */
-
   /* The age labels tick on a five-second beat, and only while the tab is visible -- a
    * backgrounded queue does not need a timer rewriting text nobody is reading. A snapshot
    * or an upsert rebuilds each row's span from `created_at` anyway, so the beat only ever
@@ -864,6 +1199,8 @@
     document.querySelectorAll("#queue-body .ago").forEach(function (span) {
       span.textContent = " " + ago(span.dataset.at);
     });
+    // The rate is over a sliding window, so it moves with the clock as well as with frames.
+    renderOverview();
   }, 5000);
 
   // -- actions ------------------------------------------------------------
@@ -1000,6 +1337,14 @@
       setFinishedVisible(!finishedVisible());
     } else if (action === "queue-clear-filters") {
       clearQueueFilters();
+    } else if (action === "toggle-group" && target.dataset.parentUrl) {
+      toggleGroup(target.dataset.parentUrl);
+    } else if (action === "queue-toggle-groups") {
+      setGroupsCollapsed(collapsedGroups.size === 0);
+    } else if (action === "log-latest") {
+      followLog();
+    } else if (action === "log-clear") {
+      clearLog();
     }
   });
 
@@ -1024,38 +1369,67 @@
     applyQueueFilters();
   }
 
+  function queueQuery() {
+    return queueSearch ? queueSearch.value.trim().toLowerCase() : "";
+  }
+
+  function statusFilter() {
+    return queueStatus ? queueStatus.value : "all";
+  }
+
+  /* One row against the three filters, and whether it matched them. `applyQueueFilters`
+   * runs it over every row; a row rebuilt in place by a progress tick runs it alone (see
+   * `upsertRow`), so the two can never disagree about what a filter means.
+   *
+   * Matching and showing are kept apart for the folded groups: a row in one matches as it
+   * always did -- its header counts it and stays to be opened -- and is only kept out of
+   * sight. The match is remembered on the element (`queueMatch`), which is how the
+   * in-place path notices a change the header has to follow without walking the table. */
+  function filterRow(row, query, status, showFinished) {
+    var matchesFinished = showFinished || row.dataset.finished !== "1";
+    var matchesStatus = status === "all" || row.classList.contains("status-" + status);
+    var matchesSearch = !query || row.textContent.toLowerCase().indexOf(query) !== -1;
+    row.hidden = !(matchesFinished && matchesStatus && matchesSearch);
+    row.queueMatch = !row.hidden;
+    if (row.queueMatch && collapsedGroups.has(row.dataset.parentUrl)) row.hidden = true;
+    return row.queueMatch;
+  }
+
   function applyQueueFilters() {
-    var rows = Array.prototype.slice.call(body.querySelectorAll("tr[data-job-id]"));
-    var query = queueSearch ? queueSearch.value.trim().toLowerCase() : "";
-    var status = queueStatus ? queueStatus.value : "all";
+    var query = queueQuery();
+    var status = statusFilter();
+    // Read once per pass, not once per row: it is a DOM attribute read.
+    var showFinished = finishedVisible();
+    var total = 0;
+    var matched = 0;
     var visible = 0;
-
-    rows.forEach(function (row) {
-      var matchesFinished = finishedVisible() || row.dataset.finished !== "1";
-      var matchesStatus = status === "all" || row.classList.contains("status-" + status);
-      var matchesSearch = !query || row.textContent.toLowerCase().indexOf(query) !== -1;
-      row.hidden = !(matchesFinished && matchesStatus && matchesSearch);
-      if (!row.hidden) visible += 1;
-    });
-
-    // Group headers follow their run: a header stays only while one of the rows after
-    // it (up to the next header) is visible.
     var header = null;
-    Array.prototype.slice.call(body.children).forEach(function (child) {
-      if (child.classList && child.classList.contains("group-header")) {
+
+    // One walk in document order, so each group header learns about its own run: a header
+    // stays while any row after it (up to the next header) matches the filters.
+    Array.prototype.forEach.call(body.children, function (child) {
+      if (child.classList.contains("group-header")) {
         header = child;
         header.hidden = true;
-      } else if (header && !child.hidden) {
-        header.hidden = false;
+        return;
       }
+      if (!child.dataset.jobId) return;
+      total += 1;
+      if (filterRow(child, query, status, showFinished)) {
+        matched += 1;
+        if (header) header.hidden = false;
+      }
+      if (!child.hidden) visible += 1;
     });
 
     if (queueVisibleCount) {
-      queueVisibleCount.textContent = "Showing " + visible + " of " + rows.length + " jobs";
+      var folded = matched - visible;
+      queueVisibleCount.textContent = "Showing " + visible + " of " + total + " jobs" +
+        (folded ? " · " + folded + " in folded groups" : "");
     }
-    if (queueEmpty) queueEmpty.hidden = rows.length !== 0;
-    if (queueTableWrap) queueTableWrap.hidden = rows.length === 0;
-    if (queueNoResults) queueNoResults.hidden = rows.length === 0 || visible !== 0;
+    if (queueEmpty) queueEmpty.hidden = total !== 0;
+    if (queueTableWrap) queueTableWrap.hidden = total === 0;
+    if (queueNoResults) queueNoResults.hidden = total === 0 || matched !== 0;
     document.querySelectorAll("#queue-summary button[data-status]").forEach(function (button) {
       button.setAttribute("aria-pressed", button.dataset.status === status ? "true" : "false");
     });
@@ -1192,6 +1566,45 @@
     if (typeof remembered.language === "string" && languageBox) languageBox.value = remembered.language;
     if (remembered.force && forceBox) forceBox.checked = true;
 
+    /* What the form is about to send, said before it is sent. A line pasted twice is sent
+     * once: every URL is a catalogue walk on the hub's side -- an artist is one request per
+     * album it ever released -- and the second walk could only fold into the first. A line
+     * that does not look like an Apple Music link is pointed out rather than refused; the
+     * hub is what decides, and it says why per link. */
+    var urlsBox = enqueue.querySelector('[name="urls"]');
+    var urlsCount = document.getElementById("urls-count");
+    var APPLE_LINK = /^https:\/\/(?:[\w-]+\.)*(?:music|itunes)\.apple\.com(?:[\/?#]|$)/i;
+
+    function linksIn(text) {
+      var seen = new Set();
+      var links = [];
+      var repeated = 0;
+      String(text || "").split("\n").forEach(function (line) {
+        var link = line.trim();
+        if (!link) return;
+        if (seen.has(link)) {
+          repeated += 1;
+          return;
+        }
+        seen.add(link);
+        links.push(link);
+      });
+      return { links: links, repeated: repeated };
+    }
+
+    function renderLinkCount() {
+      if (!urlsCount || !urlsBox) return;
+      var found = linksIn(urlsBox.value);
+      var odd = found.links.filter(function (link) { return !APPLE_LINK.test(link); }).length;
+      var parts = [];
+      if (found.links.length) parts.push(found.links.length + (found.links.length === 1 ? " link" : " links"));
+      if (found.repeated) parts.push(found.repeated + " repeated, sent once");
+      if (odd) parts.push(odd + (odd === 1 ? " does" : " do") + " not look like Apple Music");
+      urlsCount.textContent = parts.join(" · ");
+      urlsCount.classList.toggle("warn", odd > 0);
+    }
+    if (urlsBox) urlsBox.addEventListener("input", renderLinkCount);
+
     enqueue.addEventListener("submit", function (event) {
       event.preventDefault();
       showError("#enqueue-error", "");
@@ -1201,9 +1614,7 @@
         enqueueButton.textContent = "Adding…";
       }
       var fields = readForm(enqueue);
-      var urls = String(fields.urls || "").split("\n").map(function (line) {
-        return line.trim();
-      }).filter(Boolean);
+      var urls = linksIn(fields.urls).links;
       post("/api/jobs", {
         urls: urls,
         codec: fields.codec,
@@ -1255,7 +1666,10 @@
         }
         if (problems.length) summary.push(problems.length + " link(s) need attention above");
         if (!summary.length) summary.push("No new jobs were added");
-        if (created.length && !problems.length) enqueue.querySelector('[name="urls"]').value = "";
+        if (created.length && !problems.length) {
+          enqueue.querySelector('[name="urls"]').value = "";
+          renderLinkCount();
+        }
         return hydrateJobs(created).then(function () {
           setEnqueueFeedback(summary.join(" · ") + ". The queue below is up to date.");
           if (queueEmpty && jobs.size === 0) applyQueueFilters();

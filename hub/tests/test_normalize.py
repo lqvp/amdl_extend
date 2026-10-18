@@ -3,7 +3,6 @@ boundaries are pinned here rather than left to the dedup call site."""
 
 from hub.normalize import (
     AUDIO_EXTS,
-    FORMAT_BUCKETS,
     is_audio_file,
     normalize,
     stem_of,
@@ -191,10 +190,3 @@ def test_audio_exts_cover_the_real_library():
     assert {".m4a", ".flac", ".mp4"} <= AUDIO_EXTS
     assert ".jpg" not in AUDIO_EXTS and ".lrc" not in AUDIO_EXTS and ".part" not in AUDIO_EXTS
 
-
-def test_format_buckets_are_casefolded():
-    # `library_scan._artist` decides artist/album by matching a grandparent directory
-    # against these, against `normalize()`d path components, so they are stored casefolded
-    # to be comparable.
-    # Note this is not the same test as AUDIO_EXTS: these name directories, not files.
-    assert FORMAT_BUCKETS == frozenset({"alac", "atmos"})

@@ -6,13 +6,13 @@ is silent:
 **The answer is four keys, not three.** The contract is
 `{created[], skipped[], deduplicated[]}`
 and `JobStore.create_batch` implements that. But `create_batch` *applies the leaves it could
-and then raises* `ValueError` on one it could not, because a 19-track album must not lose
-19 tracks to one bad `adam_id`. So the handler catches it, reads back what actually landed
-**by `parent_url`**, and adds a `rejected` list naming the one that did not. A 500 here
-would be a 19-track album queued behind an error the user cannot see.
+and then raises* on one it could not, because a 19-track album must not lose 19 tracks to one
+bad `adam_id`. The refusal is a `BatchRefused`, which carries the `BatchResult` of what did
+land, so the handler reports exactly that and adds a `rejected` list naming the one that did
+not. A 500 here would be a 19-track album queued behind an error the user cannot see.
 
-**`parent_url` is the group key.** The read-back, `POST /api/jobs/cancel`, the scoped
-`requeue`, and the scoped `finished` delete all address a batch by the `url` column
+**`parent_url` is the group key.** `POST /api/jobs/cancel`, the scoped `requeue`, the scoped
+`finished` delete and `GET /api/jobs?parent=` all address a batch by the `url` column
 `create_batch` writes for every leaf. `parent_id` is the `job` table's unused self-
 reference -- `create_batch` has no such parameter, so every row has `NULL` in it, and
 `list(parent_id=None)` means *no filter*; using it to address a group would return the
@@ -30,12 +30,13 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+import sys
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import urlparse, urlsplit
 
 from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, Response
@@ -43,7 +44,7 @@ from pydantic import BaseModel, Field
 
 from hub.api import fail, guarded, is_authenticated
 from hub.events import SubscriberOverrun
-from hub.jobs import Job, Leaf
+from hub.jobs import PARENT_TYPES, BatchRefused, BatchResult, Job, Leaf
 from hub.resolver import ResolveError, expand
 from hub.vendor import parse_apple_music_url
 
@@ -55,9 +56,10 @@ websocket_router = APIRouter()
 #: interleaved between two subscribers' live halves cannot be placed correctly by a reader.
 JOBS_CHANNEL = "jobs"
 
-#: `EventBroker.subscribe` replays up to `HISTORY` past frames, which for this channel are
-#: older than the snapshot the stream starts with. Sending them would render a stale queue
-#: and then fix it, and sending the transition twice would be worse. See `_job_frames`.
+#: The first frame of every stream. The WebSocket subscribes with `replay=False` -- the
+#: broker's backlog for this channel is older than the snapshot, and sending it would render a
+#: stale queue and then fix it -- and hands the snapshot over as the subscription's `initial`
+#: message instead, so it is evaluated for that connection alone. See `stream`.
 SNAPSHOT_KIND = "snapshot"
 
 #: Upstream's `Codec` (`src/types.py`), restated because the boundary test forbids importing
@@ -67,12 +69,11 @@ CODECS: frozenset[str] = frozenset(
     {"alac", "ec3", "ac3", "aac-binaural", "aac-downmix", "aac", "aac-legacy"}
 )
 
-#: The `url_type` column's five values, which is also `hub.jobs.PARENT_TYPES`. Duplicated
-#: for the same reason and checked in `test_the_codec_set_matches_the_clients`'s sibling
-#: assertion below.
-PARENT_TYPES: frozenset[str] = frozenset(
-    {"song", "album", "artist", "playlist", "music-video"}
-)
+#: `PARENT_TYPES` -- the `url_type` column's five values -- is imported from `hub.jobs` rather
+#: than restated like `CODECS`: the store is the hub's own module, so the boundary test that
+#: forces the copy above has nothing to say about it, and a second copy would be one more set
+#: for `create_batch` and `parent_type_for` to disagree about.
+#: `test_the_parent_type_set_matches_the_clients` still compares it against upstream's.
 
 
 #: The row shape of the CSV export when the table is empty (header-only file).
@@ -314,8 +315,6 @@ def _path_segment(url: str) -> str | None:
     `None` and the caller falls through to the evidence-based answer instead of storing a
     URL the resolver will refuse anyway.
     """
-    from urllib.parse import urlparse
-
     for part in urlparse(url).path.split("/"):
         if part in PARENT_TYPES:
             return part
@@ -389,38 +388,31 @@ async def create_jobs(request: Request, body: _JobsBody | None = None) -> Respon
             )
             continue
 
-        before = {job.id for job in state.jobs.list(parent_url=cleaned)}
-        # Per-URL, not cumulative (I6). The running totals above are what the *response*
-        # reports; what a stream frame carries is what *this* URL queued, because a tab
-        # merges frames and would otherwise log ids it has already seen. The two frames of a
-        # two-URL request used to carry all four ids each, and `app.js` logged ids 3 and 4 on
-        # the first frame it saw.
-        this_created: list[int] = []
-        this_deduplicated: list[int] = []
         try:
             result = state.jobs.create_batch(
                 cleaned, parent_type_for(cleaned, len(leaves)), leaves, force=payload.force
             )
         except ValueError as exc:
             # The partial application is the point. `create_batch` wrote the leaves before
-            # this one and will not attempt the ones after it, so what is on disk is not
-            # what `result` would have said and `result` does not exist.
-            _record_landed(state, cleaned, before, created, deduplicated)
-            this_created = [job_id for job_id in created if job_id not in before]
-            this_deduplicated = [
-                job_id for job_id in deduplicated if job_id not in before
-            ]
+            # the refused one and will not attempt the ones after it, and a `BatchRefused`
+            # carries exactly what landed -- the created ids and the holders the folded
+            # leaves went into, including holders in other batches, which no read-back by
+            # `parent_url` could have found. A plain `ValueError` is a batch-level argument
+            # refused before the first insert, so nothing landed.
+            result = exc.result if isinstance(exc, BatchRefused) else BatchResult()
             rejected.append(_rejected_name(leaves, cleaned))
             problems.append({"url": url, "detail": str(exc)})
-        else:
-            created.extend(result.created)
-            deduplicated.extend(result.deduplicated)
-            this_created = list(result.created)
-            this_deduplicated = list(result.deduplicated)
-            _remember_leaves(state, leaves, result.created)
 
+        created.extend(result.created)
+        deduplicated.extend(result.deduplicated)
+        _remember_leaves(state, leaves, result.created)
+        # Per-URL, not cumulative (I6). The running totals above are what the *response*
+        # reports; what a stream frame carries is what *this* URL queued, because a tab
+        # merges frames and would otherwise log ids it has already seen. The two frames of a
+        # two-URL request used to carry all four ids each, and `app.js` logged ids 3 and 4 on
+        # the first frame it saw.
         _publish_batch(
-            state, url=cleaned, created=this_created, deduplicated=this_deduplicated
+            state, url=cleaned, created=result.created, deduplicated=result.deduplicated
         )
 
     body_out: dict[str, Any] = {
@@ -451,42 +443,6 @@ def _default_language(state) -> str:
     """`region.language` from the client's own config, or `""` if it is not started."""
     language = getattr(state.ripper, "region_language", None)
     return language.strip() if isinstance(language, str) else ""
-
-
-def _record_landed(
-    state, url: str, before: set[int], created: list[int], deduplicated: list[int]
-) -> None:
-    """Classify what `create_batch` managed to apply before it raised.
-
-    `before` is the set of ids this url already had, snapshotted before the call. After the
-    `ValueError` the result object does not exist, so this is the only way to know what
-    landed: a row that is not in `before` was inserted by this call, and a row that *is* was
-    there because some leaf folded into it.
-
-    The status filter on the second half is not redundant with the snapshot. A row for this
-    url can be `done` or `failed`, and the partial index does not cover those -- so a new
-    leaf with the same key would have created a *second* row rather than folding, and
-    counting the old terminal one as `deduplicated` would report an id the user never queued
-    this time.
-
-    **The read is by `parent_url` and nothing else**, and the module docstring is the reason:
-    `parent_id` is a self-reference nothing writes, so `list(parent_id=None)` means "no
-    filter" and would return the user's entire queue as this request's work.
-
-    **A holder in another batch is not recoverable, and `deduplicated` is a lower bound on a
-    refused batch.** The fold is recorded on the holder's row, which may belong to a request
-    for a completely different URL, and there is no column on it saying which leaf put it
-    there. So a refused batch reports the folds it can see and the user is told what actually
-    happened to the rest; `create_batch`'s own message is in `problems` either way.
-    """
-    for job in state.jobs.list(parent_url=url):
-        if job.id in created or job.id in deduplicated:
-            continue
-        if job.id in before:
-            if job.status in ("queued", "waiting", "running"):
-                deduplicated.append(job.id)
-        else:
-            created.append(job.id)
 
 
 def _rejected_name(leaves: list[Leaf], url: str) -> str:
@@ -619,6 +575,10 @@ async def lookup_jobs(request: Request, ids: list[int] = Query(default=[])) -> d
     return {"jobs": [job_to_dict(job) for job in request.app.state.jobs.get_many(ids)]}
 
 
+#: Keep the socket alive through idle periods and common reverse-proxy timeouts.
+WEBSOCKET_HEARTBEAT_SECONDS = 20.0
+
+
 @websocket_router.websocket("/api/jobs/ws")
 async def stream(websocket: WebSocket) -> None:
     """Stream queue events as JSON messages over an authenticated WebSocket.
@@ -640,7 +600,18 @@ async def stream(websocket: WebSocket) -> None:
         return
 
     state = websocket.app.state
-    messages = _job_payloads(state)
+    # A reconnect must not replay an earlier connection's snapshot. The broker registers this
+    # subscriber first, then evaluates the snapshot for this connection alone and yields it
+    # before anything else; updates after that point queue behind it, so they are never
+    # broadcast as another tab's snapshot and never lost between the snapshot and the stream.
+    #
+    # **Frames are sent as the text the broker encoded.** `encode_message` is byte-for-byte
+    # what `send_json` would produce (compact separators, `ensure_ascii=False`), so decoding
+    # each frame here only to re-encode it was two JSON passes per frame per tab -- at ten
+    # progress frames a second per rip -- with nothing in between that read the result.
+    messages = state.broker.subscribe(
+        JOBS_CHANNEL, replay=False, initial=lambda: _snapshot(state)
+    )
     message_task = asyncio.create_task(messages.__anext__())
     disconnect_task = asyncio.create_task(websocket.receive())
     try:
@@ -665,13 +636,13 @@ async def stream(websocket: WebSocket) -> None:
 
             if message_task in done:
                 try:
-                    payload = message_task.result()
+                    frame = message_task.result()
                 except StopAsyncIteration:
                     return
                 except SubscriberOverrun:
                     await websocket.close(code=1013, reason="event backlog exceeded")
                     return
-                await websocket.send_json(payload)
+                await websocket.send_text(frame)
                 message_task = asyncio.create_task(messages.__anext__())
     except WebSocketDisconnect:
         return
@@ -684,44 +655,16 @@ async def stream(websocket: WebSocket) -> None:
             await messages.aclose()
 
 
-#: Keep the socket alive through idle periods and common reverse-proxy timeouts.
-WEBSOCKET_HEARTBEAT_SECONDS = 20.0
-
-
-async def _job_payloads(state):
-    """Yield one current snapshot, then live JSON payloads in broker order."""
-    # A reconnect must not replay an earlier connection's snapshot. The broker registers
-    # this subscriber first, then evaluates the snapshot only for this connection; updates
-    # after that point are queued behind it without being broadcast as another tab's snapshot.
-    messages = state.broker.subscribe(
-        JOBS_CHANNEL, replay=False, initial=lambda: _snapshot(state)
-    )
-
-    seen_snapshot = False
-    try:
-        async for frame in messages:
-            try:
-                payload = json.loads(frame)
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(payload, dict):
-                continue
-            if not seen_snapshot:
-                if payload.get("kind") != SNAPSHOT_KIND:
-                    continue
-                seen_snapshot = True
-            yield payload
-    finally:
-        with suppress(Exception):
-            await messages.aclose()
-
-
 def _snapshot(state) -> dict:
     """All active jobs plus a bounded recent terminal window, from the live store.
 
     Active jobs are never hidden by history pagination. Terminal rows beyond the recent
     window have an ID cursor in the payload. Counts still cover the full table, so summary
     buttons remain accurate without sending the entire history over the socket.
+
+    `log` is the recent log (`RecentLog.snapshot`), because the log's past is the part a tab
+    opened after a failure has come to read; the numbering lets a reconnecting tab skip the
+    lines it already shows.
     """
     window = state.jobs.queue_window()
     return {
@@ -731,6 +674,7 @@ def _snapshot(state) -> dict:
         "history_before_id": window["history_before_id"],
         "counts": state.jobs.counts(),
         "queue_paused": state.queue_paused,
+        "log": state.recent_log.snapshot(),
     }
 
 
@@ -891,11 +835,7 @@ async def delete_finished_jobs(
     process, holding `Leaf` objects for jobs that no longer exist.
     """
     state = request.app.state
-    deleted = state.jobs.delete_finished(parent_url)
-    for job_id in deleted:
-        state.leaves.forget(job_id)
-    state.broker.publish(JOBS_CHANNEL, {"kind": "deleted", "ids": deleted})
-    return {"deleted": len(deleted), "ids": deleted}
+    return _answer_deleted(state, state.jobs.delete_finished(parent_url))
 
 
 @router.delete("/api/jobs/pending")
@@ -912,7 +852,17 @@ async def delete_pending_jobs(request: Request) -> Response:
     like `delete_finished`, so every open tab drops the rows in place.
     """
     state = request.app.state
-    deleted = state.jobs.delete_pending()
+    return _answer_deleted(state, state.jobs.delete_pending())
+
+
+def _answer_deleted(state, deleted: list[int]) -> dict:
+    """Forget the deleted rows' leaves, tell every open tab, and say how much went.
+
+    The three steps both bulk deletes owe, in one place so the two cannot drift: the
+    registry has no bulk clear, so each id's leaf is forgotten here or it outlives its row;
+    the `deleted` frame is what lets open tabs drop the rows in place; and the answer carries
+    the ids as well as the count, because the page removes rows by id.
+    """
     for job_id in deleted:
         state.leaves.forget(job_id)
     state.broker.publish(JOBS_CHANNEL, {"kind": "deleted", "ids": deleted})
@@ -949,8 +899,7 @@ async def delete_job(request: Request, job_id: int) -> Response:
         )
     state.jobs.mark(job_id, "cancelled")
     state.leaves.forget(job_id)
-    _publish_job(state, job_id)
-    return job_to_dict(state.jobs.get(job_id))
+    return _publish_job(state, job_id)
 
 
 @router.post("/api/jobs/{job_id}/retry")
@@ -976,19 +925,45 @@ async def retry_job(request: Request, job_id: int) -> Response:
             f"job {job_id} is {job.status}, not finished, so there is nothing to retry.",
         )
     state.jobs.mark(job_id, "queued")
-    _publish_job(state, job_id)
-    return job_to_dict(state.jobs.get(job_id))
+    return _publish_job(state, job_id)
 
 
-def _publish_job(state, job_id: int) -> None:
-    """One job's current row, for the stream. Read from the store, not from a local copy.
+def _publish_job(state, job_id: int) -> dict | None:
+    """One job's current row, for the stream -- and returned, for a route to answer with.
 
-    `hub.scheduler` imports this rather than keeping its own, because two functions that both
-    publish "the job as it is now" is two places for a future column to be forgotten in. The
-    read is a `get()` because `mark` computes `finished_at` and the store is the only place
-    that knows what it set: a published row that disagrees with the table is how a queue ends
-    up showing a download that finished seconds ago as still running.
+    Read from the store, not from a local copy. `hub.scheduler` uses this rather than keeping
+    its own, because two functions that both publish "the job as it is now" is two places for
+    a future column to be forgotten in. The read is a `get()` because `mark` computes
+    `finished_at` and the store is the only place that knows what it set: a published row that
+    disagrees with the table is how a queue ends up showing a download that finished seconds
+    ago as still running. Returning the same dict lets a route answer with exactly the row it
+    published, without a second read that could disagree with the first.
+
+    `None` when the row is gone, and nothing is published.
     """
     job = state.jobs.get(job_id)
-    if job is not None:
-        state.broker.publish(JOBS_CHANNEL, {"kind": "job", "job": job_to_dict(job)})
+    if job is None:
+        return None
+    row = job_to_dict(job)
+    state.broker.publish(JOBS_CHANNEL, {"kind": "job", "job": row})
+    return row
+
+
+def publish_log(state, line: str) -> None:
+    """One log line, onto the jobs stream and onto stderr.
+
+    The wrapper's own output arrives here through the supervisor's `log_sink`, and **the
+    supervisor scrubs it before it gets here** (R6: credentials and tokens are replaced before
+    the line leaves the child's pipe), which is why the hub can display a child's log lines at
+    all; the scheduler's own notes take the same path. It rides the jobs channel so one
+    WebSocket carries the queue and the log together, in the order they happened.
+
+    One definition for both callers: `hub.app` and `hub.scheduler` each used to carry a copy.
+
+    The line is also kept in `state.recent_log`, and the frame carries the number it was
+    given there, so a tab that opens later is shown it in its snapshot and a tab that
+    reconnects can tell the lines it already has from the ones it missed.
+    """
+    seq = state.recent_log.append(line)
+    state.broker.publish(JOBS_CHANNEL, {"kind": "log", "line": line, "seq": seq})
+    print(line, file=sys.stderr, flush=True)

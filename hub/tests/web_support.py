@@ -266,16 +266,20 @@ class FakeRipper:
     def _report(self, leaf, done: int, total: int | None) -> None:
         """One reading, the way the real seam would deliver it.
 
-        The real `RipperHost` polls upstream's `Task` and calls `on_progress` from a worker;
-        `hub.app`'s handler hops to the loop with `call_soon_threadsafe`. A fake cannot
-        reproduce the thread hop without being a fake of the hop, so it calls the handler
+        The real `RipperHost` polls upstream's `Task` and calls `on_progress` from its
+        sampler; the scheduler's handler hops to the loop with `call_soon_threadsafe`. A fake
+        cannot reproduce the hop without being a fake of the hop, so it calls the handler
         directly -- and `test_progress_reaches_the_store_and_the_stream` therefore covers the
         handler, while the real poll is exercised by the acceptance run.
+
+        The reading names its track, as the real seam's does: that is what the scheduler
+        routes it by when several rips are in flight.
         """
         reading = Progress(
             bytes_done=done,
             bytes_total=total,
             fraction=(done / total) if total else None,
+            adam_id=leaf.adam_id,
         )
         self.reports.append((leaf.adam_id, reading))
         handler = getattr(self, "on_progress", None)

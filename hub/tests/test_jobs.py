@@ -40,8 +40,11 @@ import pytest
 from hub.events import HISTORY, SUBSCRIBER_QUEUE_SIZE, EventBroker, SubscriberOverrun
 from hub.jobs import (
     ACTIVE_STATUSES,
+    DEDUPE_INDEX_SQL,
     JOB_STATUSES,
+    JOB_TABLE_SQL,
     TERMINAL_STATUSES,
+    BatchRefused,
     IllegalTransition,
     JobNotFound,
     JobStore,
@@ -451,16 +454,38 @@ def test_a_refused_key_stops_the_batch_but_keeps_what_had_already_landed(tmp_pat
     that should not occur is worse than a loud failure -- but it does not roll the batch back,
     because autocommit means the earlier leaves are already rows. The leaves *after* the bad
     one are not attempted, and that is the part the API layer has to know: it is the one
-    caller of this, and it catches the `ValueError`, reads `list()`, and shows what is
-    queued. A retry
-    is safe, because the index makes the already-enqueued leaves come back as
-    `deduplicated` rather than as duplicates.
+    caller of this, so the refusal is a `BatchRefused` -- still a `ValueError` -- carrying
+    the `BatchResult` of what did land, which is what the API shows. A retry is safe,
+    because the index makes the already-enqueued leaves come back as `deduplicated` rather
+    than as duplicates.
     """
     store = JobStore(tmp_path / "hub.db")
     bad = Leaf(**{**vars(leaf("2")), "adam_id": ""})
-    with pytest.raises(ValueError, match="adam_id"):
+    with pytest.raises(BatchRefused, match="adam_id") as refused:
         store.create_batch("u", "album", [leaf("1"), bad, leaf("3")], force=False)
+    assert isinstance(refused.value, ValueError), "one `except ValueError` must still catch it"
     assert [job.adam_id for job in store.list()] == ["1"]
+    # And the refusal says so itself, so the caller does not have to read the table back.
+    assert refused.value.result.created == [job.id for job in store.list()]
+    assert refused.value.result.deduplicated == []
+
+
+def test_a_refusal_reports_the_holders_its_folded_leaves_went_into(tmp_path):
+    """A leaf that folded before the refusal is in the partial result, holder id and all.
+
+    The holder can belong to a different batch, and that is the case a read-back by URL
+    could never report: the fold is recorded on the holder's row, which carries the other
+    batch's URL and nothing saying which leaf landed on it. The store knows the holder at
+    the moment of the fold, so the refusal is the one place the answer can be exact.
+    """
+    store = JobStore(tmp_path / "hub.db")
+    holder = store.create_batch("other", "album", [leaf("1")], force=False).created[0]
+    bad = Leaf(**{**vars(leaf("3")), "codec": " "})
+    with pytest.raises(BatchRefused, match="codec") as refused:
+        store.create_batch("u", "album", [leaf("1"), leaf("2"), bad], force=False)
+    result = refused.value.result
+    assert result.deduplicated == [holder]
+    assert [store.get(job_id).adam_id for job_id in result.created] == ["2"]
 
 
 @pytest.mark.parametrize("url", [None, "", "   "])
@@ -992,6 +1017,79 @@ def test_resume_waiting_keeps_the_reason_the_queue_stopped(tmp_path):
     assert store.claim_next().error is None
 
 
+# --- the scheduler's idle question -------------------------------------------
+
+
+def test_any_with_status_answers_for_exactly_the_statuses_it_is_asked_about(tmp_path):
+    """The yes/no the idle scheduler asks twice a second, on every side of its boundary.
+
+    `queued` and `waiting` are what the loop has to act on; a queue holding only `running`
+    or finished rows is idle for that question even though it is not empty, and the answer
+    has to move with each row's status rather than with the size of the table.
+    """
+    store = JobStore(tmp_path / "hub.db")
+    pending = ("queued", "waiting")
+    assert store.any_with_status(pending) is False
+
+    job_id = store.create_batch("u", "album", [leaf("1")], force=False).created[0]
+    assert store.any_with_status(pending) is True
+
+    store.claim_next()
+    assert store.any_with_status(pending) is False, "a running row is not one to act on"
+    assert store.any_with_status(("running",)) is True
+
+    store.mark(job_id, "waiting")
+    assert store.any_with_status(pending) is True, "a parked row is, or it is never resumed"
+
+    store.mark(job_id, "queued")
+    store.claim_next()
+    store.mark(job_id, "done")
+    assert store.any_with_status(pending) is False
+    assert store.any_with_status(TERMINAL_STATUSES) is True
+
+
+@pytest.mark.parametrize("statuses", [(), ("queud",), ("queued", "finished")])
+def test_any_with_status_refuses_a_set_it_cannot_answer_for(tmp_path, statuses):
+    """An empty or misspelled set is a caller's bug, and `False` would hide it for ever.
+
+    The idle loop gates its wrapper probe on this answer, so a typo that silently read as
+    "nothing queued" would be a hub that never starts a download and never says why.
+    """
+    with pytest.raises(ValueError, match="any_with_status"):
+        JobStore(tmp_path / "hub.db").any_with_status(statuses)
+
+
+def test_the_status_reads_are_index_seeks_and_not_table_scans(tmp_path):
+    """`job_status` is what keeps the claim and the idle check off the history.
+
+    Asked of the planner through a raw connection on the store's file -- the right tool for
+    a schema question, as the module docstring says -- and asked of an *existing* database
+    too: one opened before the index existed gains it on the next open, because the store
+    creates it `IF NOT EXISTS` on every connection and there is no migration to run.
+    """
+    path = tmp_path / "hub.db"
+    legacy = sqlite3.connect(path)
+    legacy.execute(JOB_TABLE_SQL)
+    legacy.execute(DEDUPE_INDEX_SQL)
+    legacy.close()
+
+    JobStore(path).close()
+
+    raw = sqlite3.connect(path)
+    try:
+        def plan(sql: str) -> str:
+            return " | ".join(row[3] for row in raw.execute(f"EXPLAIN QUERY PLAN {sql}"))
+
+        for sql in (
+            "SELECT id FROM job WHERE status = 'queued' ORDER BY id LIMIT 1",
+            "SELECT EXISTS(SELECT 1 FROM job WHERE status IN ('queued', 'waiting'))",
+            "UPDATE job SET status = 'queued' WHERE status = 'waiting'",
+        ):
+            assert "job_status" in plan(sql), f"{sql!r} does not use the status index: {plan(sql)}"
+    finally:
+        raw.close()
+
+
 # --- the broker -------------------------------------------------------------
 
 
@@ -1376,6 +1474,31 @@ def test_a_payload_that_is_not_json_fails_at_publish_time():
     broker = EventBroker()
     with pytest.raises(TypeError):
         broker.publish("jobs", {"when": object()})
+
+
+def test_the_recent_log_keeps_the_newest_lines_and_numbers_every_one():
+    """A bounded tail, numbered for the life of the process, under a per-process epoch.
+
+    The bound is the point of a tail; the numbers keep rising past it, because a tab that
+    reconnects compares them with the last one it showed and a number reused after the
+    tail wrapped would make it skip a line it never saw.
+    """
+    from hub.events import RecentLog
+
+    recent = RecentLog(capacity=3)
+    assert recent.snapshot()["lines"] == []
+    for n in range(1, 6):
+        assert recent.append(f"line {n}") == n
+    snapshot = recent.snapshot()
+    assert snapshot["lines"] == [
+        {"seq": 3, "line": "line 3"},
+        {"seq": 4, "line": "line 4"},
+        {"seq": 5, "line": "line 5"},
+    ]
+    assert snapshot["epoch"] == recent.epoch
+    # A new process numbers from one again, and says so with a different epoch.
+    assert RecentLog().epoch != recent.epoch
+    json.dumps(snapshot)  # it rides the snapshot, so it has to be JSON
 
 
 # --- what the WebSocket layer will serialise -------------------------------

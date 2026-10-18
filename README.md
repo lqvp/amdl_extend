@@ -151,7 +151,7 @@ crash loop.
 ## Development
 
 ```bash
-cd hub && uv run pytest -v          # 655 tests
+cd hub && uv run pytest -v          # 765 tests
 ```
 
 `hub/` is the only code here we own. `AppleMusicDecrypt/` and `wrapper/` are upstream projects

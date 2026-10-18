@@ -33,14 +33,16 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
-from hub.api.jobs import JOBS_CHANNEL, ExpansionRegistry, LeafRegistry
+from hub import api
+from hub.api.jobs import ExpansionRegistry, LeafRegistry, publish_log
+from hub.auth import SessionStore
 from hub.config import Settings, load_settings
 from hub.events import EventBroker
 from hub.jobs import JobStore, Progress
 from hub.ripper_host import RipperHost
 from hub.scheduler import Scheduler, run_one, run_pool, scheduler_loop
 from hub.state import HubState
-from hub.wrapper_supervisor import WrapperSupervisor
+from hub.wrapper_supervisor import SupervisorError, WrapperSupervisor
 
 
 def download_root_from_format(value: str) -> Path:
@@ -134,15 +136,10 @@ def create_app(
     working directory for its whole life and a relative one would resolve against
     `AppleMusicDecrypt/` and fail silently for reads.
     """
-    from fastapi import FastAPI as _FastAPI
-
-    from hub import api
-    from hub.api.wrapper import wrapper_state  # noqa: F401 - imported for its side effects
-
     resolved = settings if settings is not None else load_settings()
 
     @contextlib.asynccontextmanager
-    async def lifespan(app: _FastAPI):
+    async def lifespan(app: FastAPI):
         state = app.state
         # Captured here, not at build time: `create_app` is called before there is a loop in
         # some contexts (a sync test, a REPL), and the progress callback needs the loop that
@@ -157,13 +154,11 @@ def create_app(
 
                 # 1. The wrapper. A failure is recorded, not raised: a fresh install has no Apple
                 #    account, and the login page is how that gets fixed.
-                from hub.wrapper_supervisor import SupervisorError
-
                 try:
                     await state.supervisor.start()
                 except SupervisorError as exc:
                     state.startup_error = str(exc)
-                    _log(state, f"the wrapper did not start: {exc}")
+                    publish_log(state, f"the wrapper did not start: {exc}")
                 else:
                     state.startup_error = None
 
@@ -217,8 +212,7 @@ def create_app(
     # the only constructor -- what changed is that the interface sits in one file and
     # `slots=True` keeps it from growing an undeclared attribute. The invariant
     # comments live on the fields now; what stays here is the wiring.
-    from hub.auth import SessionStore
-
+    #
     # The host is built here rather than in the lifespan, because `on_progress` has to
     # be handed over at construction: the seam is one-per-process and `start()` may
     # never be retried, so an attribute set later would arrive too late for the rip it
@@ -269,7 +263,9 @@ def create_app(
                 base_dir=resolved.wrapper_base_dir,
                 host=resolved.wrapper_host,
                 port=resolved.wrapper_port,
-                log_sink=lambda line: _log(state, line),
+                # The supervisor scrubs every line before it reaches the sink (R6), which is
+                # why its output can be shown at all; see `publish_log`.
+                log_sink=lambda line: publish_log(state, line),
             )
         ),
         templates=api.build_templates(),
@@ -293,20 +289,6 @@ def _jobs_counts(state: HubState) -> dict[str, int]:
     parts if a status is ever added to the store's vocabulary without being added here.
     """
     return state.jobs.counts()
-
-
-def _log(state: HubState, line: str) -> None:
-    """The wrapper's own output, onto the stream and onto stderr.
-
-    **The supervisor scrubs this before it gets here** (R6: credentials and tokens are
-    replaced before the line leaves the child's pipe), which is why the hub can display a
-    child's log lines at all. It is published on the jobs channel so one WebSocket carries
-    the queue and the log together, in the order they happened.
-    """
-    state.broker.publish(JOBS_CHANNEL, {"kind": "log", "line": line})
-    import sys
-
-    print(line, file=sys.stderr, flush=True)
 
 
 def main() -> None:

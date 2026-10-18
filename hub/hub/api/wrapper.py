@@ -213,7 +213,7 @@ async def login(request: Request, body: _LoginBody | None = None) -> Response:
     except SupervisorError as exc:
         # Kept, not raised: if the account needed no 2FA this is a success the supervisor
         # has no return value for, and the restart decides.
-        return await _finish_login(state, challenge=None, login_error=exc)
+        return await _finish_login(state, login_error=exc)
 
     state.pending_2fa = challenge
     return {
@@ -268,10 +268,10 @@ async def submit_2fa(request: Request, body: _TwoFaBody | None = None) -> Respon
         return fail(400, str(exc), problem="rejected")
 
     state.pending_2fa = None
-    return await _finish_login(state, challenge=None, login_error=None)
+    return await _finish_login(state, login_error=None)
 
 
-async def _finish_login(state, *, challenge, login_error) -> Response:
+async def _finish_login(state, *, login_error) -> Response:
     """Restart the wrapper, resume what was waiting, and report what is true.
 
     The order is the whole point of this function. `stop()` then `start()`, because the

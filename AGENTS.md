@@ -108,7 +108,7 @@ copy that the build ignores, so an edit made there cannot reach the image and
 cp .env.example .env && $EDITOR .env        # AMD_PASSWORD is required
 docker compose up -d --build
 docker compose logs -f amd-hub
-cd hub && uv run pytest -v                   # 655 tests
+cd hub && uv run pytest -v                   # 765 tests
 ```
 
 ### Verifying changes

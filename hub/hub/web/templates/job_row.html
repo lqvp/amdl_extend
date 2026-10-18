@@ -72,9 +72,9 @@
       </ul>
     {% elif job.error %}
       <span class="error-text">{{ job.error }}</span>
-    {% elif job.parent_url %}
-      <a class="muted small" href="{{ job.parent_url }}" rel="noreferrer noopener">source</a>
     {% endif %}
+    {#- No per-row link to the source: every row of a batch shares it, and the group header
+        above the rows carries it once. `detailCell` in `app.js` agrees. -#}
   </td>
   <td class="num muted">{{ job.id }}</td>
   <td class="actions">

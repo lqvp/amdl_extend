@@ -1766,6 +1766,9 @@ async def test_run_song_reports_progress_to_a_real_callback(started_host):
     first = seen[0]
     assert isinstance(first, Progress)
     assert first.bytes_done > 0
+    # And it says whose bytes they are. With a pool of rips sampling at once, a reading that
+    # did not name its track could only be routed to whichever job the scheduler set last.
+    assert first.adam_id == LEAF.adam_id
 
 
 async def test_a_rip_that_finishes_first_still_reports_nothing_and_does_not_hang(

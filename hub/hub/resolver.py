@@ -107,6 +107,7 @@ repeat would be silent, and it is routinely filtered in production.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, Protocol
 from urllib.parse import urlparse
@@ -133,6 +134,15 @@ PLAYLIST_TRACK_PAGE_SIZE = 100
 # that ignores `offset` while permuting its output on every call satisfies none of them
 # while still going for ever. The re-review measured that at 41 pages and still going.
 MAX_CONTAINER_PAGES = 1000
+
+# How many of an artist's albums are expanded at once. Each album is at least one catalogue
+# round-trip, so a discography walked one album at a time costs the sum of them -- minutes
+# for a long one, spent inside the `POST /api/jobs` the user is waiting on, and again inside
+# the scheduler's re-expansion after a restart. Upstream's own `rip_artist` fans out every
+# album at once (`safely_create_task` per album, under `WebAPI.request_lock`'s 256), so
+# overlap is not a new load shape for the client; eight bounds it to something a home
+# connection sends without a burst of hundreds.
+ARTIST_ALBUM_CONCURRENCY = 8
 
 # `URLType`'s five values, as literals. `AppleMusicURL` carries `type` as a plain
 # `str`, and `hub.jobs.PARENT_TYPES` is already a closed set of the same five, so
@@ -659,7 +669,7 @@ async def _playlist_leaves(
 async def _artist_leaves(
     parsed: Any, *, codec: str, language: str, web_api: WebAPI
 ) -> list[Leaf]:
-    """An artist: every album it lists, each expanded in turn.
+    """An artist: every album it lists, each expanded through the same path as a pasted URL.
 
     Each album URL is parsed and dispatched through the same path as a URL the user
     pasted, so a storefront that differs per release is queried where it exists rather
@@ -676,13 +686,21 @@ async def _artist_leaves(
 
     An entry that is not an Apple Music URL is a `ResolveError` rather than a skip. A
     skip would drop those tracks from the queue with nothing to say so, which is the
-    outcome this module is arranged to avoid everywhere else.
+    outcome this module is arranged to avoid everywhere else. **Every entry is parsed
+    before any album is fetched**, so an unreadable listing costs no requests at all.
+
+    **The albums are expanded `ARTIST_ALBUM_CONCURRENCY` at a time**, because one at a time
+    the walk costs the sum of every album's round-trips. The leaves still come back in
+    listing order, album by album: `gather` returns results by position, not by finish
+    time, so the concatenation is exactly the sequential walk's. The first failure is the
+    expansion's failure, as it was when the walk stopped at it -- and the lookups still in
+    flight are cancelled rather than left to finish for a result nobody will read.
     """
     album_urls = await web_api.get_albums_from_artist(
         parsed.id, parsed.storefront, language
     )
 
-    leaves: list[Leaf] = []
+    albums: list[Any] = []
     for raw in album_urls or ():
         album = parse_apple_music_url(raw)
         if album is None:
@@ -691,8 +709,25 @@ async def _artist_leaves(
                 f"Refusing the whole expansion: skipping it would report an artist as "
                 f"expanded while the tracks under it were never queued."
             )
-        leaves.extend(await _expand(album, codec=codec, language=language, web_api=web_api))
-    return leaves
+        albums.append(album)
+
+    gate = asyncio.Semaphore(ARTIST_ALBUM_CONCURRENCY)
+
+    async def expand_album(album: Any) -> list[Leaf]:
+        async with gate:
+            return await _expand(album, codec=codec, language=language, web_api=web_api)
+
+    walks = [asyncio.ensure_future(expand_album(album)) for album in albums]
+    try:
+        per_album = await asyncio.gather(*walks)
+    except BaseException:
+        # `gather` raises the first failure and leaves the siblings running; they are
+        # cancelled and awaited here so none outlives the expansion it belonged to.
+        for walk in walks:
+            walk.cancel()
+        await asyncio.gather(*walks, return_exceptions=True)
+        raise
+    return [leaf for leaves in per_album for leaf in leaves]
 
 
 async def _expand(parsed: Any, *, codec: str, language: str, web_api: WebAPI) -> list[Leaf]:

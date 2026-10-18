@@ -226,7 +226,7 @@ input[type="checkbox"] { width: auto; }
   gap: var(--sp-4);
   margin-bottom: var(--sp-4);
 }
-.section-heading h2 { margin-bottom: var(--sp-1); }
+.section-heading h1, .section-heading h2 { margin-bottom: var(--sp-1); }
 .section-heading p { margin: 0; }
 .eyebrow {
   padding: 0.18rem 0.55rem;
@@ -246,7 +246,17 @@ textarea#urls { min-height: 7rem; resize: vertical; line-height: 1.55; }
   align-items: end;
 }
 .enqueue-options .field label { margin: 0 0 var(--sp-1); }
-.optional { color: var(--muted); font-weight: 400; }
+/* A tag beside the label rather than more words in it: `Metadata language optional` read as
+ * one phrase, with the qualifier in the label's own colour and weight. */
+.optional {
+  margin-left: 0.3rem;
+  padding: 0 0.4rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 400;
+}
 label.check-option {
   display: flex;
   align-items: center;
@@ -280,6 +290,7 @@ button {
   border-radius: var(--radius-sm);
   font: inherit;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
   transition: filter 0.12s ease, transform 0.12s ease;
 }
@@ -301,34 +312,6 @@ button.link:hover { color: var(--text); }
  * all it asks for. */
 .row input:not([type="checkbox"]), .row select { width: auto; min-width: 8rem; }
 
-/* Below ~44rem the enqueue line runs out of room, and a flex row that runs out leaves
- * whatever still fits at the end of one line -- which is how `Language` came to sit on its
- * own with its input beneath it, naming a control that is not next to it. A grid keeps a
- * label in the column *beside* its control, so wrapping moves the pair together instead of
- * splitting it. Only the enqueue row: `.row.bulk` is a list of independent controls with
- * no label to keep company, and stacking it would break the re-queue form away from its
- * button. */
-@media (max-width: 44rem) {
-  .bar { gap: var(--sp-3); padding: var(--sp-2) var(--sp-4); }
-  .bar nav a { padding: 0.2rem 0.65rem; }
-  main { padding: var(--sp-4); }
-  .card { padding: var(--sp-4); }
-  .enqueue-options, .queue-tools, .library-tools { grid-template-columns: minmax(0, 1fr); }
-  .queue-tools .visible-count { justify-self: start; }
-  .row:not(.bulk) {
-    display: grid;
-    grid-template-columns: max-content minmax(0, 1fr);
-    align-items: center;
-    column-gap: var(--sp-3);
-    row-gap: var(--sp-2);
-  }
-  .row:not(.bulk) input:not([type="checkbox"]),
-  .row:not(.bulk) select { width: 100%; min-width: 0; }
-  /* The checkbox is a control, not a caption, so it joins the control column rather than
-   * sitting under `Language` where a reader scanning that column would not look for it. */
-  .row:not(.bulk) > label.inline { grid-column: 2; }
-}
-
 .muted { color: var(--muted); }
 .small { font-size: var(--text-sm); }
 .error, .error-text { color: var(--bad); }
@@ -337,6 +320,11 @@ button:disabled { cursor: wait; opacity: 0.68; }
 .warn { color: var(--warn); }
 
 code { font-family: var(--font-mono); font-size: 0.88em; }
+
+/* Links take the ink hue, which clears 4.5:1 on every ground in both themes; a classed link
+ * (`.muted`, the brand, the nav) still sets its own colour, because a class outranks this. */
+a { color: var(--accent-ink); text-underline-offset: 0.15em; }
+a:hover { text-decoration-thickness: 2px; }
 
 pre#log {
   margin: 0;
@@ -373,8 +361,10 @@ th {
   color: var(--muted);
   padding-block: 0.55rem;
 }
-/* The title is what the operator scans for; everything else in the row is state around it. */
-td.title { font-weight: 600; }
+/* The title is what the operator scans for; everything else in the row is state around it.
+ * It gets a floor, because an automatic table hands width to the widest cell -- a long error
+ * in the detail column -- and squeezed the titles until `トラック 10` broke across two lines. */
+td.title { font-weight: 600; min-width: 12rem; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.actions { white-space: nowrap; }
 td.actions button { padding: 0.2rem 0.5rem; min-height: 1.75rem; font-size: var(--text-xs); }
@@ -534,7 +524,7 @@ button.count[aria-pressed="true"] .count-n { color: inherit; }
 
 .queue-tools {
   display: grid;
-  grid-template-columns: minmax(14rem, 1fr) minmax(9rem, 12rem) auto auto;
+  grid-template-columns: minmax(12rem, 1fr) minmax(9rem, 12rem) auto auto;
   gap: var(--sp-3);
   align-items: end;
   margin: 0 0 var(--sp-4);
@@ -554,7 +544,20 @@ button.count[aria-pressed="true"] .count-n { color: inherit; }
   margin-bottom: var(--sp-3);
 }
 .library-tools label { display: grid; gap: var(--sp-1); margin: 0; }
-#library-result-count { align-self: center; white-space: nowrap; }
+.library-tools label > span { color: var(--muted); font-size: var(--text-xs); }
+/* The shortcut, named where the field is: `/` focuses the page's search (see `app.js`). */
+kbd {
+  padding: 0 0.3rem;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+/* On the field's line, not centred on the label-and-field pair. */
+#library-result-count { align-self: end; padding-bottom: 0.55rem; white-space: nowrap; }
 .duplicate-report {
   margin: var(--sp-3) 0;
   padding: var(--sp-3);
@@ -576,6 +579,7 @@ button.secondary {
   border: 1px solid var(--line);
 }
 .visible-count {
+  grid-column: 1 / -1;
   align-self: center;
   justify-self: end;
   color: var(--muted);
@@ -624,6 +628,12 @@ button.danger:not(.link):hover { filter: brightness(0.95); }
   color: var(--text);
   border: 1px solid var(--accent-ink);
 }
+/* The same pressed look for the other view toggle, so "this is on" reads one way. */
+[data-action="queue-toggle-groups"][aria-pressed="true"] {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--accent-ink);
+}
 
 /* The two status cards are <details>, so they are closed when there is nothing to say.
  * A closed card is one line; the marker is styled rather than removed so it still reads
@@ -643,6 +653,10 @@ details.card > summary::before {
 }
 details.card[open] > summary::before { content: "▾"; }
 details.card > summary h1, details.card > summary h2 { margin: 0; }
+/* The closed card's one line of state: `ok` when there is nothing to open it for. */
+.summary-state { margin-left: var(--sp-2); color: var(--muted); font-size: var(--text-sm); }
+.summary-state.ok { color: var(--ok); }
+.summary-state.bad { color: var(--bad); font-weight: 600; }
 details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--accent-ink); }
 
 /* The stream state is the page's one live indicator, so it is the page's one dot. It is
@@ -692,18 +706,6 @@ details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--
   .bar nav a { transition: none; }
 }
 
-/* Group headers carry the batch identity and its two bulk operations. Muted so the
-   rows read first; the buttons are right-aligned so they never sit under the URL. */
-.group-header td {
-  padding: 0.5rem 0.75rem;
-  background: var(--panel, #f4f4f5);
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-.group-header .group-url { overflow-wrap: anywhere; }
-.group-header .group-actions { display: inline-flex; gap: 0.5rem; flex: none; }
 
 /* Export links read as text tools, not actions. */
 .export-tools { gap: 0.75rem; align-items: baseline; }
@@ -711,4 +713,147 @@ details.card > summary:hover h1, details.card > summary:hover h2 { color: var(--
 /* Health banner: a quiet frame so the wrapper/library messages read as the page's
    own state, not as toast spam. The empty mount div is invisible by default. */
 #health-banner:empty { display: none; }
-#health-banner { margin: 0 0 0.5rem; }
+/* A band across the top of the page, on the same ground as the header so `--bad` keeps the
+ * contrast it was mixed for, with a rule in `--bad` to say what kind of band it is. */
+#health-banner {
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+  box-shadow: inset 4px 0 0 var(--bad);
+}
+.health-banner-messages { max-width: 68rem; margin: 0 auto; padding: var(--sp-2) var(--sp-5); }
+.health-banner-messages p { margin: var(--sp-1) 0; font-weight: 600; }
+
+/* -- group headers -----------------------------------------------------------------
+ *
+ * One batch per header: what it is, what it is called, how its rows stand, and the two
+ * operations that act on all of them. The cell stays a table cell -- `colspan` only works on
+ * one -- and the layout lives on the `.group-bar` inside it. The ground is `--surface-2`, so
+ * a header reads as a band in either theme; it used to be a hard-coded light grey that, in
+ * the dark theme, was a white slab with near-white text on it.
+ */
+#queue-body tr.group-header > td {
+  padding: 0.4rem 0.55rem;
+  background: var(--surface-2);
+}
+.group-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  min-width: 0;
+}
+button.group-toggle {
+  padding: 0 0.35rem;
+  min-height: 1.6rem;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  font-size: var(--text-xs);
+}
+button.group-toggle:hover { color: var(--text); border-color: var(--line); filter: none; }
+.group-kind {
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--accent-ink);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.group-url {
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.group-url:hover { text-decoration: underline; }
+.group-counts {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.group-actions { display: inline-flex; gap: var(--sp-2); margin-left: auto; }
+/* Small and quiet, like the row actions: a header's buttons act on many rows, but they are
+ * offered on every batch, and a column of full-size pastel buttons is what made the old
+ * headers read as a wall of controls. */
+.group-actions button {
+  padding: 0.1rem 0.55rem;
+  min-height: 1.75rem;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  font-size: var(--text-xs);
+}
+.group-actions button:hover { border-color: var(--accent-ink); filter: none; }
+
+/* -- the overview, the toolbar, the form's counter and the log's tools ------------------ */
+
+.queue-overview {
+  margin: 0 0 var(--sp-3);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The toolbar is three groups -- view, re-queue, remove -- and the gap between groups is
+ * wider than the gap inside one, so the grouping reads without a rule drawn between them.
+ * The destructive pair goes to the far end on a wide screen and to its own line on a phone. */
+.row.bulk { gap: var(--sp-3) var(--sp-4); }
+.tool-group { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--sp-2); }
+.tool-group-danger { margin-left: auto; }
+
+.urls-count { margin-left: var(--sp-2); color: var(--text); font-weight: 600; }
+.urls-count.warn { color: var(--warn); }
+
+.log-heading { align-items: center; margin-bottom: var(--sp-3); }
+.log-heading h2 { margin: 0; }
+.log-tools { display: inline-flex; gap: var(--sp-2); }
+.log-tools button { padding: 0.15rem 0.6rem; min-height: 1.9rem; font-size: var(--text-xs); }
+
+/* Below ~44rem the enqueue line runs out of room, and a flex row that runs out leaves
+ * whatever still fits at the end of one line -- which is how `Language` came to sit on its
+ * own with its input beneath it, naming a control that is not next to it. A grid keeps a
+ * label in the column *beside* its control, so wrapping moves the pair together instead of
+ * splitting it. Only the enqueue row: `.row.bulk` is a list of independent controls with
+ * no label to keep company, and stacking it would break the re-queue form away from its
+ * button.
+ *
+ * **This block is the last thing in the file, and has to be.** A media query adds no
+ * specificity, so a base rule that comes *after* it wins on a phone as well: it sat in the
+ * middle of the file, `.queue-tools` and `.library-tools` were declared further down, and
+ * their one-column phone layout never applied -- the status filter ran off the card's edge. */
+@media (max-width: 44rem) {
+  .bar { gap: var(--sp-3); padding: var(--sp-2) var(--sp-4); }
+  .bar nav a { padding: 0.2rem 0.65rem; }
+  main { padding: var(--sp-4); }
+  .card { padding: var(--sp-4); }
+  .enqueue-options, .queue-tools, .library-tools { grid-template-columns: minmax(0, 1fr); }
+  .queue-tools .visible-count { justify-self: start; }
+  .row:not(.bulk) {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: center;
+    column-gap: var(--sp-3);
+    row-gap: var(--sp-2);
+  }
+  .row:not(.bulk) input:not([type="checkbox"]),
+  .row:not(.bulk) select { width: 100%; min-width: 0; }
+  /* The checkbox is a control, not a caption, so it joins the control column rather than
+   * sitting under `Language` where a reader scanning that column would not look for it. */
+  .row:not(.bulk) > label.inline { grid-column: 2; }
+  /* The headers' buttons drop under the name rather than squeezing it to a column of
+   * single letters, and the destructive pair leaves the far end it had on a wide screen. */
+  .group-actions { margin-left: 0; }
+  .tool-group-danger { margin-left: 0; }
+  /* The table scrolls sideways here, and a header spans all of it -- so its actions sat at
+   * the far end of a row wider than the phone. The bar is held to the scroll area's left
+   * edge and to the width a phone shows (the page and card gutters, ~5.5rem, taken off),
+   * so it wraps where it can be read and its buttons stay in reach. */
+  .group-bar {
+    position: sticky;
+    left: 0;
+    max-width: calc(100vw - 5.5rem);
+  }
+}

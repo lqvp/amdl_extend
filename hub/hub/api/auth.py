@@ -20,7 +20,15 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
 from hub import auth
-from hub.api import fail, guarded, is_authenticated, require_session, session_generation
+from hub.api import (
+    SESSION_COOKIE,
+    client_ip,
+    fail,
+    guarded,
+    is_authenticated,
+    require_session,
+    session_generation,
+)
 
 # The one message. Re-exported under this name so a reader of this file does not have to
 # open `auth.py` to learn that the other answers are not coming from here.
@@ -72,18 +80,12 @@ async def _authenticate(request: Request, password: object) -> bool:
     and therefore no slower for a near-miss than for a wild one.
     """
     store = request.app.state.sessions
-    ip = _ip(request)
+    ip = client_ip(request)
     store.check_rate_limit(ip)
     if not auth.verify_password(password, request.app.state.settings.password):
         return False
     store.forget(ip)
     return True
-
-
-def _ip(request: Request) -> str:
-    from hub.api import client_ip
-
-    return client_ip(request)
 
 
 def set_session_cookie(response: Response, request: Request) -> None:
@@ -97,8 +99,6 @@ def set_session_cookie(response: Response, request: Request) -> None:
     The token carries the app's **current** generation, so it is live now and dead the moment
     anyone bumps the counter.
     """
-    from hub.api import SESSION_COOKIE, session_generation
-
     response.set_cookie(
         SESSION_COOKIE,
         request.app.state.sessions.issue(generation=session_generation(request)),
@@ -122,8 +122,6 @@ def _clear_session(request: Request, response: Response) -> Response:
     logout handlers rather than here -- so that both the JSON route and the page route
     retire it exactly once, in the place that owns the decision.
     """
-    from hub.api import SESSION_COOKIE
-
     response.delete_cookie(
         SESSION_COOKIE,
         path="/",

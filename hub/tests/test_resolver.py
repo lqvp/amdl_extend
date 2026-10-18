@@ -43,6 +43,7 @@ parser that broke one of them would otherwise be found by a user.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 from pathlib import Path
 
@@ -1500,6 +1501,128 @@ async def test_each_album_of_an_artist_is_queried_in_its_own_storefront():
     assert [leaf.storefront for leaf in leaves] == ["jp", "jp", "us"]
 
 
+class _SlowAlbumWebAPI(FakeWebAPI):
+    """`FakeWebAPI` whose album lookups take time, each as long as the test says.
+
+    `delays` lets a test make the lookups *finish* in the reverse of the order the artist
+    lists them, which is the case that tells "results by position" apart from "results by
+    completion". `in_flight` / `peak` count overlapping lookups, and `cancelled` records the
+    ones a failure stopped.
+    """
+
+    def __init__(
+        self, *, delays: dict[str, float], fail: frozenset[str] = frozenset(), **kwargs
+    ) -> None:
+        super().__init__(**kwargs)
+        self._delays = delays
+        self._fail = fail
+        self.in_flight = 0
+        self.peak = 0
+        self.cancelled: list[str] = []
+
+    async def get_album_info(self, album_id: str, storefront: str, lang: str):
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(self._delays.get(album_id, 0.0))
+            if album_id in self._fail:
+                raise RuntimeError(f"the lookup for album {album_id} failed")
+            return await super().get_album_info(album_id, storefront, lang)
+        except asyncio.CancelledError:
+            self.cancelled.append(album_id)
+            raise
+        finally:
+            self.in_flight -= 1
+
+
+def _discography(count: int) -> tuple[dict, dict, list[str]]:
+    """`count` one-track albums for one artist: `(albums, tracks, album_urls)`."""
+    albums: dict = {}
+    tracks: dict = {}
+    urls: list[str] = []
+    for n in range(count):
+        album_id = str(1688540000 + n)
+        meta, by_id = album_case(
+            album_id, name=f"album {n}", artist_name="Eve",
+            tracks=[track_payload(f"t{n}", name=f"track {n}")],
+        )
+        albums[album_id] = meta
+        tracks.update(by_id)
+        urls.append(f"https://music.apple.com/jp/album/a{n}/{album_id}")
+    return albums, tracks, urls
+
+
+async def test_an_artists_albums_are_walked_concurrently_and_returned_in_listing_order(
+    monkeypatch,
+):
+    """Overlapping lookups, a ceiling on them, and the sequential walk's order regardless.
+
+    One album at a time, a discography costs the sum of its round-trips, inside the request
+    the user is waiting on. The order cannot be allowed to follow completion, though: each
+    album's tracks are still in the album's own order, and an artist's leaves are those
+    albums concatenated in listing order -- the first-listed album finishing *last* here is
+    what would expose a walk that appended as lookups returned.
+    """
+    count = 5
+    albums, tracks, urls = _discography(count)
+    delays = {str(1688540000 + n): 0.02 * (count - n) for n in range(count)}
+    fake = _SlowAlbumWebAPI(
+        delays=delays, albums=albums, tracks=tracks, artist_albums={"1688539273": urls}
+    )
+    monkeypatch.setattr(resolver, "ARTIST_ALBUM_CONCURRENCY", 3)
+
+    leaves = await expand(ARTIST_URL, codec="alac", language="ja", web_api=fake)
+
+    assert [leaf.adam_id for leaf in leaves] == [f"t{n}" for n in range(count)]
+    assert [leaf.album_name for leaf in leaves] == [f"album {n}" for n in range(count)]
+    assert fake.peak == 3, (
+        f"{fake.peak} album lookups overlapped; the walk is bounded at 3 here, and 1 means "
+        f"it is still walking one album at a time"
+    )
+
+
+async def test_one_failed_album_fails_the_artist_and_stops_the_walk():
+    """The first failure is the expansion's, as it was when the walk stopped at it.
+
+    And the siblings still in flight are cancelled rather than left running: a walk that
+    raised while its lookups carried on would be spending requests on an expansion that has
+    already been refused, with nobody left to read the answer.
+    """
+    albums, tracks, urls = _discography(3)
+    fake = _SlowAlbumWebAPI(
+        delays={"1688540000": 5.0, "1688540001": 0.0, "1688540002": 5.0},
+        fail=frozenset({"1688540001"}),
+        albums=albums, tracks=tracks, artist_albums={"1688539273": urls},
+    )
+
+    with pytest.raises(RuntimeError, match="1688540001"):
+        await asyncio.wait_for(
+            expand(ARTIST_URL, codec="alac", language="ja", web_api=fake), timeout=2.0
+        )
+
+    assert sorted(fake.cancelled) == ["1688540000", "1688540002"]
+    assert fake.in_flight == 0
+
+
+async def test_an_unreadable_album_entry_is_refused_before_any_album_is_fetched():
+    """A listing the hub cannot read is refused whole, and refused first.
+
+    The entries are parsed before the walk starts, so a bad one costs no request at all --
+    rather than the requests of every album listed before it, which is what a walk that
+    parsed as it went spent before reaching the same refusal.
+    """
+    albums, tracks, urls = _discography(2)
+    fake = FakeWebAPI(
+        albums=albums, tracks=tracks,
+        artist_albums={"1688539273": [*urls, "https://example.invalid/not-apple"]},
+    )
+
+    with pytest.raises(ResolveError, match="not an Apple Music URL"):
+        await expand(ARTIST_URL, codec="alac", language="ja", web_api=fake)
+
+    assert fake.method_names() == ["artist_albums"]
+
+
 @pytest.mark.parametrize(
     "host_url",
     [
@@ -1665,12 +1788,13 @@ def test_the_resolver_does_not_import_the_modules_it_was_told_not_to():
     for them.
 
     The allowlist is exact rather than a denylist of the three, so that a new *hub*
-    import has to be added here on purpose. Two of the seven are hub's own -- `vendor`
+    import has to be added here on purpose. Two of the eight are hub's own -- `vendor`
     is the route to upstream's parser and `jobs` is what this returns -- and the rest
     are stdlib and loguru: `__future__` and the typing generics are inert,
     `urllib.parse` is the host extraction (the only thing a module whose job is reading
-    Apple's URLs should be reaching for), and `loguru` is the one warning this module
-    emits, for the page loop's "this may be truncated" exit.
+    Apple's URLs should be reaching for), `asyncio` bounds the artist walk's concurrency,
+    and `loguru` is the one warning this module emits, for the page loop's "this may be
+    truncated" exit.
     """
     tree = ast.parse(RESOLVER_SOURCE.read_text(encoding="utf-8"))
     imported: set[str] = set()
@@ -1682,7 +1806,7 @@ def test_the_resolver_does_not_import_the_modules_it_was_told_not_to():
             imported.update(alias.name for alias in node.names)
 
     assert imported <= {
-        "__future__", "collections.abc", "typing", "urllib.parse", "loguru",
+        "__future__", "asyncio", "collections.abc", "typing", "urllib.parse", "loguru",
         "hub.jobs", "hub.vendor",
     }, imported
 

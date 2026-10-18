@@ -50,11 +50,6 @@ AUDIO_EXTS: frozenset[str] = frozenset(
     }
 )
 
-# Top-level directories that group by codec rather than by artist, so the grandparent
-# check in `library_scan._artist` must see past them. Stored casefolded because that check
-# compares them against `normalize()`d path components.
-FORMAT_BUCKETS: frozenset[str] = frozenset({"alac", "atmos"})
-
 # `songNameFormat` defaults to `{disk}-{tracknum:02d} {title}` (2 numeric groups) and
 # `playlistSongNameFormat` to `{playlistSongIndex:02d}. {artist} - {title}` (1), so 2 is
 # enough for the real library and a third group is left alone: "1-01-02 T" -> "02 T".
